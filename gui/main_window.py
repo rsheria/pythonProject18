@@ -404,7 +404,10 @@ class ForumBotGUI(QMainWindow):
         try:
             # Update the config
             self.config['upload_hosts'] = hosts_list
-            
+
+            # Update the active_upload_hosts list
+            self.active_upload_hosts = list(hosts_list)
+
             # Update the active_upload_hosts list
             if hasattr(self, 'bot') and self.bot:
                 self.bot.upload_hosts = list(hosts_list)  # Make a copy to avoid reference issues
@@ -414,7 +417,12 @@ class ForumBotGUI(QMainWindow):
                 if hasattr(self.bot, 'uploader') and self.bot.uploader:
                     self.bot.uploader.upload_hosts = list(hosts_list)
                     logging.info(f"🔄 Updated upload hosts in bot.uploader: {hosts_list}")
-            
+
+            # Persist to .env so next launch uses the same hosts
+            dotenv_path = find_dotenv()
+            if dotenv_path:
+                set_key(dotenv_path, 'UPLOAD_HOSTS', ','.join(hosts_list))
+
             logging.info(f"✅ Upload hosts successfully updated: {hosts_list}")
             
         except Exception as e:

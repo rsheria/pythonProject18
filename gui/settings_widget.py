@@ -141,6 +141,7 @@ class SettingsWidget(QWidget):
         upl_layout = QVBoxLayout(upl_group)
         self.hosts_list = QListWidget()
         self.hosts_list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.hosts_list.itemChanged.connect(self._on_host_item_changed)
         upl_layout.addWidget(self.hosts_list)
 
         add_row = QHBoxLayout()
@@ -430,7 +431,14 @@ class SettingsWidget(QWidget):
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked)
             self.hosts_list.addItem(item)
-
+    def _on_host_item_changed(self, _):
+        """Emit hosts_updated when a host checkbox is toggled."""
+        current_hosts = [
+            self.hosts_list.item(i).text().strip()
+            for i in range(self.hosts_list.count())
+            if self.hosts_list.item(i).checkState() == Qt.Checked
+        ]
+        self.hosts_updated.emit(current_hosts)
     def delete_selected_host(self):
         """Delete the selected host from the list"""
         row = self.hosts_list.currentRow()
@@ -694,8 +702,9 @@ class SettingsWidget(QWidget):
             new_download_dir = self.download_edit.text().strip()
             new_hosts = []
             for i in range(self.hosts_list.count()):
-                host = self.hosts_list.item(i).text().strip()
-                if host:
+                item = self.hosts_list.item(i)
+                host = item.text().strip()
+                if host and item.checkState() == Qt.Checked:
                     new_hosts.append(host)
             
             new_mega = self.mega_cb.isChecked()
@@ -767,7 +776,10 @@ class SettingsWidget(QWidget):
                 for key, value in new_settings.items():
                     self.config[key] = value
                 logging.info("✅ Settings saved to config")
-            
+
+            # Emit updated hosts list so the main window can react immediately
+            self.hosts_updated.emit(new_hosts)
+
             # Show success message
             QMessageBox.information(self, "Success", "Settings saved successfully!")
             
