@@ -2429,7 +2429,8 @@ class ForumBotGUI(QMainWindow):
 
                 # Clear settings UI since no user is logged in
                 if hasattr(self, 'settings_tab'):
-                    self.settings_tab.load_settings()
+                    # Clear settings UI since no user is logged in
+                    self.settings_tab.load_settings(initial=True)
 
                 logging.info(" Logout completed successfully")
             except Exception as e:

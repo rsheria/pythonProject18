@@ -32,7 +32,10 @@ class SettingsWidget(QWidget):
         # Load user-specific settings or use config defaults
         if self.user_manager.get_current_user():
             # Load date filters from user settings
-            date_filters = self.user_manager.get_user_setting('date_filters', [{'type': 'relative', 'value': 3, 'unit': 'days'}])
+            date_filters = self.user_manager.get_user_setting(
+                'date_filters',
+                [{'type': 'relative', 'value': 3, 'unit': 'days'}]
+            )
             # Handle case where date_filters might be stored as string (JSON)
             if isinstance(date_filters, str):
                 try:
@@ -55,8 +58,8 @@ class SettingsWidget(QWidget):
         if hasattr(self, 'date_filters_list'):
             self._load_date_filters_into_list()
         
-        # Load all settings after UI is initialized
-        self.load_settings()
+        # Load generic settings without user-specific data until login
+        self.load_settings(initial=True)
 
     def init_ui(self):
         # === الحاوية الرئيسية ==================================================
@@ -504,18 +507,24 @@ class SettingsWidget(QWidget):
             logging.error(f"Error resetting settings: {e}", exc_info=True)
             QMessageBox.critical(self, "Error", f"Failed to reset settings: {e}")
 
-    def load_settings(self):
-        """Load settings from user manager and populate UI elements."""
+    def load_settings(self, initial: bool = False):
+        """Load settings from user manager and populate UI elements.
+
+        Args:
+            initial: If True, ignore any remembered user and treat as no user
+                logged in. This keeps user-specific fields blank until the user
+                explicitly logs in.
+        """
         try:
             # Check if UI elements still exist
             if not hasattr(self, 'download_edit') or not self.download_edit:
                 logging.warning("UI elements not initialized yet, skipping settings load")
                 return
                 
-            # If user is logged in, load from user settings.
-            # Otherwise use config for most values but leave user-specific
-            # sections like upload hosts blank.
-            if self.user_manager.get_current_user():
+            # If user is logged in and this isn't an initial load, use user
+            # settings. Otherwise use config for most values but leave
+            # user-specific sections like upload hosts blank.
+            if self.user_manager.get_current_user() and not initial:
                 settings_source = self.user_manager.get_all_user_settings()
                 source_name = f"user '{self.user_manager.get_current_user()}'"
             else:
@@ -530,7 +539,7 @@ class SettingsWidget(QWidget):
                 
                 # Upload Hosts
                 if hasattr(self, 'hosts_list') and self.hosts_list:
-                    if self.user_manager.get_current_user():
+                    if self.user_manager.get_current_user() and not initial:
                         upload_hosts = settings_source.get('upload_hosts', [])
                     else:
                         upload_hosts = []  # hide until user logs in
