@@ -21,6 +21,8 @@ class SettingsWidget(QWidget):
     download_directory_changed = pyqtSignal(str)
     # Signal emitted when hosts list is updated
     hosts_updated = pyqtSignal(list)
+    # Signal emitted when MegaUpload state changes
+    mega_state_changed = pyqtSignal(bool)
     
     def __init__(self, config):
         super().__init__()
@@ -188,6 +190,7 @@ class SettingsWidget(QWidget):
         # — Mega Upload Toggle —
         self.mega_cb = QCheckBox("Enable MegaUpload")
         self.mega_cb.setChecked(False)
+        self.mega_cb.stateChanged.connect(lambda state: self.mega_state_changed.emit(bool(state)))
         sc_layout.addWidget(self.mega_cb)
 
         # — Download Hosts Priority —
@@ -779,6 +782,8 @@ class SettingsWidget(QWidget):
 
             # Emit updated hosts list so the main window can react immediately
             self.hosts_updated.emit(new_hosts)
+            # Emit MegaUpload state so main window can update
+            self.mega_state_changed.emit(new_mega)
 
             # Show success message
             QMessageBox.information(self, "Success", "Settings saved successfully!")

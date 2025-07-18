@@ -168,6 +168,11 @@ class ForumBotGUI(QMainWindow):
         self.user_manager = get_user_manager()
         self.mega_upload_enabled = self.config.get('use_megaupload', False)
         self.active_upload_hosts = list(self.config.get('upload_hosts', []))
+        if not self.active_upload_hosts:
+            env_hosts = os.getenv('UPLOAD_HOSTS', '')
+            self.active_upload_hosts = [h.strip() for h in env_hosts.split(',') if h.strip()]
+            if self.active_upload_hosts:
+                self.config['upload_hosts'] = list(self.active_upload_hosts)
 
         # Initialize the handler first
         self.progress_handler = None
@@ -353,6 +358,8 @@ class ForumBotGUI(QMainWindow):
         
         # Connect the hosts updated signal
         self.settings_tab.hosts_updated.connect(self.on_upload_hosts_updated)
+        # Connect MegaUpload state changes
+        self.settings_tab.mega_state_changed.connect(self.toggle_megaupload)
 
         # إضافته لمنطقة المحتوى
         self.content_area.addWidget(self.settings_tab)
@@ -422,7 +429,10 @@ class ForumBotGUI(QMainWindow):
             dotenv_path = find_dotenv()
             if dotenv_path:
                 set_key(dotenv_path, 'UPLOAD_HOSTS', ','.join(hosts_list))
-
+            # Persist to user settings if a user is logged in
+            if self.user_manager.get_current_user():
+                self.user_manager.set_user_setting('upload_hosts', hosts_list)
+                logging.info("🔄 Updated upload hosts in user settings")
             logging.info(f"✅ Upload hosts successfully updated: {hosts_list}")
             
         except Exception as e:
@@ -783,11 +793,6 @@ class ForumBotGUI(QMainWindow):
         self.theme_toggle_action.setCheckable(True)
         self.theme_toggle_action.toggled.connect(self.on_theme_toggled)
         toolbar.addAction(self.theme_toggle_action)
-
-        # Initialize MegaUpload section with a toggle checkbox
-        self.init_megaupload_section()
-
-        self.init_uploadhosts_section()
 
         # Default Selection - set first item as active
         self.sidebar.set_active_item_by_text("Posts")
@@ -2886,24 +2891,6 @@ class ForumBotGUI(QMainWindow):
         # Add the whole Process Threads view into the main content area
         self.content_area.addWidget(process_threads_widget)
 
-    def init_megaupload_section(self):
-        """Initialize the MegaUpload toggle section."""
-        self.megaupload_checkbox = QCheckBox("Enable MegaUpload Backup")
-        self.megaupload_checkbox.setChecked(self.mega_upload_enabled)
-        self.megaupload_checkbox.stateChanged.connect(self.toggle_megaupload)
-        self.statusBar().addPermanentWidget(self.megaupload_checkbox)
-
-    def init_uploadhosts_section(self):
-        """Initialize the upload-hosts toggle section."""
-        self.upload_host_checkboxes = {}
-        for host in self.config.get('upload_hosts', []):
-            cb = QCheckBox(f"Enable {host.capitalize()}")
-            cb.setChecked(host in self.active_upload_hosts)
-            # عند التغيير، استدعي toggle_upload_host
-            cb.stateChanged.connect(lambda state, h=host: self.toggle_upload_host(h, state))
-            self.statusBar().addPermanentWidget(cb)
-            self.upload_host_checkboxes[host] = cb
-
     def toggle_megaupload(self, state):
         """Toggle MegaUpload functionality."""
         try:
@@ -2936,8 +2923,7 @@ class ForumBotGUI(QMainWindow):
             elif not success and self.mega_upload_enabled:
                 self.statusBar().showMessage('Failed to initialize MegaUpload handler')
                 logging.error("Failed to initialize MegaUpload handler")
-                # If initialization failed, uncheck the checkbox
-                self.megaupload_checkbox.setChecked(False)
+
                 self.mega_upload_enabled = False
                 self.bot.use_megaupload = False
             else:
@@ -2949,8 +2935,7 @@ class ForumBotGUI(QMainWindow):
         except Exception as e:
             logging.error(f"Error toggling MegaUpload: {e}", exc_info=True)
             self.statusBar().showMessage('Error toggling MegaUpload')
-            # Reset checkbox to previous state
-            self.megaupload_checkbox.setChecked(not self.mega_upload_enabled)
+
 
     def format_bbcode(self, editor, start_tag, end_tag):
         """Apply BBCode formatting to the selected text in the specified editor."""
