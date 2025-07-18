@@ -2373,6 +2373,10 @@ class ForumBotGUI(QMainWindow):
         # NEW: Load Megathreads process threads data after login
         self.load_megathreads_process_threads_data()
 
+        # Reload settings from user-specific data so the UI reflects saved values
+        if hasattr(self, 'settings_tab'):
+            self.settings_tab.load_settings()
+
         # Update WinRAR path display
         winrar_exe_path = self.config.get('winrar_exe_path', 'C:/Program Files/WinRAR/WinRAR.exe')
         self.winrar_exe_label.setText(f"WinRAR Executable: {winrar_exe_path}")
@@ -2422,7 +2426,11 @@ class ForumBotGUI(QMainWindow):
                 
                 # THIRD: Reload with empty/global data for next user
                 self.reload_user_specific_data()
-                
+
+                # Clear settings UI since no user is logged in
+                if hasattr(self, 'settings_tab'):
+                    self.settings_tab.load_settings()
+
                 logging.info(" Logout completed successfully")
             except Exception as e:
                 self.handle_exception("handle_logout", e)

@@ -512,13 +512,14 @@ class SettingsWidget(QWidget):
                 logging.warning("UI elements not initialized yet, skipping settings load")
                 return
                 
-            # If user is logged in, load from user settings, otherwise use config
+            # If user is logged in, load from user settings.
+            # Otherwise use config for most values but leave user-specific
+            # sections like upload hosts blank.
             if self.user_manager.get_current_user():
                 settings_source = self.user_manager.get_all_user_settings()
                 source_name = f"user '{self.user_manager.get_current_user()}'"
             else:
-                settings_source = self.config
-                source_name = "global config"
+                source_name = "global config (no user)"
             
             # Safely set UI elements with existence checks
             try:
@@ -529,11 +530,18 @@ class SettingsWidget(QWidget):
                 
                 # Upload Hosts
                 if hasattr(self, 'hosts_list') and self.hosts_list:
-                    upload_hosts = settings_source.get('upload_hosts', [])
+                    if self.user_manager.get_current_user():
+                        upload_hosts = settings_source.get('upload_hosts', [])
+                    else:
+                        upload_hosts = []  # hide until user logs in
                     self.hosts_list.clear()
                     for host in upload_hosts:
                         item = QListWidgetItem(host)
-                        item.setFlags(item.flags() | Qt.ItemIsEditable | Qt.ItemIsUserCheckable)
+                        item.setFlags(
+                            item.flags()
+                            | Qt.ItemIsEditable
+                            | Qt.ItemIsUserCheckable
+                        )
                         item.setCheckState(Qt.Checked)
                         self.hosts_list.addItem(item)
                 
