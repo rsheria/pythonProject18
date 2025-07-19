@@ -9,7 +9,7 @@ from downloaders.katfile import KatfileDownloader as KatfileDownloaderAPI
 from PyQt5.QtWidgets import QApplication, QAction
 from config.config import save_configuration
 from .themes import theme_manager, style_manager
-
+from pathlib import Path
 import hashlib
 import logging
 import random
@@ -1661,16 +1661,32 @@ class ForumBotGUI(QMainWindow):
         reupload_folder = os.path.join(self.bot.download_dir, "BackupReupload", str(thread_id))
         os.makedirs(reupload_folder, exist_ok=True)
 
-        # If you want to move all downloaded_files into that folder (in case they are scattered):
+        moved_files = []
         for fpath in downloaded_files:
-            if os.path.dirname(fpath) != reupload_folder:
-                shutil.move(fpath, reupload_folder)
+            dest = os.path.join(reupload_folder, os.path.basename(fpath))
+            if os.path.abspath(fpath) != os.path.abspath(dest):
+                shutil.move(fpath, dest)
+            moved_files.append(dest)
+
+            # Process the downloaded files the same way as regular downloads
+        processed_files = self.file_processor.process_downloads(
+            Path(reupload_folder), moved_files, thread_title
+        )
+        if not processed_files:
+            QMessageBox.warning(self, "Processing Failed", "Failed to process downloaded files.")
+            return
+
+        # Upload only to main hosts (exclude backup RG account)
+        hosts = [h for h in self.active_upload_hosts if h != 'rapidgator-backup']
+        if not hosts:
+            hosts = [h for h in self.active_upload_hosts if h]
 
         self.current_upload_worker = UploadWorker(
             bot=self.bot,
             row=row,
             folder_path=reupload_folder,
             thread_id=thread_id,
+            upload_hosts=hosts,
         )
 
         self.current_upload_worker.upload_complete.connect(
