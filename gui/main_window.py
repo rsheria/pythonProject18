@@ -1519,41 +1519,23 @@ class ForumBotGUI(QMainWindow):
         return -1
 
     def reupload_thread_files(self, thread_title, thread_info):
-        """
-        Initiates the re-upload process by downloading all Mega.nz links first.
-        Once all Mega links are downloaded (or attempted), it proceeds with uploading the first successfully downloaded file.
-        """
+        """Re-upload using Rapidgator backup links instead of Mega.nz."""
         try:
             logging.info(f"Re-uploading files for thread '{thread_title}'")
 
-            # Retrieve Mega links from 'mega_link' field (can be newline-separated) or 'mega_links' if present
-            mega_links = []
-            mega_link_str = thread_info.get('mega_link', '')
-            if isinstance(mega_link_str, str):
-                # Convert newline-separated string into a list of links
-                parsed_links = [link.strip() for link in mega_link_str.split('\n') if link.strip()]
-                mega_links.extend(parsed_links)
+            # Retrieve Rapidgator backup links
+            backup_links = thread_info.get('rapidgator_backup_links', [])
+            flat = []
+            for l in backup_links:
+                if isinstance(l, (list, tuple)):
+                    flat.extend(l)
+                else:
+                    flat.append(l)
+            backup_links = [link.strip() for link in flat if link and str(link).strip()]
 
-            # If 'mega_links' is present, it may contain multiple links as a list
-            additional_mega_links = thread_info.get('mega_links', [])
-            if isinstance(additional_mega_links, str):
-                # If it's a string, convert it similarly
-                additional_mega_links = [link.strip() for link in additional_mega_links.split('\n') if link.strip()]
-            if additional_mega_links:
-                mega_links.extend([l.strip() for l in additional_mega_links if l.strip()])
-
-            # Remove duplicates if any
-            mega_links = list(set(mega_links))
-
-            if not mega_links:
-                logging.error(f"No Mega.nz backup links found for thread '{thread_title}'.")
-                QMessageBox.warning(self, "No Backup", "No Mega.nz backup links found.")
-                return
-
-            thread_id = str(thread_info.get('thread_id', ''))
-            if not thread_id:
-                logging.error("No thread_id found in thread_info. Cannot determine download directory.")
-                QMessageBox.warning(self, "Missing Data", "No thread ID found in backup data.")
+            if not backup_links:
+                logging.error(f"No Rapidgator backup links found for thread '{thread_title}'.")
+                QMessageBox.warning(self, "No Backup", "No Rapidgator backup links found.")
                 return
 
             # Store state for multi-link download
@@ -1561,81 +1543,56 @@ class ForumBotGUI(QMainWindow):
                 'thread_title': thread_title,
                 'thread_info': thread_info,
                 'thread_id': thread_id,
-                'mega_links': mega_links,
+                'rg_links': backup_links,
                 'current_index': 0,
                 'downloaded_files': []
             }
 
-            # Start downloading the first mega link
-            self._download_next_mega_link()
+            # Start downloading the first Rapidgator backup link
+            self._download_next_rg_link()
 
         except Exception as e:
             logging.error(f"Error re-uploading files for thread '{thread_title}': {e}", exc_info=True)
             QMessageBox.warning(self, "Re-upload Error", f"An error occurred while re-uploading files: {e}")
 
-    def _download_next_mega_link(self):
+    def _download_next_rg_link(self):
         if not hasattr(self, '_reupload_state'):
             return
 
         state = self._reupload_state
-        mega_links = state['mega_links']
+        rg_links = state['rg_links']
         current_index = state['current_index']
 
-        if current_index < len(mega_links):
-            mega_link = mega_links[current_index]
+        if current_index < len(rg_links):
+            rg_link = rg_links[current_index]
             thread_id = state['thread_id']
 
-            logging.info(f"Downloading Mega link {current_index + 1}/{len(mega_links)}: {mega_link}")
+            logging.info(f"Downloading RG backup link {current_index + 1}/{len(rg_links)}: {rg_link}")
 
             # NEW: Derive the correct local folder from .env-based download_dir
             # For instance, a "BackupReupload" subfolder + thread_id:
             download_folder = os.path.join(self.bot.download_dir, "BackupReupload", str(thread_id))
             os.makedirs(download_folder, exist_ok=True)
 
-            self.current_download_worker = MegaDownloadWorker(
-                self.bot,
-                mega_link,
+            result = self.bot.download_rapidgator_net(
+                rg_link,
+                "BackupReupload",
                 thread_id,
-                target_folder=download_folder
+                state['thread_title'],
+                download_dir=download_folder
             )
-            self.current_download_worker.download_complete.connect(self._on_mega_download_complete)
-            self.current_download_worker.download_error.connect(self._on_mega_download_error)
-            self.current_download_worker.start()
+            if result:
+                state['downloaded_files'].append(result)
+            else:
+                logging.warning(
+                    f"Failed to download RG link {current_index + 1}/{len(rg_links)}: {rg_link}"
+                )
+            state['current_index'] += 1
+            self._download_next_rg_link()
 
         else:
             # All links attempted
             self._start_reupload_process()
-
-    def _on_mega_download_complete(self, downloaded_file_path):
-        state = self._reupload_state
-        current_index = state['current_index']
-        mega_links = state['mega_links']
-
-        if downloaded_file_path and os.path.exists(downloaded_file_path):
-            logging.info(f"Mega link {current_index + 1}/{len(mega_links)} downloaded: {downloaded_file_path}")
-            state['downloaded_files'].append(downloaded_file_path)
-        else:
-            logging.warning(
-                f"Downloaded file not found or invalid for Mega link {current_index + 1}/{len(mega_links)}.")
-
-        # Move to the next link
-        state['current_index'] += 1
-        self._download_next_mega_link()
-
-    def _on_mega_download_error(self, err):
-        """
-        Called when the current Mega link download fails.
-        We log the error and continue with the next link.
-        """
-        state = self._reupload_state
-        current_index = state['current_index']
-        mega_links = state['mega_links']
-
-        logging.warning(f"Failed to download Mega link {current_index + 1}/{len(mega_links)}: {err}")
-
-        # Proceed to next link even on error
-        state['current_index'] += 1
-        self._download_next_mega_link()
 
     def on_reupload_host_progress(self, row, host_idx, progress, status_msg, current_size, total_size):
         try:
@@ -1661,7 +1618,7 @@ class ForumBotGUI(QMainWindow):
         del self._reupload_state  # cleanup
 
         if not downloaded_files:
-            QMessageBox.warning(self, "Download Failed", "Failed to download files from Mega.nz.")
+            QMessageBox.warning(self, "Download Failed", "Failed to download files from Rapidgator backup links.")
             return
 
         # For re-upload, pick whichever folder you want—maybe the folder you used above.
@@ -2595,7 +2552,9 @@ class ForumBotGUI(QMainWindow):
             selected_rows = set(index.row() for index in self.backup_threads_table.selectedIndexes())
             for row in selected_rows:
                 thread_title = self.backup_threads_table.item(row, 0).text()
-                self.reupload_files(thread_title)
+                thread_info = self.backup_threads.get(thread_title)
+                if thread_info:
+                    self.reupload_thread_files(thread_title, thread_info)
 
     def on_category_clicked(self, index):
         """Handle category selection."""
@@ -6158,7 +6117,21 @@ class ForumBotGUI(QMainWindow):
             return
 
         if links_dict:
-            dialog = LinksDialog(thread_title, links_dict, parent=self)
+            # Flatten nested lists so dialog receives plain list of strings
+            clean_links = {}
+            for host, urls in links_dict.items():
+                if isinstance(urls, (list, tuple)):
+                    flat = []
+                    for u in urls:
+                        if isinstance(u, (list, tuple)):
+                            flat.extend(map(str, u))
+                        else:
+                            flat.append(str(u))
+                    clean_links[host] = flat
+                else:
+                    clean_links[host] = [str(urls)]
+
+            dialog = LinksDialog(thread_title, clean_links, parent=self)
             dialog.exec_()
         else:
             # إضافة خيارات جديدة للـ threads الفاضية

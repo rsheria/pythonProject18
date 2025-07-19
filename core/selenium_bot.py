@@ -1339,17 +1339,14 @@ class ForumBotSelenium:
                     return False
 
                 logging.info(f"Successfully downloaded {filename}")
-                return True
+                return file_path
             else:
                 logging.error(f"File not found after download: {file_path}")
-                return False
+                return None
 
         except Exception as e:
             logging.error(f"Error downloading from Rapidgator: {str(e)}", exc_info=True)
-            return False
-
-    import os, logging, requests
-    from urllib.parse import urlparse
+            return None
 
     def download_katfile_net(self, url, category_name, thread_id, thread_title,
                              progress_callback=None, download_dir=None):

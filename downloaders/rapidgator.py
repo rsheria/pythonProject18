@@ -24,7 +24,7 @@ class RapidgatorDownloader(BaseDownloader):
         thread_title: str,
         progress_callback=None,
         download_dir=None
-    ) -> bool:
+    ) -> str | None:
         """
         Enhanced download with adaptive progress monitoring and display names
         """
