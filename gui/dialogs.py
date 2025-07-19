@@ -49,7 +49,10 @@ class LinksDialog(QDialog):
         if keeplinks_url:
             layout.addWidget(QLabel("<b>Keeplinks URL:</b>"))
             keeplinks_edit = QTextEdit()
-            keeplinks_edit.setPlainText(keeplinks_url)
+            if isinstance(keeplinks_url, (list, tuple)):
+                keeplinks_edit.setPlainText('\n'.join(str(u) for u in keeplinks_url))
+            else:
+                keeplinks_edit.setPlainText(str(keeplinks_url))
             keeplinks_edit.setReadOnly(True)
             layout.addWidget(keeplinks_edit)
 
