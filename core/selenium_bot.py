@@ -18,7 +18,6 @@ from collections import defaultdict
 from typing import Optional
 from urllib.parse import unquote, urljoin
 import unicodedata
-from mega import Mega
 import requests
 from datetime import datetime, date, timedelta
 from urllib.parse import urlparse, quote
@@ -36,7 +35,7 @@ from bs4 import BeautifulSoup
 from PyQt5.QtCore import QThread, pyqtSignal, QTimer
 from utils import sanitize_filename
 import deathbycaptcha
-from uploaders.mega_upload_handler import MegaUploadHandler
+from uploaders.rapidgator_upload_handler import RapidgatorUploadHandler
 import xml.etree.ElementTree as ET
 from urllib.parse import urlencode
 import difflib
@@ -174,13 +173,16 @@ class ForumBotSelenium:
             'uploady.io',
             # Add more known file hosts here
         ]
+        self.use_backup_rg = self.config.get('use_backup_rg', False) if self.config else False
 
-        # Initialize MegaUpload state and handler
-        self.use_megaupload = self.config.get('use_megaupload', False) if self.config else False
-        self.mega_upload_handler = None
-        self.mega_client = None
-        self.megaupload_username = None
-        self.megaupload_password = None
+        # Step 6: Rapidgator Backup (optional)
+        if self.use_backup_rg:
+            try:
+                backup_url = self.upload_to_rapidgator_backup(file_path)
+                if backup_url:
+                    logging.info(f"Rapidgator backup successful: {backup_url}")
+            except Exception as e:
+                logging.error(f"Rapidgator backup upload error: {e}")
 
         # Initialize download directory
         if not os.path.exists(self.download_dir):
@@ -192,17 +194,6 @@ class ForumBotSelenium:
             os.makedirs(self.banned_files_dir, exist_ok=True)
 
             logging.info(f"Banned files directory initialized at: {self.banned_files_dir}")
-
-        # Initialize MegaUploadHandler and mega_client only if the toggle is enabled
-        if self.use_megaupload:
-            try:
-                self.mega_upload_handler = MegaUploadHandler()
-                self.mega_client = self.mega_upload_handler.mega_client  # Get mega_client from handler
-                logging.info("MegaUploadHandler and Mega client initialized successfully.")
-            except Exception as e:
-                logging.error(f"Failed to initialize MegaUploadHandler: {e}", exc_info=True)
-                self.mega_upload_handler = None
-                self.mega_client = None
 
         # Load environment variables for DeathByCaptcha and Hosts configurations
         load_dotenv()  # Ensure this is called before accessing env variables
@@ -220,13 +211,6 @@ class ForumBotSelenium:
 
         if not self.rapidgator_username or not self.rapidgator_password:
             raise ValueError("Rapidgator credentials are not set in the environment variables.")
-
-        # Load MegaUpload credentials from the environment variables
-        self.megaupload_username = os.getenv('MEGAUPLOAD_USERNAME')
-        self.megaupload_password = os.getenv('MEGAUPLOAD_PASSWORD')
-
-        if not self.megaupload_username or not self.megaupload_password:
-            raise ValueError("MegaUpload credentials are not set in the environment variables.")
 
         # Load Hosts Configurations from .env # NEW
         self.download_hosts = self.load_hosts('DOWNLOAD_HOSTS')
@@ -266,21 +250,20 @@ class ForumBotSelenium:
         self.is_logged_in = False
 
         # Rapidgator API Tokens - initialize only (don't load before user login)
-        self.rapidgator_token = None
-        self.upload_rapidgator_token = None
+        self.rg_backup_token = None
+        self.rg_main_token = None
         # Token expiry times
-        self.rapidgator_token_expiry = 0  # Token expiry time for download account
-        self.upload_rapidgator_token_expiry = 0  # Token expiry time for upload account
+        self.rg_backup_token_expiry = 0  # Token expiry time for backup account
+        self.rg_main_token_expiry = 0  # Token expiry time for main account
+
+        # Backwards compatibility aliases
+        self.rapidgator_token = self.rg_backup_token
+        self.upload_rapidgator_token = self.rg_main_token
+        self.rapidgator_token_expiry = self.rg_backup_token_expiry
+        self.upload_rapidgator_token_expiry = self.rg_main_token_expiry
 
         # Initialize a lock for thread safety
         self.lock = threading.Lock()
-
-        if self.use_megaupload:
-            self.megaupload_username = os.getenv('MEGAUPLOAD_USERNAME')
-            self.megaupload_password = os.getenv('MEGAUPLOAD_PASSWORD')
-
-            if not self.megaupload_username or not self.megaupload_password:
-                raise ValueError("MegaUpload credentials are not set.")
 
     def update_user_file_paths(self):
         """Update file paths for current user when user switches."""
@@ -355,20 +338,17 @@ class ForumBotSelenium:
             logging.error(f"Error checking login status: {e}", exc_info=True)
             return False
 
-    def load_token(self, token_type='download'):
+    def load_token(self, account_type='backup'):
         """Load Rapidgator token from file."""
         try:
-            if token_type == 'download':
-                token_file = self.rapidgator_token_file
-                token_attr = 'rapidgator_token'
-                expiry_attr = 'rapidgator_token_expiry'
-            elif token_type == 'upload':
+            if account_type == 'main':
                 token_file = self.upload_rapidgator_token_file
-                token_attr = 'upload_rapidgator_token'
-                expiry_attr = 'upload_rapidgator_token_expiry'
+                token_attr = 'rg_main_token'
+                expiry_attr = 'rg_main_token_expiry'
             else:
-                logging.error(f"Invalid token type: {token_type}")
-                return False
+                token_file = self.rapidgator_token_file
+                token_attr = 'rg_backup_token'
+                expiry_attr = 'rg_backup_token_expiry'
                 
             if os.path.exists(token_file):
                 with open(token_file, 'r') as f:
@@ -376,50 +356,26 @@ class ForumBotSelenium:
                     
                 setattr(self, token_attr, token_data.get('token'))
                 setattr(self, expiry_attr, token_data.get('expiry', 0))
+                if account_type == 'main':
+                    self.upload_rapidgator_token = self.rg_main_token
+                    self.upload_rapidgator_token_expiry = self.rg_main_token_expiry
+                else:
+                    self.rapidgator_token = self.rg_backup_token
+                    self.rapidgator_token_expiry = self.rg_backup_token_expiry
                 
-                logging.info(f"Loaded {token_type} token from {token_file}")
+                logging.info(f"Loaded {account_type} token from {token_file}")
                 return True
             else:
-                logging.info(f"No {token_type} token file found at {token_file}")
+                logging.info(f"No {account_type} token file found at {token_file}")
                 setattr(self, token_attr, None)
                 setattr(self, expiry_attr, 0)
                 return False
                 
         except Exception as e:
-            logging.error(f"Error loading {token_type} token: {e}")
+            logging.error(f"Error loading {account_type} token: {e}")
             setattr(self, token_attr, None)
             setattr(self, expiry_attr, 0)
             return False
-
-    def initialize_mega_upload_handler(self):
-        """Initialize the MegaUpload handler if enabled."""
-        try:
-            if not self.megaupload_username or not self.megaupload_password:
-                logging.error("MegaUpload credentials are not set in environment variables.")
-                self.use_megaupload = False
-                return False
-
-            self.mega_upload_handler = MegaUploadHandler()
-            logging.info("MegaUploadHandler initialized successfully.")
-            return True
-        except Exception as e:
-            logging.error(f"Failed to initialize MegaUploadHandler: {e}", exc_info=True)
-            self.mega_upload_handler = None
-            self.use_megaupload = False
-            return False
-
-    def set_megaupload_state(self, enabled):
-        """Update MegaUpload state and reinitialize handler if needed."""
-        self.use_megaupload = enabled
-        if enabled:
-            if not self.mega_upload_handler:
-                return self.initialize_mega_upload_handler()
-            return True
-        else:
-            self.mega_upload_handler = None
-            self.use_megaupload = False  # Ensure both flag and handler are disabled
-            logging.info("MegaUploadHandler disabled.")
-            return True
 
     def upload_file_and_notify(self, file_path, category_name, thread_id):
         """Upload the file to Keeplinks and optionally to Mega.nz, and store URLs with thread data."""
@@ -428,33 +384,20 @@ class ForumBotSelenium:
         keeplinks_url = self.upload_file_to_keeplinks(file_path)
         logging.debug(f"Received Keeplinks URL: {keeplinks_url}")
 
-        # Upload to Mega.nz only if use_megaupload is enabled and the handler is available
-        mega_url = None
-        if getattr(self, 'use_megaupload', False):  # Ensure the flag is read correctly
-            if self.mega_upload_handler:
-                try:
-                    logging.info("Uploading to MegaUpload for backup...")
-                    mega_url = self.mega_upload_handler.upload_file(file_path)
-                    logging.debug(f"Received Mega.nz URL: {mega_url}")
-                except Exception as e:
-                    logging.error(f"Failed to upload to MegaUpload: {e}")
-            else:
-                logging.error("MegaUploadHandler is not initialized.")
-        else:
-            logging.info("MegaUpload is disabled. Skipping MegaUpload upload.")
+        backup_rg_url = None  # Backup Rapidgator URL
 
         # Update thread links data
         if thread_id not in self.thread_links:
             self.thread_links[thread_id] = {
-                'mega_urls': [],
+                'backup_rg_url': '',
                 'keeplinks_urls': [],
                 'file_paths': [],
                 'timestamp': str(datetime.now())
             }
 
-        if mega_url:
-            self.thread_links[thread_id]['mega_urls'].append(mega_url)
-            logging.info(f"Mega.nz URL added for thread {thread_id}: {mega_url}")
+        if backup_rg_url:
+            self.thread_links[thread_id]['backup_rg_url'] = backup_rg_url
+            logging.info(f"Rapidgator backup URL added for thread {thread_id}: {backup_rg_url}")
 
         if keeplinks_url:
             self.thread_links[thread_id]['keeplinks_urls'].append(keeplinks_url)
@@ -942,128 +885,159 @@ class ForumBotSelenium:
     # -----------------------------------
     # 2. API Login and Token Management
     # -----------------------------------
-    def api_login(self, token_type='download'):
+    # ---------------------------------------------------------------------------
+    # 1)  API LOGIN – returns True on success, False on failure
+    # ---------------------------------------------------------------------------
+    def api_login(self, account_type: str = "backup") -> bool:
+        """
+        Authenticate to Rapidgator for either the MAIN (upload) or BACKUP (premium) account
+        and store the token + expiry on the instance.
+
+        account_type: "main" | "backup"
+        """
+        if account_type not in {"main", "backup"}:
+            logging.error("api_login: invalid account_type '%s'", account_type)
+            return False
+
         login_url = "https://rapidgator.net/api/v2/user/login"
-        if token_type == 'download':
-            username = self.rapidgator_username
-            password = self.rapidgator_password
-        elif token_type == 'upload':
-            username = self.upload_username
-            password = self.upload_password
-        else:
-            logging.error("Invalid token type provided for login.")
-            return False
 
-        payload = {
-            'login': username,
-            'password': password
-        }
+        # Pick credentials from environment
+        if account_type == "main":
+            username = os.getenv("UPLOAD_RAPIDGATOR_LOGIN", "")
+            password = os.getenv("UPLOAD_RAPIDGATOR_PASSWORD", "")
+        else:  # backup
+            username = os.getenv("RAPIDGATOR_LOGIN", "")
+            password = os.getenv("RAPIDGATOR_PASSWORD", "")
 
-        headers = {
-            'Content-Type': 'application/json'
-        }
+        payload = {"login": username, "password": password}
+        headers = {"Content-Type": "application/json"}
 
         try:
-            logging.info(f"Attempting Rapidgator API login for {token_type} token.")
-            response = requests.post(login_url, json=payload, headers=headers)
-            if response.status_code == 200:
-                data = response.json()
-                token = data.get('response', {}).get('token')
-                if token:
-                    expires_in = data.get('response', {}).get('expire_in', 900)  # Default to 15 minutes
-                    expiry_time = time.time() + int(expires_in)
-                    if token_type == 'download':
-                        self.rapidgator_token = token
-                        self.rapidgator_token_expiry = expiry_time
-                    elif token_type == 'upload':
-                        self.upload_rapidgator_token = token
-                        self.upload_rapidgator_token_expiry = expiry_time
-                    self.save_token(token_type)
-                    logging.info(f"{token_type.capitalize()} API login successful.")
-                    return True
-                else:
-                    logging.error(f"{token_type.capitalize()} API login failed: No token found.")
-                    return False
-            else:
-                logging.error(f"{token_type.capitalize()} API login failed. Status Code: {response.status_code}.")
+            logging.info("🔐 RG login (%s account)…", account_type)
+            resp = requests.post(login_url, json=payload, headers=headers, timeout=20)
+
+            if resp.status_code != 200:
+                logging.error("RG login HTTP %s – %s", resp.status_code, resp.text)
                 return False
-        except Exception as e:
-            logging.error(f"Exception during {token_type} API login: {e}", exc_info=True)
-            return False
 
-    def save_token(self, token_type='download'):
-        """
-        يحفظ توكن رابدجيتور (download أو upload) داخل مجلد المستخدم المحدد
-        """
-        # تحديد مسار الملف بناءً على المستخدم المسجل
-        if self.user_manager and self.user_manager.get_current_user():
-            user_folder = self.user_manager.get_user_folder()
-            filename = os.path.join(user_folder, f"rapidgator_{token_type}_token.json")
-        else:
-            # fallback إلى DATA_DIR إذا لم يكن هناك مستخدم مسجل
-            filename = os.path.join(DATA_DIR, f"rapidgator_{token_type}_token.json")
-        if token_type == 'download':
-            token = self.rapidgator_token
-            expiry = self.rapidgator_token_expiry
-        else:
-            token = self.upload_rapidgator_token
-            expiry = self.upload_rapidgator_token_expiry
-        try:
-            # اضمن وجود المجلّد
-            os.makedirs(os.path.dirname(filename), exist_ok=True)
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump({'token': token, 'expiry': expiry}, f, ensure_ascii=False, indent=2)
-            logging.info(f"{token_type.capitalize()} token saved successfully to {filename}.")
-        except Exception as e:
-            self.handle_exception(f"saving {token_type} token", e)
-
-    def load_token(self, token_type='download'):
-        """
-        يحمّل توكن رابدجيتور (download أو upload) من مجلد المستخدم المحدد
-        """
-        # تحديد مسار الملف بناءً على المستخدم المسجل
-        if self.user_manager and self.user_manager.get_current_user():
-            user_folder = self.user_manager.get_user_folder()
-            filename = os.path.join(user_folder, f"rapidgator_{token_type}_token.json")
-        else:
-            # fallback إلى DATA_DIR إذا لم يكن هناك مستخدم مسجل
-            filename = os.path.join(DATA_DIR, f"rapidgator_{token_type}_token.json")
-        try:
-            if os.path.exists(filename):
-                with open(filename, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                if token_type == 'download':
-                    self.rapidgator_token = data.get('token')
-                    self.rapidgator_token_expiry = data.get('expiry', 0)
-                else:  # upload
-                    self.upload_rapidgator_token = data.get('token')
-                    self.upload_rapidgator_token_expiry = data.get('expiry', 0)
-                logging.info(f"{token_type.capitalize()} token loaded successfully from {filename}.")
-                return True
-            else:
-                logging.info(f"No {token_type} token file found at {filename}.")
+            data = resp.json()
+            token = data.get("response", {}).get("token")
+            if not token:
+                logging.error("RG login failed – token missing (%s)", data.get("details"))
                 return False
-        except Exception as e:
-            self.handle_exception(f"loading {token_type} token", e)
+
+            expires_in = int(data.get("response", {}).get("expire_in", 900))  # seconds
+            expiry_time = time.time() + expires_in
+
+            if account_type == "main":
+                self.rg_main_token = token
+                self.rg_main_token_expiry = expiry_time
+                # legacy / compatibility aliases
+                self.upload_rapidgator_token = token
+                self.upload_rapidgator_token_expiry = expiry_time
+            else:  # backup
+                self.rg_backup_token = token
+                self.rg_backup_token_expiry = expiry_time
+                # legacy / compatibility aliases
+                self.rapidgator_token = token
+                self.rapidgator_token_expiry = expiry_time
+
+            self.save_token(account_type)  # persist
+            logging.info("✅ RG %s login OK – token saved.", account_type)
+            return True
+
+        except Exception as exc:
+            logging.exception("RG %s login exception: %s", account_type, exc)
             return False
 
-    def ensure_valid_token(self, token_type='download'):
+    # ---------------------------------------------------------------------------
+    # 2)  SAVE TOKEN
+    # ---------------------------------------------------------------------------
+    def save_token(self, account_type: str = "backup") -> None:
+        """Persist the token/expiry for the given account_type to JSON."""
+        if account_type == "main":
+            token = getattr(self, "rg_main_token", None)
+            expiry = getattr(self, "rg_main_token_expiry", 0)
+        else:  # backup
+            token = getattr(self, "rg_backup_token", None)
+            expiry = getattr(self, "rg_backup_token_expiry", 0)
+
+        if not token:
+            logging.warning("save_token: no token to save for '%s' account.", account_type)
+            return
+
+        # build path
+        if self.user_manager and self.user_manager.get_current_user():
+            folder = self.user_manager.get_user_folder()
+        else:
+            folder = DATA_DIR
+        os.makedirs(folder, exist_ok=True)
+
+        path = os.path.join(folder, f"rapidgator_{account_type}_token.json")
+
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump({"token": token, "expiry": expiry}, fh, ensure_ascii=False, indent=2)
+            logging.info("💾 Token (%s) saved to %s", account_type, path)
+        except Exception as exc:
+            self.handle_exception(f"saving {account_type} token", exc)
+
+    # ---------------------------------------------------------------------------
+    # 3)  LOAD TOKEN
+    # ---------------------------------------------------------------------------
+    def load_token(self, account_type: str = "backup") -> bool:
+        """Load token/expiry for MAIN or BACKUP account from disk; return True if found."""
+        if self.user_manager and self.user_manager.get_current_user():
+            folder = self.user_manager.get_user_folder()
+        else:
+            folder = DATA_DIR
+
+        path = os.path.join(folder, f"rapidgator_{account_type}_token.json")
+        if not os.path.isfile(path):
+            logging.info("No stored %s token at %s", account_type, path)
+            return False
+
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+                token = data.get("token")
+                expiry = data.get("expiry", 0)
+
+            if account_type == "main":
+                self.rg_main_token = token
+                self.rg_main_token_expiry = expiry
+                self.upload_rapidgator_token = token
+                self.upload_rapidgator_token_expiry = expiry
+            else:  # backup
+                self.rg_backup_token = token
+                self.rg_backup_token_expiry = expiry
+                self.rapidgator_token = token
+                self.rapidgator_token_expiry = expiry
+
+            logging.info("🔑 Loaded %s token from %s", account_type, path)
+            return True
+
+        except Exception as exc:
+            self.handle_exception(f"loading {account_type} token", exc)
+            return False
+
+    def ensure_valid_token(self, account_type='backup'):
         """
         Ensures that the specified token (download or upload) is valid and not expired.
         If expired or close to expiry, it refreshes the token.
         """
-        if token_type == 'download':
-            token_expiry = self.rapidgator_token_expiry
-            token = self.rapidgator_token
+        if account_type == 'main':
+            token_expiry = self.rg_main_token_expiry
+            token = self.rg_main_token
         else:
-            token_expiry = self.upload_rapidgator_token_expiry
-            token = self.upload_rapidgator_token
+            token_expiry = self.rg_backup_token_expiry
+            token = self.rg_backup_token
 
         # If no token or token is near expiry (e.g., within 60 seconds), re-login
         if not token or time.time() > token_expiry - 60:
-            logging.info(f"{token_type.capitalize()} token expired or near expiry, re-authenticating...")
-            if not self.api_login(token_type):
-                logging.error(f"Failed to re-authenticate {token_type} token.")
+            logging.info(f"{account_type.capitalize()} token expired or near expiry, re-authenticating...")
+            if not self.api_login(account_type):
+                logging.error(f"Failed to re-authenticate {account_type} token.")
                 return False
         return True
 
@@ -1072,7 +1046,7 @@ class ForumBotSelenium:
         Retrieves user information using the Rapidgator API.
         """
         # Ensure the download token is valid before making the call
-        if not self.ensure_valid_token('download'):
+        if not self.ensure_valid_token('backup'):
             logging.error("Cannot get user info because download token could not be refreshed.")
             return None
 
@@ -1096,8 +1070,8 @@ class ForumBotSelenium:
                     details = data.get('details', '')
                     if "Session doesn't exist" in details:
                         # Attempt to refresh token and retry
-                        if self.api_login('download'):
-                            response = requests.get(info_url, params={'token': self.rapidgator_token})
+                        if self.api_login('backup'):
+                            response = requests.get(info_url, params={'token': self.rg_backup_token})
                             if response.status_code == 200:
                                 data = response.json()
                                 if data.get('status') == 200:
@@ -1125,7 +1099,7 @@ class ForumBotSelenium:
         Returns:
         - bool: True if token is valid, False otherwise.
         """
-        return self.rapidgator_token and time.time() < self.rapidgator_token_expiry
+        return self.rg_backup_token and time.time() < self.rg_backup_token_expiry
 
     # -----------------------------------
     # 2. Upload Rapidgator API Login and Token Management
@@ -1135,7 +1109,7 @@ class ForumBotSelenium:
         Retrieves user information using the Rapidgator API for the upload account.
         """
         # Ensure the upload token is valid before making the call
-        if not self.ensure_valid_token('upload'):
+        if not self.ensure_valid_token('main'):
             logging.error("Cannot get upload user info because upload token could not be refreshed.")
             return None
 
@@ -1158,8 +1132,8 @@ class ForumBotSelenium:
                     details = data.get('details', '')
                     if "Session doesn't exist" in details:
                         # Attempt to refresh token and retry
-                        if self.api_login('upload'):
-                            response = requests.get(info_url, params={'token': self.upload_rapidgator_token})
+                        if self.api_login('main'):
+                            response = requests.get(info_url, params={'token': self.rg_main_token})
                             if response.status_code == 200:
                                 data = response.json()
                                 if data.get('status') == 200:
@@ -1188,7 +1162,7 @@ class ForumBotSelenium:
         Returns:
         - bool: True if token is valid, False otherwise.
         """
-        return self.upload_rapidgator_token and time.time() < self.upload_rapidgator_token_expiry
+        return self.rg_main_token and time.time() < self.rg_main_token_expiry
 
     # ----------------------------------
     # 3. Download Methods # NEW
@@ -1271,7 +1245,7 @@ class ForumBotSelenium:
             # Validate and refresh token if needed
             if not self.is_token_valid():
                 logging.info("Rapidgator token expired or invalid. Re-authenticating.")
-                if not self.api_login('download'):
+                if not self.api_login('backup'):
                     logging.error("Failed to re-authenticate Rapidgator download account.")
                     return False
 
@@ -1627,7 +1601,7 @@ class ForumBotSelenium:
         """
         try:
             uploaded_urls = []  # Store URLs from all file hosts
-            mega_url = ''  # Store MegaUpload URL
+            backup_rg_url = ''  # Store Rapidgator backup URL
 
             # Step 1: Rapidgator Upload
             logging.info(f"Initiating Rapidgator upload for {os.path.basename(file_path)}...")
@@ -1718,23 +1692,20 @@ class ForumBotSelenium:
             except Exception as e:
                 logging.error(f"KatFile upload error: {str(e)}")
 
-            # Step 5: MegaUpload Backup (if enabled)
-            if self.use_megaupload and self.mega_upload_handler:
-                try:
-                    mega_url = self.mega_upload_handler.upload_file(file_path)
-                    if mega_url:
-                        logging.info(f"MegaUpload backup successful: {mega_url}")
-                except Exception as e:
-                    logging.error(f"MegaUpload upload error: {str(e)}")
-                    mega_url = ''
-            else:
-                logging.info("MegaUpload is disabled. Skipping backup upload.")
+            # Step 5: Rapidgator Backup Upload
+            try:
+                backup_rg_url = self.upload_to_rapidgator_backup(file_path)
+                if backup_rg_url:
+                    logging.info(f"Rapidgator backup successful: {backup_rg_url}")
+            except Exception as e:
+                logging.error(f"Rapidgator backup upload error: {str(e)}")
+                backup_rg_url = ''
 
             # Return results if any uploads were successful
             if uploaded_urls:
                 return {
                     'uploaded_urls': uploaded_urls,
-                    'mega_url': mega_url
+                    'backup_rg_url': backup_rg_url
                 }
 
             return None
@@ -1858,7 +1829,7 @@ class ForumBotSelenium:
 
             # Token invalid or expired, attempt to refresh
             logging.info("Upload token invalid or expired. Attempting refresh...")
-            if self.api_login('upload'):
+            if self.api_login('main'):
                 # Verify the new token works
                 if self.check_upload_permissions():
                     return True
@@ -2204,21 +2175,96 @@ class ForumBotSelenium:
             logging.error(f"Exception during KatFile upload: {e}", exc_info=True)
             return None
 
-    def upload_to_megaupload(self, file_path):
+    def upload_to_rapidgator_backup(self, file_path: str, progress_callback=None) -> str | None:
         """
-        Uploads a file to MegaUpload using the MegaUploadHandler.
+        Upload a file to the *backup* Rapidgator account and return its public URL.
 
-        Parameters:
-            file_path (str): The path to the file to be uploaded.
+        Args:
+            file_path (str): Local path to the file.
+            progress_callback (callable, optional): Called as progress_callback(bytes_sent, total_bytes).
 
         Returns:
-            str: The public URL of the uploaded file, or None if upload failed.
+            str | None: Rapidgator download URL, or None on failure.
         """
-        if not self.mega_upload_handler:
-            logging.error("MegaUploadHandler is not initialized. Cannot upload to MegaUpload.")
+        try:
+            # ------------------------------------------------------------------
+            # 0) Ensure we have a valid token for the backup account
+            # ------------------------------------------------------------------
+            if not self.ensure_valid_token("backup"):
+                logging.error("Backup token invalid and refresh failed.")
+                return None
+
+            # ------------------------------------------------------------------
+            # 1) Initialise the upload session
+            # ------------------------------------------------------------------
+            init_url = "https://rapidgator.net/api/v2/file/upload"
+            file_name = os.path.basename(file_path)
+            file_size = os.path.getsize(file_path)
+            md5_hash = self.calculate_md5(file_path)
+
+            payload = {
+                "token": self.rg_backup_token,
+                "name": file_name,
+                "hash": md5_hash,
+                "size": file_size,
+                "multipart": True,
+            }
+
+            resp = requests.post(init_url, json=payload,
+                                 headers={"Content-Type": "application/json"},
+                                 timeout=30)
+            if resp.status_code != 200:
+                logging.error("Init failed (%s): %s", resp.status_code, resp.text)
+                return None
+
+            data = resp.json()
+            if data.get("status") != 200 or not data.get("response"):
+                logging.error("Init error: %s", data.get("details"))
+                return None
+
+            upload = data["response"]["upload"]
+            upload_id = upload.get("upload_id")
+            upload_url = upload.get("url")
+            if not upload_url:
+                logging.error("No upload URL returned by Rapidgator.")
+                return None
+
+            # ------------------------------------------------------------------
+            # 2) Perform the actual file upload (streamed multipart)
+            #     self.upload_file() should return True on success.
+            # ------------------------------------------------------------------
+            if not self.upload_file(upload_url, file_path, progress_callback=progress_callback):
+                logging.error("File transfer step failed.")
+                return None
+
+            # ------------------------------------------------------------------
+            # 3) Poll the API until RG finishes processing the upload
+            # ------------------------------------------------------------------
+            info_url = "https://rapidgator.net/api/v2/file/upload_info"
+            for _ in range(10):  # ~20 s total (10 × 2 s)
+                info_resp = requests.get(
+                    info_url,
+                    params={"token": self.rg_backup_token, "upload_id": upload_id},
+                    timeout=15,
+                )
+                if info_resp.status_code == 200:
+                    info = info_resp.json()
+                    if info.get("status") == 200:
+                        up = info["response"]["upload"]
+                        state = up.get("state", 0)  # 0=uploading,1=processing,2=done,3=fail
+                        if state == 2:
+                            return up["file"]["url"]
+                        if state == 3:
+                            logging.error("Rapidgator marked upload as failed.")
+                            return None
+                time.sleep(2)
+
+            logging.error("Upload did not reach 'done' state within timeout.")
             return None
 
-        return self.mega_upload_handler.upload_file(file_path)
+        except Exception as exc:
+            logging.exception("Rapidgator backup upload failed: %s", exc)
+            return None
 
     def save_backup_links(self, file_path: str, backup_urls: list, keeplinks_url: str):
         """
@@ -2515,118 +2561,6 @@ class ForumBotSelenium:
         else:
             logging.error(f"No backup method implemented for host '{backup_host}'.")
 
-    def download_from_mega(self, mega_link, thread_id):
-        """
-        Download a file from Mega.nz using the user's MEGA account credentials.
-        Download path: E:\Download BOT\backup\<thread_id>\
-
-        Attempts:
-        - Login and download via mega.py
-        - If PermissionError on move, retry multiple times with sleep.
-        - If still fails, fallback to find file in destination directory.
-        - If found, return it, else return None.
-
-        No exceptions should escape this function.
-        """
-        try:
-            # Ensure MEGA credentials are set
-            if not self.megaupload_username or not self.megaupload_password:
-                logging.error("MegaUpload credentials are not set. Cannot download from Mega.nz.")
-                return None
-
-            # Login with the user's MEGA account credentials
-            logging.info("Logging into Mega.nz with user credentials...")
-            mega = Mega()
-            m = mega.login(self.megaupload_username, self.megaupload_password)
-            logging.info("Logged in to Mega.nz successfully.")
-
-            # Ensure the link uses 'mega.nz' instead of 'mega.co.nz'
-            if 'mega.co.nz' in mega_link.lower():
-                mega_link = mega_link.replace('mega.co.nz', 'mega.nz')
-
-            # Define a destination directory
-            destination = f"E:\\Download BOT\\backup\\{thread_id}"
-            if not os.path.exists(destination):
-                os.makedirs(destination, exist_ok=True)
-
-            logging.info(f"Attempting to download from MEGA link: {mega_link} to {destination}")
-
-            downloaded_file_path = None
-
-            # We'll try downloading multiple times if PermissionError occurs
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    downloaded_file_path = m.download_url(mega_link, destination)
-                    break  # If success, break out of retry loop
-                except PermissionError as pe:
-                    logging.warning(
-                        f"PermissionError during Mega download on attempt {attempt + 1}/{max_retries}: {pe}",
-                        exc_info=True)
-                    # Wait a bit and try again
-                    time.sleep(1)
-                except Exception as e:
-                    # Other exceptions during download, log and break
-                    logging.warning(f"Possible error during Mega download on attempt {attempt + 1}/{max_retries}: {e}",
-                                    exc_info=True)
-                    time.sleep(1)
-                    # Still attempt fallback after loop
-                    downloaded_file_path = None
-                    break
-
-            # If after retries still no file or error
-            if (not downloaded_file_path) or (downloaded_file_path and not os.path.exists(downloaded_file_path)):
-                # Attempt to find a recently created file in 'destination' as fallback
-                try:
-                    newest_file = None
-                    newest_time = 0
-                    for f in os.listdir(destination):
-                        file_path = os.path.join(destination, f)
-                        if os.path.isfile(file_path):
-                            mtime = os.path.getmtime(file_path)
-                            if mtime > newest_time:
-                                newest_time = mtime
-                                newest_file = file_path
-
-                    if newest_file and os.path.getsize(newest_file) > 0:
-                        logging.info(f"Found a file after error, assuming successful download: {newest_file}")
-                        downloaded_file_path = newest_file
-                    else:
-                        downloaded_file_path = None
-                except Exception as fallback_e:
-                    logging.warning(f"Failed to recover file after MEGA error: {fallback_e}", exc_info=True)
-                    downloaded_file_path = None
-
-            # Check final result
-            if downloaded_file_path and os.path.exists(downloaded_file_path):
-                logging.info(f"Downloaded file from Mega.nz: {downloaded_file_path}")
-                return downloaded_file_path
-            else:
-                # No file found or file not existing
-                logging.warning("No file downloaded from Mega.nz for this thread.")
-                return None
-
-        except Exception as e:
-            # If anything else unexpected happens, log it and return None
-            logging.error(f"Error downloading from Mega.nz: {e}", exc_info=True)
-            return None
-
-    def backup_megaupload(self, links):
-        """Implement backup logic for Megaupload."""
-        username = self.backup_host.get('username', '')
-        password = self.backup_host.get('password', '')
-        # TODO: Implement the actual backup logic using Selenium or APIs
-        logging.info(f"Backing up {len(links)} links via Megaupload.")
-        # Placeholder for backup implementation
-
-    # Add more backup methods as needed for other backup hosts # NEW
-    # def backup_another_host(self, links):
-    #     """Implement backup logic for AnotherHost.com."""
-    #     pass
-
-    # -----------------------------------
-    # 3.4 Insert Links into Keeplinks.org Account # NEW
-    # -----------------------------------
     def extract_url_id(self, keeplinks_url: str) -> str:
         """
         Extracts the url-id from a given Keeplinks URL.

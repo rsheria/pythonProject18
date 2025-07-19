@@ -166,7 +166,6 @@ class ForumBotGUI(QMainWindow):
         super().__init__()
         self.config = config
         self.user_manager = get_user_manager()
-        self.mega_upload_enabled = self.config.get('use_megaupload', False)
         self.active_upload_hosts = list(self.config.get('upload_hosts', []))
         if not self.active_upload_hosts:
             env_hosts = os.getenv('UPLOAD_HOSTS', '')
@@ -358,8 +357,6 @@ class ForumBotGUI(QMainWindow):
         
         # Connect the hosts updated signal
         self.settings_tab.hosts_updated.connect(self.on_upload_hosts_updated)
-        # Connect MegaUpload state changes
-        self.settings_tab.mega_state_changed.connect(self.toggle_megaupload)
 
         # إضافته لمنطقة المحتوى
         self.content_area.addWidget(self.settings_tab)
@@ -373,8 +370,8 @@ class ForumBotGUI(QMainWindow):
         # قائمة المضيفين
         self.active_upload_hosts = list(self.config['upload_hosts'])
 
-        # تمكين MegaUpload
-        self.mega_upload_enabled = self.config['use_megaupload']
+        # MegaUpload feature removed
+        self.mega_upload_enabled = False
 
         # (اختياري) حدّث أي ويدجت عرض المسار
         # مثلاً لو عندك label لعرض WinRAR path
@@ -2899,52 +2896,6 @@ class ForumBotGUI(QMainWindow):
 
         # Add the whole Process Threads view into the main content area
         self.content_area.addWidget(process_threads_widget)
-
-    def toggle_megaupload(self, state):
-        """Toggle MegaUpload functionality."""
-        try:
-            self.mega_upload_enabled = bool(state)
-            # Update the configuration
-            self.config['use_megaupload'] = self.mega_upload_enabled
-
-            # Update the bot's use_megaupload attribute
-            self.bot.use_megaupload = self.mega_upload_enabled
-
-            # Update the bot's MegaUpload state
-            success = self.bot.set_megaupload_state(self.mega_upload_enabled)
-
-            # If Mega is now enabled but the handler is None, re-initialize it
-            if self.mega_upload_enabled and not self.bot.mega_upload_handler:
-                # Attempt to initialize mega upload handler again
-                if not self.bot.initialize_mega_upload_handler():
-                    success = False  # If re-initialization failed, set success to False
-
-            # Save the state to the .env file
-            dotenv_path = find_dotenv()
-            if dotenv_path:
-                set_key(dotenv_path, 'USE_MEGUPLOAD', str(self.mega_upload_enabled).lower())
-                logging.info(f"MegaUpload state saved to .env: {self.mega_upload_enabled}")
-
-            if success and self.mega_upload_enabled and self.bot.mega_upload_handler:
-                status = "enabled"
-                self.statusBar().showMessage(f'MegaUpload {status} successfully')
-                logging.info(f"MegaUpload has been {status}")
-            elif not success and self.mega_upload_enabled:
-                self.statusBar().showMessage('Failed to initialize MegaUpload handler')
-                logging.error("Failed to initialize MegaUpload handler")
-
-                self.mega_upload_enabled = False
-                self.bot.use_megaupload = False
-            else:
-                # If user disabled it, just show disabled message
-                if not self.mega_upload_enabled:
-                    self.statusBar().showMessage('MegaUpload disabled')
-                    logging.info("MegaUpload has been disabled.")
-
-        except Exception as e:
-            logging.error(f"Error toggling MegaUpload: {e}", exc_info=True)
-            self.statusBar().showMessage('Error toggling MegaUpload')
-
 
     def format_bbcode(self, editor, start_tag, end_tag):
         """Apply BBCode formatting to the selected text in the specified editor."""

@@ -21,9 +21,7 @@ class SettingsWidget(QWidget):
     download_directory_changed = pyqtSignal(str)
     # Signal emitted when hosts list is updated
     hosts_updated = pyqtSignal(list)
-    # Signal emitted when MegaUpload state changes
-    mega_state_changed = pyqtSignal(bool)
-    
+
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -189,12 +187,6 @@ class SettingsWidget(QWidget):
         self.page_to_spin.setValue(1)
         pr_layout.addWidget(self.page_to_spin)
         sc_layout.addWidget(pr_group)
-
-        # — Mega Upload Toggle —
-        self.mega_cb = QCheckBox("Enable MegaUpload")
-        self.mega_cb.setChecked(False)
-        self.mega_cb.stateChanged.connect(lambda state: self.mega_state_changed.emit(bool(state)))
-        sc_layout.addWidget(self.mega_cb)
 
         # — Download Hosts Priority —
         priority_group = QGroupBox("Download Hosts Priority")
@@ -478,10 +470,7 @@ class SettingsWidget(QWidget):
         try:
             # Reset download directory
             self.download_edit.setText(self.config.get('download_dir', ''))
-            
-            # Reset MegaUpload checkbox
-            self.mega_cb.setChecked(False)
-            
+
             # Reset hosts list
             self.hosts_list.clear()
             
@@ -556,14 +545,7 @@ class SettingsWidget(QWidget):
                         )
                         item.setCheckState(Qt.Checked)
                         self.hosts_list.addItem(item)
-                
-                # MegaUpload checkbox
-                use_mega = settings_source.get('use_megaupload', False)
-                if isinstance(use_mega, str):
-                    use_mega = use_mega.lower() in ('true', '1', 'yes', 'on')
-                if hasattr(self, 'mega_cb') and self.mega_cb:
-                    self.mega_cb.setChecked(bool(use_mega))
-                
+
                 # Page range
                 page_from = settings_source.get('page_from', 1)
                 page_to = settings_source.get('page_to', 5)
@@ -729,8 +711,7 @@ class SettingsWidget(QWidget):
                 host = item.text().strip()
                 if host and item.checkState() == Qt.Checked:
                     new_hosts.append(host)
-            
-            new_mega = self.mega_cb.isChecked()
+
             new_from = self.page_from_spin.value()
             new_to = self.page_to_spin.value()
             new_api_key = self.katfile_api_key_input.text().strip()
@@ -753,7 +734,6 @@ class SettingsWidget(QWidget):
             new_settings = {
                 'download_dir': new_download_dir,
                 'upload_hosts': new_hosts,
-                'use_megaupload': new_mega,
                 'date_filters': list(self.date_filters),
                 'page_from': new_from,
                 'page_to': new_to,
@@ -802,8 +782,6 @@ class SettingsWidget(QWidget):
 
             # Emit updated hosts list so the main window can react immediately
             self.hosts_updated.emit(new_hosts)
-            # Emit MegaUpload state so main window can update
-            self.mega_state_changed.emit(new_mega)
 
             # Show success message
             QMessageBox.information(self, "Success", "Settings saved successfully!")

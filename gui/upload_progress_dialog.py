@@ -152,7 +152,7 @@ class UploadProgressDialog(QDialog):
         self.hosts_layout = QVBoxLayout(container)
 
         # Create widgets for each host
-        hosts = ['Rapidgator', 'Nitroflare', 'DDownload', 'KatFile', 'Mega']
+        hosts = ['Rapidgator-Main', 'Nitroflare', 'DDownload', 'KatFile', 'Rapidgator-Backup']
         for host in hosts:
             widget = HostUploadWidget(host)
             self.host_widgets[host.lower()] = widget

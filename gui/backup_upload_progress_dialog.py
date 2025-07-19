@@ -138,8 +138,8 @@ class BackupUploadProgressDialog(QDialog):
         container = QWidget()
         self.hosts_layout = QVBoxLayout(container)
 
-        # Only these four hosts for backup:
-        hosts = ['Rapidgator', 'Nitroflare', 'DDownload', 'KatFile']
+        # Hosts for backup including dedicated Rapidgator account
+        hosts = ['Rapidgator-Main', 'Nitroflare', 'DDownload', 'KatFile', 'Rapidgator-Backup']
         for host in hosts:
             widget = BackupHostUploadWidget(host)
             self.host_widgets[host.lower()] = widget
