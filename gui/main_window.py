@@ -2743,11 +2743,7 @@ class ForumBotGUI(QMainWindow):
             return
 
         for thread_id in self.selected_backup_threads:
-            links = self.backup_threads.get(thread_id, {}).get("links", [])
-            if links:
-                self.check_rapidgator_links_async(links)  # This method checks online/offline status
-            else:
-                logging.info(f"No links stored for thread {thread_id}")
+            self.check_rapidgator_links(thread_id)
 
         # Optional: Show success message
         QMessageBox.information(self, "Info", f"Checking Rapidgator links for {len(self.selected_backup_threads)} selected threads...")
@@ -2805,7 +2801,8 @@ class ForumBotGUI(QMainWindow):
             ("Category", 1),
             ("Thread ID", 2),
             ("Rapidgator Links", 3),
-            ("Keeplinks Link", 4),
+            ("RG Backup Link", 4),
+            ("Keeplinks Link", 5),
         ]:
             self.filter_column_combo.addItem(label, idx)
         filter_layout.addWidget(self.filter_column_combo)
@@ -2876,10 +2873,10 @@ class ForumBotGUI(QMainWindow):
         # --- Threads Table ----------------------------------------------------
         self.process_threads_table = QTableWidget()
         self.process_threads_table.setAlternatingRowColors(True)
-        self.process_threads_table.setColumnCount(5)
+        self.process_threads_table.setColumnCount(6)
         self.process_threads_table.setHorizontalHeaderLabels([
             "Thread Title", "Category", "Thread ID",
-            "Rapidgator Links", "Keeplinks Link"
+            "Rapidgator Links", "RG Backup Link", "Keeplinks Link"
         ])
 
         # Table appearance & behavior
@@ -2896,11 +2893,11 @@ class ForumBotGUI(QMainWindow):
         header.setFixedHeight(30)
 
         # Column widths and resize modes
-        widths = {0: 300, 1: 150, 2: 100, 3: 200, 4: 200}
+        widths = {0: 300, 1: 150, 2: 100, 3: 200, 4: 200, 5: 200}
         for col, w in widths.items():
             self.process_threads_table.setColumnWidth(col, w)
         header.setSectionResizeMode(0, QHeaderView.Stretch)
-        for col in (1, 2, 3, 4):
+        for col in (1, 2, 3, 4, 5):
             header.setSectionResizeMode(col, QHeaderView.Interactive)
 
         # Sorting & delegate & context menu
@@ -3948,14 +3945,15 @@ class ForumBotGUI(QMainWindow):
         try:
             # First ensure we have the correct base columns
             current_cols = self.process_threads_table.columnCount()
-            base_cols = 5  # Thread Title, Category, Thread ID, Rapidgator Links, Keeplinks Link
+            base_cols = 6  # Thread Title, Category, Thread ID, Rapidgator Links, RG Backup Link, Keeplinks Link
 
             # Add upload progress columns if they don't exist
             progress_cols = [
                 ("Rapidgator Progress", "rapidgator"),
                 ("Nitroflare Progress", "nitroflare"),
                 ("DDownload Progress", "ddownload"),
-                ("Katfile Progress", "katfile")
+                ("Katfile Progress", "katfile"),
+                ("RG Backup Progress", "rapidgator-backup")
             ]
 
             # Add columns for progress
@@ -4018,7 +4016,7 @@ class ForumBotGUI(QMainWindow):
             table = self.process_threads_table
 
             # Remove progress columns from right to left
-            while table.columnCount() > 5:  # Keep the original columns
+            while table.columnCount() > 6:  # Keep the original columns
                 table.removeColumn(table.columnCount() - 1)
 
             # Adjust column sizes
@@ -5490,7 +5488,7 @@ class ForumBotGUI(QMainWindow):
         self.process_threads_table.setColumnCount(6)
         self.process_threads_table.setHorizontalHeaderLabels([
             "Thread Title", "Category", "Thread ID",
-            "Rapidgator Links", "Keeplinks Link", "Mega.nz Link"
+            "Rapidgator Links", "RG Backup Link", "Keeplinks Link"
         ])
 
         for thread in flat_threads:
@@ -5613,6 +5611,18 @@ class ForumBotGUI(QMainWindow):
                 rapidgator_item.setBackground(background_brush)
             self.process_threads_table.setItem(row_position, 3, rapidgator_item)
 
+            # Rapidgator Backup Link
+            rg_backup_links = links.get('rapidgator-backup', [])
+            if isinstance(rg_backup_links, str):
+                rg_backup_links = [rg_backup_links]
+            rg_backup_text = "\n".join(rg_backup_links)
+            rg_backup_item = QTableWidgetItem(rg_backup_text)
+            rg_backup_item.setData(Qt.UserRole, status_str)
+            rg_backup_item.setData(Qt.UserRole + 1, status_class)
+            if status_class:
+                rg_backup_item.setBackground(background_brush)
+            self.process_threads_table.setItem(row_position, 4, rg_backup_item)
+
             # Keeplinks Link
             keeplinks_link = links.get('keeplinks', '')
             if isinstance(keeplinks_link, list):
@@ -5624,16 +5634,7 @@ class ForumBotGUI(QMainWindow):
                 keeplinks_item.setBackground(background_brush)
             self.process_threads_table.setItem(row_position, 4, keeplinks_item)
 
-            # Mega.nz Link
-            mega_link = links.get('mega.nz', '')
-            if isinstance(mega_link, list):
-                mega_link = "\n".join(mega_link)
-            mega_item = QTableWidgetItem(mega_link)
-            mega_item.setData(Qt.UserRole, status_str)  # Store status string for filtering
-            mega_item.setData(Qt.UserRole + 1, status_class)  # Store status class for styling
-            if status_class:
-                mega_item.setBackground(background_brush)
-            self.process_threads_table.setItem(row_position, 5, mega_item)
+            self.process_threads_table.setItem(row_position, 5, keeplinks_item)
 
 
 
@@ -5653,8 +5654,8 @@ class ForumBotGUI(QMainWindow):
                             # Convert old format to new
                             thread_data['links'] = {
                                 'rapidgator.net': [link for link in links if 'rapidgator.net' in link],
-                                'keeplinks': '',
-                                'mega.nz': ''
+                                'rapidgator-backup': [],
+                                'keeplinks': ''
                             }
 
             # Save updated format
@@ -6156,7 +6157,7 @@ class ForumBotGUI(QMainWindow):
         host_layout = QHBoxLayout()
         host_layout.addWidget(QLabel("File Host:"))
         host_combo = QComboBox()
-        host_combo.addItems(["rapidgator.net", "katfile.com", "nitroflare.com", "ddownload.com", "mega.nz", "other"])
+        host_combo.addItems(["rapidgator.net", "katfile.com", "nitroflare.com", "ddownload.com", "rapidgator-backup", "other"])
         host_layout.addWidget(host_combo)
         layout.addLayout(host_layout)
         

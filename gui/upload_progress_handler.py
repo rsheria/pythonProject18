@@ -148,7 +148,7 @@ class UploadProgressHandler:
         """Get the progress bar for a specific host."""
         try:
             # Calculate actual column index based on base columns
-            base_cols = 5  # Thread Title, Category, Thread ID, Rapidgator Links, Keeplinks Link
+            base_cols = 6  # Thread Title, Category, Thread ID, Rapidgator Links, RG Backup Link, Keeplinks Link
             col = base_cols + host_idx
 
             # Get the container widget
@@ -203,7 +203,7 @@ class UploadProgressHandler:
     def mark_complete(self, row: int, host_idx: int, success_msg: str = "Upload Complete"):
         """Explicitly mark an upload as complete."""
         try:
-            start_col = self.table.columnCount() - 4
+            start_col = self.table.columnCount() - 5
             col = start_col + host_idx
 
             progress_bar = self.get_progress_bar(row, col)
@@ -221,7 +221,7 @@ class UploadProgressHandler:
     def mark_error(self, row: int, host_idx: int, error_msg: str):
         """Explicitly mark an upload as failed."""
         try:
-            start_col = self.table.columnCount() - 4
+            start_col = self.table.columnCount() - 5
             col = start_col + host_idx
 
             progress_bar = self.get_progress_bar(row, col)
