@@ -1881,7 +1881,7 @@ class ForumBotGUI(QMainWindow):
             return
 
         # ---- ONE-TIME TOKEN CHECK ----
-        if not self.bot.rapidgator_token:
+        if not (self.bot.upload_rapidgator_token or self.bot.rapidgator_token):
             logging.warning("No Rapidgator API token found; skipping link checks for selected thread.")
             return
 
@@ -1933,19 +1933,26 @@ class ForumBotGUI(QMainWindow):
         QApplication.processEvents()
         logging.info(f"Link status updated for thread {thread_id} (dead_found={dead_found}).")
 
-    def check_rapidgator_links(self, thread_title=None):
+    def check_rapidgator_links(self, thread_id=None):
         """
         Check if Rapidgator links are still active.
-        If thread_title is provided, only check links for that thread.
-        Updates 'dead_rapidgator_links' and 'rapidgator_status'.
+        If ``thread_id`` is provided, only check links for that thread.
+        Updates ``dead_rapidgator_links`` and ``rapidgator_status``.
         """
         # ---- ONE-TIME TOKEN CHECK ----
-        if not self.bot.rapidgator_token:
+        if not (self.bot.upload_rapidgator_token or self.bot.rapidgator_token):
             logging.warning("No Rapidgator API token found. Skipping check_rapidgator_links().")
             return
 
-        if thread_title:
-            threads_to_check = {thread_title: self.backup_threads.get(thread_title)}
+        if thread_id:
+            threads_to_check = {
+                title: info
+                for title, info in self.backup_threads.items()
+                if info.get("thread_id") == thread_id
+            }
+            if not threads_to_check:
+                logging.error(f"No backup info found for thread ID '{thread_id}'.")
+                return
         else:
             threads_to_check = self.backup_threads
 
@@ -2020,7 +2027,7 @@ class ForumBotGUI(QMainWindow):
         but avoid repeated pop-ups if the Rapidgator token is missing.
         """
         # ---- ONE-TIME TOKEN CHECK ----
-        if not self.bot.rapidgator_token:
+        if not (self.bot.upload_rapidgator_token or self.bot.rapidgator_token):
             logging.warning("No Rapidgator API token found; skipping Rapidgator link checks for ALL threads.")
             return
 
@@ -2694,52 +2701,14 @@ class ForumBotGUI(QMainWindow):
         QMessageBox.information(self, "Download Started",
                                 f"Downloading to:\n{dest}\n\nSize: {size} bytes")
 
-    def check_rapidgator_links(self):
-        """Check if Rapidgator links are still active."""
-        for thread_title, thread_info in self.backup_threads.items():
-            rapidgator_links = thread_info.get('rapidgator_links', [])
-            for link in rapidgator_links:
-                if not self.is_link_active(link):
-                    logging.info(f"Link {link} is inactive.")
-                    # Mark in GUI or take necessary action
-
     def is_link_active(self, url):
         """
         Check if a Rapidgator link is active using Rapidgator's API.
-        Returns True if the link is alive (status=ACCESS), False otherwise.
+        Returns True if the link is alive, False otherwise.
         """
         # If token was never set, skip
-        if not self.bot.rapidgator_token:
-            logging.warning("Rapidgator token not found; is_link_active() skipping link check.")
-            return False
-
-        try:
-            api_url = 'https://rapidgator.net/api/v2/file/check_link'
-            params = {
-                'token': self.bot.rapidgator_token,
-                'url': url
-            }
-            response = requests.get(api_url, params=params, timeout=10)
-            result = response.json()
-
-            if response.status_code == 200 and result.get('status') == 200:
-                file_info = result.get('response', [])
-                if file_info:
-                    # For single link, we expect a single item
-                    link_status = file_info[0].get('status', '')
-                    return (link_status == 'ACCESS')
-                else:
-                    logging.error("Empty 'response' from Rapidgator API. Marking link dead.")
-                    return False
-            else:
-                details = result.get('details', 'Unknown error')
-                logging.error(f"Rapidgator API returned error: {details}")
-                return False
-
-        except Exception as e:
-            logging.error(f"Error checking link {url}: {e}", exc_info=True)
-            return False
-
+        result = self.bot.check_rapidgator_link_status(url)
+        return bool(result and result.get('status') == 'ACCESS')
     def init_timers(self):
         """Initialize timers for periodic tasks."""
         self.link_check_timer = QTimer()
@@ -6906,8 +6875,9 @@ class ForumBotGUI(QMainWindow):
                         self.bot.is_logged_in = False
                     
                     # Load Rapidgator tokens
-                    self.bot.load_token('download')
-                    self.bot.load_token('upload')
+                    # Load Rapidgator tokens (backup for download, main for upload)
+                    self.bot.load_token('backup')
+                    self.bot.load_token('main')
                     
                     # Load processed thread IDs
                     self.bot.load_processed_thread_ids()

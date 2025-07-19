@@ -578,42 +578,57 @@ class ForumBotSelenium:
             return ''
 
     def check_rapidgator_link_status(self, link):
-        token = self.rapidgator_token or os.getenv('RAPIDGATOR_TOKEN', 'QlweUH38-TEST-TOKEN')
-        if not token:
-            logging.error("Rapidgator token is not available.")
-            return None
+        """Check a Rapidgator link using the /file/info endpoint."""
+        # Prefer main token but fall back to backup
+        account_type = None
+        if self.upload_rapidgator_token:
+            account_type = 'main'
+        elif self.rapidgator_token:
+            account_type = 'backup'
 
-        api_url = "https://rapidgator.net/api/v2/file/check_link"
+        if not account_type:
+            if self.load_token('main'):
+                account_type = 'main'
+            elif self.load_token('backup'):
+                account_type = 'backup'
+
+        if not account_type or not self.ensure_valid_token(account_type):
+            logging.error("Rapidgator token is not available.")
+            return {'status': 'DEAD'}
+
+        token = self.upload_rapidgator_token if account_type == 'main' else self.rapidgator_token
+
+        # Extract file_id from URL
+        try:
+            file_id = link.rstrip('/').split('/')[-2]
+        except Exception:
+            logging.error("Unable to parse Rapidgator file ID from %s", link)
+            return {'status': 'DEAD'}
+
+        api_url = "https://rapidgator.net/api/v2/file/info"
         params = {
             'token': token,
-            'url': link
+            'file_id': file_id
         }
 
         try:
-            response = requests.get(api_url, params=params)
+            response = requests.get(api_url, params=params, timeout=10)
             if response.status_code == 200:
                 data = response.json()
-                file_info = data.get('response', [])
-                if not file_info:
-                    # No info means dead or not accessible
-                    return {'status': 'DEAD'}
-
-                # file_info should be a list, take the first element
-                file_data = file_info[0]
-
-                # If file_data does not have 'status', or 'status' != 'ACCESS', assume dead
-                if file_data.get('status') != 'ACCESS':
+                if data.get('response_status') == 200:
+                    return {'status': 'ACCESS', **data.get('response', {})}
+                else:
+                    logging.warning("Link appears dead: %s", data.get('response_details'))
                     return {'status': 'DEAD'}
 
                 return file_data
             else:
-                logging.error(f"Failed to check link status. Response code: {response.status_code}")
-                # Treat non-200 response as dead
+                logging.error("Failed to check link status. HTTP %s", response.status_code)
                 return {'status': 'DEAD'}
 
         except Exception as e:
             logging.error(f"Exception occurred while checking Rapidgator link status: {e}")
-            # On exception, consider link dead as well
+
             return {'status': 'DEAD'}
 
     def parse_content_disposition(self, content_disp):
@@ -2316,7 +2331,7 @@ class ForumBotSelenium:
                 return None
 
             # Step 2: Load the upload token
-            if not self.load_token('upload'):
+            if not self.load_token('main'):
                 logging.error("Failed to load upload token. Aborting file URL retrieval.")
                 return None
 
