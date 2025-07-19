@@ -13,7 +13,6 @@ from uploaders.rapidgator_upload_handler import RapidgatorUploadHandler
 from uploaders.nitroflare_upload_handler import NitroflareUploadHandler
 from uploaders.ddownload_upload_handler import DDownloadUploadHandler
 from uploaders.katfile_upload_handler import KatfileUploadHandler
-from uploaders.mega_upload_handler import MegaUploadHandler
 
 class UploadStatus(Enum):
     WAITING   = "waiting"
@@ -35,14 +34,12 @@ class UploadWorker(QThread):
             row: int,
             folder_path: str,
             thread_id: str,
-            upload_hosts: Optional[List[str]] = None,
-            enable_mega: bool = False):
+            upload_hosts: Optional[List[str]] = None):
         super().__init__()  # QThread init
         self.bot = bot
         self.row = row
         self.folder_path = Path(folder_path)
         self.thread_id = thread_id
-        self.enable_mega = enable_mega
         self.config = bot.config  # Store config reference for quick access
 
         # تحكم بالإيقاف والإلغاء
@@ -58,8 +55,7 @@ class UploadWorker(QThread):
             upload_hosts = bot.config.get('upload_hosts', [])
 
         self.hosts = list(upload_hosts)
-        if self.enable_mega and 'mega' not in self.hosts:
-            self.hosts.append('mega')
+
 
         # Handlers (لمستضيفين لا يحتاجون مسار ملف عند الإنشاء)
         self.handlers: dict[str, Any] = {}
@@ -69,8 +65,6 @@ class UploadWorker(QThread):
             self.handlers['ddownload'] = DDownloadUploadHandler(self.bot)
         if 'katfile' in self.hosts:
             self.handlers['katfile'] = KatfileUploadHandler(self.bot)
-        if 'mega' in self.hosts:
-            self.handlers['mega'] = MegaUploadHandler(self.bot)
         # ملاحظة: Rapidgator handler سيُنشأ لكل ملف على حدة داخل ‎_upload_single
 
         # جمع الملفات
@@ -246,36 +240,28 @@ class UploadWorker(QThread):
             return None
 
     def _prepare_final_urls(self) -> dict:
-        """
-        Combine per-host URLs into one dict.
-        If any non-mega host failed → return {'error': msg}.
-        Otherwise include each host's list and add Keeplinks on all non-mega URLs.
-        """
+        """Combine per-host URLs into one dict and optionally add Keeplinks."""
         self._check_control()
 
         # إذا أي مستضيف غير mega فشل → نرجع خطأ
         failed = any(
-            self.upload_results[i]['status'] == 'failed' and self.hosts[i] != 'mega'
+            self.upload_results[i]['status'] == 'failed'
             for i in range(len(self.hosts))
         )
         if failed:
             return {'error': 'بعض مواقع الرفع فشلت، يرجى المحاولة مرة أخرى.'}
 
         final = {}
-        all_non_mega = []
+        all_urls = []
 
         for i, host in enumerate(self.hosts):
             urls = self.upload_results[i]['urls']
-            if host == 'mega':
-                if urls:
-                    final['mega'] = urls
-            else:
-                final[host] = urls
-                all_non_mega.extend(urls)
+            final[host] = urls
+            all_urls.extend(urls)
 
-        # إضافة Keeplinks إذا وجدنا روابط غير Mega
-        if all_non_mega:
-            keeplink = self.bot.send_to_keeplinks(all_non_mega)
+        # Add Keeplinks if we have any URLs
+        if all_urls:
+            keeplink = self.bot.send_to_keeplinks(all_urls)
             if keeplink:
                 final['keeplinks'] = keeplink
 

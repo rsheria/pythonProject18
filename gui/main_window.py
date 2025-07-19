@@ -378,9 +378,6 @@ class ForumBotGUI(QMainWindow):
         # قائمة المضيفين
         self.active_upload_hosts = list(self.config['upload_hosts'])
 
-        # MegaUpload feature removed
-        self.mega_upload_enabled = False
-
         # (اختياري) حدّث أي ويدجت عرض المسار
         # مثلاً لو عندك label لعرض WinRAR path
         self.winrar_exe_label.setText(f"WinRAR Executable: {self.config.get('winrar_exe_path')}")
@@ -3961,9 +3958,6 @@ class ForumBotGUI(QMainWindow):
                 ("Katfile Progress", "katfile")
             ]
 
-            if self.mega_upload_enabled:
-                progress_cols.append(("Mega Progress", "mega"))
-
             # Add columns for progress
             for col_name, host in progress_cols:
                 col_idx = self.process_threads_table.columnCount()
@@ -4306,7 +4300,7 @@ class ForumBotGUI(QMainWindow):
             }.get(host.lower())
 
             if host_index is not None:
-                start_col = self.process_threads_table.columnCount() - (5 if self.mega_upload_enabled else 4)
+                start_col = self.process_threads_table.columnCount() - 4
                 progress_bar = self.process_threads_table.cellWidget(row, start_col + host_index)
                 if progress_bar:
                     if status.startswith("Error"):
@@ -4370,8 +4364,8 @@ class ForumBotGUI(QMainWindow):
     def cleanup_upload_columns(self):
         """Remove the upload progress columns after completion."""
         try:
-            # Remove the last 4 or 5 columns (depending on mega enabled)
-            num_cols = 5 if self.mega_upload_enabled else 4
+            # Remove the upload progress columns
+            num_cols = 4
             for _ in range(num_cols):
                 last_col = self.process_threads_table.columnCount() - 1
                 self.process_threads_table.removeColumn(last_col)
@@ -4461,19 +4455,6 @@ class ForumBotGUI(QMainWindow):
                 except Exception as e:
                     self.update_host_progress(host_progress_bars['katfile'], 0, f"Error: {str(e)}", error=True)
                     logging.error(f"KatFile upload error: {str(e)}")
-
-                # 5. MegaUpload (if enabled)
-                if self.mega_upload_enabled and self.mega_upload_handler:
-                    try:
-                        self.update_host_progress(host_progress_bars['mega'], 0, "Uploading...")
-                        mega_url = self.bot.mega_upload_handler.upload_file(file_path)
-                        if mega_url:
-                            self.update_host_progress(host_progress_bars['mega'], 100, "Complete", success=True)
-                        else:
-                            self.update_host_progress(host_progress_bars['mega'], 0, "Failed", error=True)
-                    except Exception as e:
-                        self.update_host_progress(host_progress_bars['mega'], 0, f"Error: {str(e)}", error=True)
-                        logging.error(f"MegaUpload error: {str(e)}")
 
             # Generate Keeplinks if we have URLs
             keeplinks_url = None
@@ -4712,7 +4693,6 @@ class ForumBotGUI(QMainWindow):
                 'nitroflare': [],
                 'ddownload': [],
                 'katfile': [],
-                'mega': []
             }
 
             for url in urls:
@@ -4725,8 +4705,6 @@ class ForumBotGUI(QMainWindow):
                     host_urls['ddownload'].append(url)
                 elif 'katfile' in lower_url:
                     host_urls['katfile'].append(url)
-                elif 'mega' in lower_url:
-                    host_urls['mega'].append(url)
 
             # Update process_threads data
             for category in self.process_threads.values():
@@ -4737,14 +4715,12 @@ class ForumBotGUI(QMainWindow):
                         'nitroflare.com': host_urls['nitroflare'],
                         'ddownload.com': host_urls['ddownload'],
                         'katfile.com': host_urls['katfile'],
-                        'mega.nz': host_urls['mega']
                     }
 
             # Update backup_threads data as lists, not single strings
             self.backup_threads[thread_title] = {
                 'rapidgator_links': host_urls['rapidgator'],
                 'keeplinks_link': keeplinks_url,
-                'mega_links': host_urls['mega']
             }
 
             # Save updated data

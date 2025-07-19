@@ -203,8 +203,7 @@ class UploadProgressHandler:
     def mark_complete(self, row: int, host_idx: int, success_msg: str = "Upload Complete"):
         """Explicitly mark an upload as complete."""
         try:
-            mega_enabled = getattr(self.table, 'mega_upload_enabled', False)
-            start_col = self.table.columnCount() - (5 if mega_enabled else 4)
+            start_col = self.table.columnCount() - 4
             col = start_col + host_idx
 
             progress_bar = self.get_progress_bar(row, col)
@@ -222,8 +221,7 @@ class UploadProgressHandler:
     def mark_error(self, row: int, host_idx: int, error_msg: str):
         """Explicitly mark an upload as failed."""
         try:
-            mega_enabled = getattr(self.table, 'mega_upload_enabled', False)
-            start_col = self.table.columnCount() - (5 if mega_enabled else 4)
+            start_col = self.table.columnCount() - 4
             col = start_col + host_idx
 
             progress_bar = self.get_progress_bar(row, col)

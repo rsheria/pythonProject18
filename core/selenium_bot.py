@@ -412,30 +412,6 @@ class ForumBotSelenium:
             formatted.append(f"{host}: " + ', '.join(encoded_links))
         return '\n'.join(formatted)
 
-    def upload_file_to_megaupload(self, file_path, category_name, thread_id):
-        """
-        Uploads a file to MegaUpload and handles the response.
-
-        Parameters:
-            file_path (str): Path to the file to upload.
-            category_name (str): Name of the category.
-            thread_id (str): ID of the thread.
-
-        Returns:
-            str: The public URL of the uploaded file, or None if upload failed.
-        """
-        logging.info(
-            f"Uploading file '{file_path}' to MegaUpload for thread ID '{thread_id}' in category '{category_name}'.")
-        public_url = self.upload_to_megaupload(file_path)
-
-        if public_url:
-            logging.info(f"File uploaded successfully to MegaUpload: {public_url}")
-            # Further processing, e.g., updating a database or notifying the user
-            return public_url
-        else:
-            logging.error(f"Failed to upload file '{file_path}' to MegaUpload.")
-            return None
-
     def group_links_by_host(self, urls):
         """Group URLs by their host."""
         grouped_links = defaultdict(list)
@@ -599,13 +575,14 @@ class ForumBotSelenium:
             return ''
 
     def check_rapidgator_link_status(self, link):
-        if not self.rapidgator_token:
+        token = self.rapidgator_token or os.getenv('RAPIDGATOR_TOKEN', 'QlweUH38-TEST-TOKEN')
+        if not token:
             logging.error("Rapidgator token is not available.")
             return None
 
         api_url = "https://rapidgator.net/api/v2/file/check_link"
         params = {
-            'token': self.rapidgator_token,
+            'token': token,
             'url': link
         }
 
@@ -841,9 +818,9 @@ class ForumBotSelenium:
 
     def load_backup_host(self):
         """Load backup host configuration from environment variables."""
-        backup_host = os.getenv('BACKUP_HOST', '').lower()
-        backup_username = os.getenv('megaupload_username', '')
-        backup_password = os.getenv('megaupload_password', '')
+        backup_host = 'rapidgator'
+        backup_username = os.getenv('UPLOAD_RAPIDGATOR_LOGIN', '')
+        backup_password = os.getenv('UPLOAD_RAPIDGATOR_PASSWORD', '')
         logging.debug(f"Loaded backup host: {backup_host}")
         return {
             'host': backup_host,
