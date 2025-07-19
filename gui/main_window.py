@@ -1536,13 +1536,19 @@ class ForumBotGUI(QMainWindow):
             if not backup_links:
                 logging.error(f"No Rapidgator backup links found for thread '{thread_title}'.")
                 QMessageBox.warning(self, "No Backup", "No Rapidgator backup links found.")
+
+                return
+            tid = str(thread_info.get('thread_id', ''))
+            if not tid:
+                logging.error("No thread_id found in thread_info. Cannot determine download directory.")
+                QMessageBox.warning(self, "Missing Data", "No thread ID found in backup data.")
                 return
 
             # Store state for multi-link download
             self._reupload_state = {
                 'thread_title': thread_title,
                 'thread_info': thread_info,
-                'thread_id': thread_id,
+                'thread_id': tid,
                 'rg_links': backup_links,
                 'current_index': 0,
                 'downloaded_files': []
