@@ -520,15 +520,18 @@ class SettingsWidget(QWidget):
             if not hasattr(self, 'download_edit') or not self.download_edit:
                 logging.warning("UI elements not initialized yet, skipping settings load")
                 return
-                
+            # Default to global config in case any errors occur before we
+            # determine the appropriate settings source
+            settings_source = self.config
+            source_name = "global config (no user)"
+
             # If user is logged in and this isn't an initial load, use user
             # settings. Otherwise use config for most values but leave
             # user-specific sections like upload hosts blank.
             if self.user_manager.get_current_user() and not initial:
                 settings_source = self.user_manager.get_all_user_settings()
                 source_name = f"user '{self.user_manager.get_current_user()}'"
-            else:
-                source_name = "global config (no user)"
+
             
             # Safely set UI elements with existence checks
             try:
