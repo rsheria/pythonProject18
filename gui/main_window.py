@@ -21,7 +21,8 @@ from selenium.common import TimeoutException, ElementClickInterceptedException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from .dialogs import DownloadProgressDialog, UploadProgressDialog, LinksDialog
+from .dialogs import DownloadProgressDialog, LinksDialog
+from .upload_progress_dialog import UploadProgressDialog
 from core.file_processor import FileProcessor
 from core.file_monitor import FileMonitor
 from workers.login_thread import LoginThread
@@ -175,6 +176,11 @@ class ForumBotGUI(QMainWindow):
 
         # Rapidgator backup preference
         self.use_backup_rg = bool(self.config.get('use_backup_rg', False))
+        if self.use_backup_rg and 'rapidgator-backup' not in self.active_upload_hosts:
+            self.active_upload_hosts.append('rapidgator-backup')
+        elif not self.use_backup_rg and 'rapidgator-backup' in self.active_upload_hosts:
+            self.active_upload_hosts.remove('rapidgator-backup')
+        self.config['upload_hosts'] = list(self.active_upload_hosts)
 
         # Initialize the handler first
         self.progress_handler = None
@@ -450,6 +456,18 @@ class ForumBotGUI(QMainWindow):
             # Update bot instance if available
             if hasattr(self, 'bot') and self.bot:
                 self.bot.use_backup_rg = self.use_backup_rg
+
+            # Ensure host list reflects the setting
+            if self.use_backup_rg:
+                if 'rapidgator-backup' not in self.active_upload_hosts:
+                    self.active_upload_hosts.append('rapidgator-backup')
+            else:
+                if 'rapidgator-backup' in self.active_upload_hosts:
+                    self.active_upload_hosts.remove('rapidgator-backup')
+
+            self.config['upload_hosts'] = list(self.active_upload_hosts)
+            if hasattr(self.bot, 'upload_hosts'):
+                self.bot.upload_hosts = list(self.active_upload_hosts)
 
             # Persist user preference
             if self.user_manager.get_current_user():
@@ -1638,7 +1656,7 @@ class ForumBotGUI(QMainWindow):
         self.backup_upload_progress_dialog.activateWindow()
 
         thread_id = thread_info.get('thread_id', '')
-        enable_mega = False  # skip mega upload in reupload logic
+
 
         # ***INSTEAD OF USING os.path.dirname(main_file)***
         # we rely on the same folder we used for the MegaDownloadWorker:
@@ -1657,7 +1675,6 @@ class ForumBotGUI(QMainWindow):
             row=row,
             folder_path=reupload_folder,
             thread_id=thread_id,
-            enable_mega=enable_mega
         )
 
         self.current_upload_worker.upload_complete.connect(
@@ -1677,10 +1694,9 @@ class ForumBotGUI(QMainWindow):
 
             # 2) Extract newly uploaded links
             rapidgator_links = urls_dict.get('rapidgator', [])
-            backup_rg_url = (
-                urls_dict.get('rapidgator-backup')
-                or urls_dict.get('backup_rg_url')
-            )
+            backup_rg_urls = urls_dict.get('rapidgator-backup', [])
+            if isinstance(backup_rg_urls, str):
+                backup_rg_urls = [backup_rg_urls]
             nitroflare_links = urls_dict.get('nitroflare', [])
             ddownload_links = urls_dict.get('ddownload', [])
             katfile_links = urls_dict.get('katfile', [])
@@ -1707,8 +1723,8 @@ class ForumBotGUI(QMainWindow):
             # If success, store them in backup data
             thread_info['keeplinks_link'] = keeplinks_url  # final Keeplinks
             thread_info['rapidgator_links'] = rapidgator_links
-            if backup_rg_url:
-                thread_info['rapidgator_backup_links'] = [backup_rg_url]
+            if backup_rg_urls:
+                thread_info['rapidgator_backup_links'] = list(backup_rg_urls)
             thread_info['dead_rapidgator_links'] = []  # reset dead links
             # If new mega links were provided, keep them
             if mega_links:
@@ -2624,7 +2640,13 @@ class ForumBotGUI(QMainWindow):
 
             # Rapidgator Backup Link
             rg_backup_links = thread_info.get('rapidgator_backup_links', [])
-            rg_backup_text = "\n".join(rg_backup_links)
+            flat_links = []
+            for link in rg_backup_links:
+                if isinstance(link, list):
+                    flat_links.extend(link)
+                else:
+                    flat_links.append(link)
+            rg_backup_text = "\n".join(flat_links)
             rg_backup_item = QTableWidgetItem(rg_backup_text)
             rg_backup_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             self.backup_threads_table.setItem(row_position, 3, rg_backup_item)
@@ -3865,10 +3887,9 @@ class ForumBotGUI(QMainWindow):
 
                 # 2) Pull out newly-uploaded host links
                 rapidgator_links = urls_dict.get('rapidgator', [])
-                backup_rg_url = (
-                    urls_dict.get('rapidgator-backup')
-                    or urls_dict.get('backup_rg_url')
-                )
+                backup_rg_urls = urls_dict.get('rapidgator-backup', [])
+                if isinstance(backup_rg_urls, str):
+                    backup_rg_urls = [backup_rg_urls]
                 nitroflare_links = urls_dict.get('nitroflare', [])
                 ddownload_links = urls_dict.get('ddownload', [])
                 katfile_links = urls_dict.get('katfile', [])
@@ -3884,9 +3905,7 @@ class ForumBotGUI(QMainWindow):
                     'nitroflare.com': nitroflare_links,
                     'ddownload.com': ddownload_links,
                     'katfile.com': katfile_links,
-                    'rapidgator-backup': [backup_rg_url]
-                    if backup_rg_url
-                    else [],
+                    'rapidgator-backup': backup_rg_urls,
                     'keeplinks': new_keeplinks,
                 }
 
@@ -3922,8 +3941,7 @@ class ForumBotGUI(QMainWindow):
                 backup_info = self.backup_threads.get(thread_title, {})
                 backup_info['thread_id'] = thread_id
                 backup_info['rapidgator_links'] = rapidgator_links
-                if backup_rg_url:
-                    backup_info['rapidgator_backup_links'] = [backup_rg_url]
+                backup_info['rapidgator_backup_links'] = backup_rg_urls
                 backup_info['keeplinks_link'] = new_keeplinks
 
                 backup_info['katfile_links'] = katfile_links
@@ -3949,7 +3967,7 @@ class ForumBotGUI(QMainWindow):
 
             # Add upload progress columns if they don't exist
             progress_cols = [
-                ("Rapidgator Progress", "rapidgator"),
+                ("Rapidgator Progress", "rapidgator-main"),
                 ("Nitroflare Progress", "nitroflare"),
                 ("DDownload Progress", "ddownload"),
                 ("Katfile Progress", "katfile"),
@@ -4267,7 +4285,7 @@ class ForumBotGUI(QMainWindow):
     def get_host_name(self, host_idx: int) -> str:
         """Get host name from index - matches table columns"""
         hosts = [
-            'rapidgator',
+            'rapidgator-main',
             'nitroflare',
             'ddownload',
             'katfile',
@@ -4542,7 +4560,7 @@ class ForumBotGUI(QMainWindow):
             self.save_process_threads_data()
 
     def update_thread_data_and_ui(self, category_name, thread_title, thread_id,
-                                  uploaded_urls, keeplinks_url, backup_rg_url=None):
+                                  uploaded_urls, keeplinks_url, backup_rg_urls=None):
         """Update thread data and UI immediately after upload completion."""
         try:
 
@@ -4555,7 +4573,7 @@ class ForumBotGUI(QMainWindow):
                     'nitroflare.com': [url for url in uploaded_urls if 'nitroflare.com' in url],
                     'ddownload.com': [url for url in uploaded_urls if 'ddownload.com' in url],
                     'katfile.com': [url for url in uploaded_urls if 'katfile.com' in url],
-                    'rapidgator-backup': [backup_rg_url] if backup_rg_url else [],
+                    'rapidgator-backup': list(backup_rg_urls) if backup_rg_urls else [],
                     'keeplinks': keeplinks_url,
                 }
 
@@ -4563,7 +4581,7 @@ class ForumBotGUI(QMainWindow):
             self.backup_threads[thread_title] = {
                 'thread_id': thread_id,
                 'rapidgator_links': [url for url in uploaded_urls if 'rapidgator.net' in url],
-                'rapidgator_backup_links': [backup_rg_url] if backup_rg_url else [],
+                'rapidgator_backup_links': list(backup_rg_urls) if backup_rg_urls else [],
                 'keeplinks_link': keeplinks_url,
             }
 
@@ -4846,9 +4864,13 @@ class ForumBotGUI(QMainWindow):
 
             # Rapidgator Backup Links
             rg_backup_links = thread_info.get('rapidgator_backup_links', [])
-            if isinstance(rg_backup_links, str):
-                rg_backup_links = [rg_backup_links]
-            rg_backup_text = "\n".join(rg_backup_links)
+            flat_links = []
+            for link in rg_backup_links:
+                if isinstance(link, list):
+                    flat_links.extend(link)
+                else:
+                    flat_links.append(link)
+            rg_backup_text = "\n".join(flat_links)
             rg_backup_item = QTableWidgetItem(rg_backup_text)
             self.backup_threads_table.setItem(row_position, 3, rg_backup_item)
 
@@ -5613,9 +5635,13 @@ class ForumBotGUI(QMainWindow):
 
             # Rapidgator Backup Link
             rg_backup_links = links.get('rapidgator-backup', [])
-            if isinstance(rg_backup_links, str):
-                rg_backup_links = [rg_backup_links]
-            rg_backup_text = "\n".join(rg_backup_links)
+            flat_backup = []
+            for link in rg_backup_links:
+                if isinstance(link, list):
+                    flat_backup.extend(link)
+                else:
+                    flat_backup.append(link)
+            rg_backup_text = "\n".join(flat_backup)
             rg_backup_item = QTableWidgetItem(rg_backup_text)
             rg_backup_item.setData(Qt.UserRole, status_str)
             rg_backup_item.setData(Qt.UserRole + 1, status_class)

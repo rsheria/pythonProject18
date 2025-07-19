@@ -186,13 +186,19 @@ class UploadWorker(QThread):
         host = self.hosts[host_idx]
 
         # ─── Handler لكل مستضيف ─────────────────────────────────────
-        if host == 'rapidgator':
-            # Get token from config or from bot if not saved yet
-            token = (
-                self.config.get('rapidgator_api_token', '')  # from Settings if saved
-                or getattr(self.bot, 'rapidgator_token', '')  # from Validate if not saved
-            )
-            
+        if host in ('rapidgator', 'rapidgator-backup'):
+            if host == 'rapidgator':
+                token = (
+                    self.config.get('rapidgator_api_token', '')
+                    or getattr(self.bot, 'upload_rapidgator_token', '')
+                    or getattr(self.bot, 'rg_main_token', '')
+                )
+            else:  # rapidgator-backup
+                token = (
+                    self.config.get('rapidgator_backup_api_token', '')
+                    or getattr(self.bot, 'rg_backup_token', '')
+                    or getattr(self.bot, 'rapidgator_token', '')
+                )
             try:
                 # Initialize with just the filepath and token
                 # Credentials will be loaded from environment variables
