@@ -1836,6 +1836,7 @@ class ForumBotSelenium:
             return False
 
     def update_keeplinks_links(self, keeplinks_url, new_links):
+        """Update a Keeplinks URL with new links and return the updated URL."""
         try:
             # Extract the URL ID from the keeplinks_url
             url_id = self.extract_keeplinks_url_id(keeplinks_url)
@@ -1845,7 +1846,13 @@ class ForumBotSelenium:
 
             # Prepare the API parameters
             api_url = "https://www.keeplinks.org/api.php"
-            api_hash = self.config.get('keeplinks_api_hash', '').strip()
+            api_hash = (
+                self.config.get('keeplinks_api_hash', '').strip()
+                or os.getenv("KEEP_LINKS_API_HASH", "").strip()
+            )
+            if not api_hash:
+                logging.error("Keeplinks API hash is missing")
+                return None
             all_urls_string = ','.join(new_links)
             api_params = {
                 'apihash': api_hash,
@@ -2574,7 +2581,13 @@ class ForumBotSelenium:
         This creates a new Keeplinks link with only recaptcha enabled.
         """
         keeplinks_api_url = "https://www.keeplinks.org/api.php"
-        api_hash = os.getenv("KEEP_LINKS_API_HASH")
+        api_hash = (
+            os.getenv("KEEP_LINKS_API_HASH", "").strip()
+            or self.config.get('keeplinks_api_hash', '').strip()
+        )
+        if not api_hash:
+            logging.error("Keeplinks API hash is missing")
+            return False
 
         # Join URLs into a comma-separated string
         links_to_protect = ",".join(urls)
@@ -2622,7 +2635,13 @@ class ForumBotSelenium:
         - urls: A list of new links to set in the Keeplinks link.
         """
         keeplinks_api_url = "https://www.keeplinks.org/api.php"
-        api_hash = os.getenv("KEEP_LINKS_API_HASH")
+        api_hash = (
+            os.getenv("KEEP_LINKS_API_HASH", "").strip()
+            or self.config.get('keeplinks_api_hash', '').strip()
+        )
+        if not api_hash:
+            logging.error("Keeplinks API hash is missing")
+            return False
 
         url_id = self.extract_url_id(keeplinks_url)
         if not url_id:

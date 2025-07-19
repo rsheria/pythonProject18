@@ -1727,11 +1727,11 @@ class ForumBotGUI(QMainWindow):
                 return
 
             # Next: actually update Keeplinks link if you want with the new links
-            update_success = self.bot.update_keeplinks(keeplinks_url, new_links)
-            if not update_success:
+            updated_link = self.bot.update_keeplinks_links(keeplinks_url, new_links)
+            if not updated_link:
                 QMessageBox.warning(self, "Update Failed", "Could not update Keeplinks link with new links.")
                 return
-
+            keeplinks_url = updated_link
             # If success, store them in backup data
             thread_info['keeplinks_link'] = keeplinks_url  # final Keeplinks
             thread_info['rapidgator_links'] = rapidgator_links
@@ -2557,8 +2557,10 @@ class ForumBotGUI(QMainWindow):
             QMessageBox.warning(self, "Keeplinks Link Missing", "Cannot update Keeplinks without the original link.")
             return
 
-        update_success = self.bot.update_keeplinks(keeplinks_link, new_links)
-        if update_success:
+        updated_link = self.bot.update_keeplinks_links(keeplinks_link, new_links)
+        if updated_link:
+            logging.info("Keeplinks link updated successfully.")
+            keeplinks_link = updated_link
             logging.info("Keeplinks link updated successfully.")
             # Update Rapidgator links in backup data
             thread_info['rapidgator_links'] = new_links
