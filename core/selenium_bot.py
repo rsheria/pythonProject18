@@ -175,15 +175,6 @@ class ForumBotSelenium:
         ]
         self.use_backup_rg = self.config.get('use_backup_rg', False) if self.config else False
 
-        # Step 6: Rapidgator Backup (optional)
-        if self.use_backup_rg:
-            try:
-                backup_url = self.upload_to_rapidgator_backup(file_path)
-                if backup_url:
-                    logging.info(f"Rapidgator backup successful: {backup_url}")
-            except Exception as e:
-                logging.error(f"Rapidgator backup upload error: {e}")
-
         # Initialize download directory
         if not os.path.exists(self.download_dir):
             os.makedirs(self.download_dir, exist_ok=True)
