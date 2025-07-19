@@ -1643,7 +1643,9 @@ class ForumBotGUI(QMainWindow):
             self.backup_upload_progress_dialog.close()
             self.backup_upload_progress_dialog = None
 
-        from backup_upload_progress_dialog import BackupUploadProgressDialog
+        # Import dialog from the gui package to ensure the module can be found
+        # when running the application from the project root
+        from gui.backup_upload_progress_dialog import BackupUploadProgressDialog
         self.backup_upload_progress_dialog = BackupUploadProgressDialog(parent=self)
         self.backup_upload_progress_dialog.show()
         self.backup_upload_progress_dialog.raise_()
