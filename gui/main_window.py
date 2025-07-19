@@ -1680,6 +1680,10 @@ class ForumBotGUI(QMainWindow):
 
             # 2) Extract newly uploaded links
             rapidgator_links = urls_dict.get('rapidgator', [])
+            backup_rg_url = (
+                urls_dict.get('rapidgator-backup')
+                or urls_dict.get('backup_rg_url')
+            )
             nitroflare_links = urls_dict.get('nitroflare', [])
             ddownload_links = urls_dict.get('ddownload', [])
             katfile_links = urls_dict.get('katfile', [])
@@ -1706,6 +1710,8 @@ class ForumBotGUI(QMainWindow):
             # If success, store them in backup data
             thread_info['keeplinks_link'] = keeplinks_url  # final Keeplinks
             thread_info['rapidgator_links'] = rapidgator_links
+            if backup_rg_url:
+                thread_info['rapidgator_backup_links'] = [backup_rg_url]
             thread_info['dead_rapidgator_links'] = []  # reset dead links
             # If new mega links were provided, keep them
             if mega_links:
@@ -1781,7 +1787,13 @@ class ForumBotGUI(QMainWindow):
         self.backup_threads_table = QTableWidget()
         self.backup_threads_table.setColumnCount(5)
         self.backup_threads_table.setHorizontalHeaderLabels(
-            ["Thread Title", "Thread ID", "Rapidgator Links", "Keeplinks", "Mega.nz"]
+            [
+                "Thread Title",
+                "Thread ID",
+                "RG Links",
+                "RG-Backup",
+                "Keeplinks",
+            ]
         )
 
         # سلوك اختيار الصفوف
@@ -2613,17 +2625,19 @@ class ForumBotGUI(QMainWindow):
 
             self.backup_threads_table.setItem(row_position, 2, rapidgator_item)
 
+            # Rapidgator Backup Link
+            rg_backup_links = thread_info.get('rapidgator_backup_links', [])
+            rg_backup_text = "\n".join(rg_backup_links)
+            rg_backup_item = QTableWidgetItem(rg_backup_text)
+            rg_backup_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            self.backup_threads_table.setItem(row_position, 3, rg_backup_item)
+
+
             # Keeplinks Link
             keeplinks_link = thread_info.get('keeplinks_link', '')
             keeplinks_item = QTableWidgetItem(keeplinks_link)
             keeplinks_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-            self.backup_threads_table.setItem(row_position, 3, keeplinks_item)
-
-            # Mega.nz Link
-            mega_link = thread_info.get('mega_link', '')
-            mega_item = QTableWidgetItem(mega_link)
-            mega_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-            self.backup_threads_table.setItem(row_position, 4, mega_item)
+            self.backup_threads_table.setItem(row_position, 4, keeplinks_item)
 
         # Adjust columns
         self.backup_threads_table.resizeColumnsToContents()
@@ -3857,10 +3871,13 @@ class ForumBotGUI(QMainWindow):
 
                 # 2) Pull out newly-uploaded host links
                 rapidgator_links = urls_dict.get('rapidgator', [])
+                backup_rg_url = (
+                    urls_dict.get('rapidgator-backup')
+                    or urls_dict.get('backup_rg_url')
+                )
                 nitroflare_links = urls_dict.get('nitroflare', [])
                 ddownload_links = urls_dict.get('ddownload', [])
                 katfile_links = urls_dict.get('katfile', [])
-                mega_links = urls_dict.get('mega', [])
 
                 # 3) Preserve old Keeplinks if not overridden
                 old_links = thread_info.get('links', {})
@@ -3873,10 +3890,11 @@ class ForumBotGUI(QMainWindow):
                     'nitroflare.com': nitroflare_links,
                     'ddownload.com': ddownload_links,
                     'katfile.com': katfile_links,
+                    'rapidgator-backup': [backup_rg_url]
+                    if backup_rg_url
+                    else [],
                     'keeplinks': new_keeplinks,
                 }
-                if mega_links:
-                    merged_links['mega.nz'] = mega_links
 
                 # 5) Save back to thread_info
                 thread_info['links'] = merged_links
@@ -3901,8 +3919,7 @@ class ForumBotGUI(QMainWindow):
                 display_links = rapidgator_links or katfile_links
                 self.process_threads_table.item(row, 3).setText("\n".join(display_links))
                 self.process_threads_table.item(row, 4).setText(new_keeplinks)
-                if self.process_threads_table.columnCount() > 5 and mega_links:
-                    self.process_threads_table.item(row, 5).setText("\n".join(mega_links))
+
 
                 # 7) Persist changes
                 self.save_process_threads_data()
@@ -3911,10 +3928,10 @@ class ForumBotGUI(QMainWindow):
                 backup_info = self.backup_threads.get(thread_title, {})
                 backup_info['thread_id'] = thread_id
                 backup_info['rapidgator_links'] = rapidgator_links
+                if backup_rg_url:
+                    backup_info['rapidgator_backup_links'] = [backup_rg_url]
                 backup_info['keeplinks_link'] = new_keeplinks
-                if mega_links:
-                    backup_info['mega_link'] = "\n".join(mega_links)
-                    backup_info['mega_links'] = mega_links
+
                 backup_info['katfile_links'] = katfile_links
                 self.backup_threads[thread_title] = backup_info
                 self.save_backup_threads_data()
@@ -4257,7 +4274,13 @@ class ForumBotGUI(QMainWindow):
 
     def get_host_name(self, host_idx: int) -> str:
         """Get host name from index - matches table columns"""
-        hosts = ['rapidgator', 'nitroflare', 'ddownload', 'katfile', 'mega']
+        hosts = [
+            'rapidgator',
+            'nitroflare',
+            'ddownload',
+            'katfile',
+            'rapidgator-backup',
+        ]
         return hosts[host_idx] if 0 <= host_idx < len(hosts) else 'unknown'
 
     def handle_upload_error(self, row: int, host_idx: int, error_msg: str):
@@ -4470,7 +4493,6 @@ class ForumBotGUI(QMainWindow):
                     thread_id,
                     all_uploaded_urls,
                     keeplinks_url,
-                    mega_url
                 )
                 QMessageBox.information(
                     self,
@@ -4541,18 +4563,10 @@ class ForumBotGUI(QMainWindow):
             self.save_process_threads_data()
 
     def update_thread_data_and_ui(self, category_name, thread_title, thread_id,
-                                  uploaded_urls, keeplinks_url, mega_url):
+                                  uploaded_urls, keeplinks_url, backup_rg_url=None):
         """Update thread data and UI immediately after upload completion."""
         try:
-            # Ensure mega_url is consistently stored as newline-separated if multiple links are present.
-            if isinstance(mega_url, list):
-                # Convert list of mega links to a newline-separated string
-                mega_url = "\n".join(mega_url)
-            elif mega_url and "\n" not in mega_url:
-                # If mega_url is a single string that might contain multiple links separated by spaces,
-                # you can add logic here to split by spaces if needed.
-                # If it's guaranteed to be a single link or already properly formatted, this may not be necessary.
-                pass
+
 
             # Update process_threads data
             if category_name in self.process_threads:
@@ -4562,21 +4576,16 @@ class ForumBotGUI(QMainWindow):
                     'nitroflare.com': [url for url in uploaded_urls if 'nitroflare.com' in url],
                     'ddownload.com': [url for url in uploaded_urls if 'ddownload.com' in url],
                     'katfile.com': [url for url in uploaded_urls if 'katfile.com' in url],
-                    'keeplinks': keeplinks_url
+                    'rapidgator-backup': [backup_rg_url] if backup_rg_url else [],
+                    'keeplinks': keeplinks_url,
                 }
-                if mega_url:
-                    # mega_url now is either a single link or newline-separated multiple links
-                    # If you want to handle multiple Mega links from 'uploaded_urls' directly here, you can do:
-                    # thread_data['links']['mega.nz'] = mega_url.split('\n')
-                    # Otherwise, if mega_url is just a single string containing all links:
-                    thread_data['links']['mega.nz'] = mega_url.split('\n') if '\n' in mega_url else [mega_url]
 
             # Update backup threads data, storing all Mega links as newline-separated
             self.backup_threads[thread_title] = {
                 'thread_id': thread_id,
                 'rapidgator_links': [url for url in uploaded_urls if 'rapidgator.net' in url],
+                'rapidgator_backup_links': [backup_rg_url] if backup_rg_url else [],
                 'keeplinks_link': keeplinks_url,
-                'mega_link': mega_url if mega_url else ''
             }
 
             # Save updated data
@@ -4861,18 +4870,18 @@ class ForumBotGUI(QMainWindow):
 
             self.backup_threads_table.setItem(row_position, 2, rapidgator_item)
 
+            # Rapidgator Backup Links
+            rg_backup_links = thread_info.get('rapidgator_backup_links', [])
+            if isinstance(rg_backup_links, str):
+                rg_backup_links = [rg_backup_links]
+            rg_backup_text = "\n".join(rg_backup_links)
+            rg_backup_item = QTableWidgetItem(rg_backup_text)
+            self.backup_threads_table.setItem(row_position, 3, rg_backup_item)
+
             # Keeplinks Link (single string)
             keeplinks_link = thread_info.get('keeplinks_link', '')
             keeplinks_item = QTableWidgetItem(keeplinks_link)
-            self.backup_threads_table.setItem(row_position, 3, keeplinks_item)
-
-            # Mega.nz Links (list)
-            mega_links = thread_info.get('mega_links', [])
-            if isinstance(mega_links, str):
-                mega_links = [mega_links]
-            mega_links_text = "\n".join(mega_links)
-            mega_item = QTableWidgetItem(mega_links_text)
-            self.backup_threads_table.setItem(row_position, 4, mega_item)
+            self.backup_threads_table.setItem(row_position, 4, keeplinks_item)
 
         # Adjust columns and rows to show all lines
         self.backup_threads_table.resizeColumnsToContents()
