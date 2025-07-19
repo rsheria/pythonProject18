@@ -3931,7 +3931,8 @@ class ForumBotGUI(QMainWindow):
                 # 6) Update the Process Threads table columns
                 display_links = rapidgator_links or katfile_links
                 self.process_threads_table.item(row, 3).setText("\n".join(display_links))
-                self.process_threads_table.item(row, 4).setText(new_keeplinks)
+                self.process_threads_table.item(row, 4).setText("\n".join(backup_rg_urls))
+                self.process_threads_table.item(row, 5).setText(new_keeplinks)
 
 
                 # 7) Persist changes
@@ -5658,8 +5659,6 @@ class ForumBotGUI(QMainWindow):
             keeplinks_item.setData(Qt.UserRole + 1, status_class)  # Store status class for styling
             if status_class:
                 keeplinks_item.setBackground(background_brush)
-            self.process_threads_table.setItem(row_position, 4, keeplinks_item)
-
             self.process_threads_table.setItem(row_position, 5, keeplinks_item)
 
 

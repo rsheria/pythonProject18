@@ -193,17 +193,24 @@ class UploadWorker(QThread):
                     or getattr(self.bot, 'upload_rapidgator_token', '')
                     or getattr(self.bot, 'rg_main_token', '')
                 )
+                username = os.getenv('UPLOAD_RAPIDGATOR_USERNAME') or \
+                           os.getenv('UPLOAD_RAPIDGATOR_LOGIN', '')
+                password = os.getenv('UPLOAD_RAPIDGATOR_PASSWORD', '')
+
             else:  # rapidgator-backup
                 token = (
                     self.config.get('rapidgator_backup_api_token', '')
                     or getattr(self.bot, 'rg_backup_token', '')
                     or getattr(self.bot, 'rapidgator_token', '')
                 )
+                username = os.getenv('RAPIDGATOR_LOGIN', '')
+                password = os.getenv('RAPIDGATOR_PASSWORD', '')
             try:
-                # Initialize with just the filepath and token
-                # Credentials will be loaded from environment variables
+                # Initialize handler with credentials for the correct account
                 handler = RapidgatorUploadHandler(
                     filepath=file_path,
+                    username=username,
+                    password=password,
                     token=token
                 )
                 upload_func = lambda: handler.upload(progress_cb=cb)

@@ -197,8 +197,11 @@ class ForumBotSelenium:
 
         self.rapidgator_username = os.getenv('RAPIDGATOR_LOGIN')
         self.rapidgator_password = os.getenv('RAPIDGATOR_PASSWORD')
-        self.upload_username = os.getenv('upload_rapidgator_username')
-        self.upload_password = os.getenv('upload_rapidgator_password')
+        self.upload_username = (
+            os.getenv('UPLOAD_RAPIDGATOR_USERNAME')
+            or os.getenv('UPLOAD_RAPIDGATOR_LOGIN')
+        )
+        self.upload_password = os.getenv('UPLOAD_RAPIDGATOR_PASSWORD')
 
         if not self.rapidgator_username or not self.rapidgator_password:
             raise ValueError("Rapidgator credentials are not set in the environment variables.")
@@ -819,7 +822,10 @@ class ForumBotSelenium:
     def load_backup_host(self):
         """Load backup host configuration from environment variables."""
         backup_host = 'rapidgator'
-        backup_username = os.getenv('UPLOAD_RAPIDGATOR_LOGIN', '')
+        backup_username = (
+            os.getenv('UPLOAD_RAPIDGATOR_USERNAME')
+            or os.getenv('UPLOAD_RAPIDGATOR_LOGIN', '')
+        )
         backup_password = os.getenv('UPLOAD_RAPIDGATOR_PASSWORD', '')
         logging.debug(f"Loaded backup host: {backup_host}")
         return {
@@ -871,7 +877,10 @@ class ForumBotSelenium:
 
         # Pick credentials from environment
         if account_type == "main":
-            username = os.getenv("UPLOAD_RAPIDGATOR_LOGIN", "")
+            username = (
+                os.getenv("UPLOAD_RAPIDGATOR_USERNAME")
+                or os.getenv("UPLOAD_RAPIDGATOR_LOGIN", "")
+            )
             password = os.getenv("UPLOAD_RAPIDGATOR_PASSWORD", "")
         else:  # backup
             username = os.getenv("RAPIDGATOR_LOGIN", "")
