@@ -1853,7 +1853,31 @@ class ForumBotSelenium:
             if not api_hash:
                 logging.error("Keeplinks API hash is missing")
                 return None
-            all_urls_string = ','.join(new_links)
+            # Flatten potential nested lists and sanitize URLs
+            flat_links = []
+            for link in new_links:
+                if isinstance(link, (list, tuple)):
+                    flat_links.extend(link)
+                else:
+                    flat_links.append(link)
+
+            from urllib.parse import urlparse, quote
+
+            def extract_base_rg(url):
+                parsed = urlparse(url)
+                if parsed.netloc.lower() == 'rapidgator.net' and parsed.path.startswith('/file/'):
+                    parts = parsed.path.split('/')
+                    if len(parts) >= 3:
+                        base = '/'.join(parts[:3]) + '/'
+                        return f"{parsed.scheme}://{parsed.netloc}{base}"
+                return url
+
+            processed = [extract_base_rg(u) for u in flat_links]
+            sanitized = [self.sanitize_url(u) for u in processed]
+            encoded = [quote(u, safe=':/?=&,') for u in sanitized]
+            grouped = self.group_links_by_host(encoded)
+            formatted = self.format_links_for_keeplinks(grouped)
+            all_urls_string = ','.join(formatted)
             api_params = {
                 'apihash': api_hash,
                 'url-id': url_id,
