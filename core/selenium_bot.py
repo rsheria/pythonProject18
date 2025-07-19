@@ -1683,14 +1683,20 @@ class ForumBotSelenium:
             except Exception as e:
                 logging.error(f"KatFile upload error: {str(e)}")
 
-            # Step 5: Rapidgator Backup Upload
-            try:
-                backup_rg_url = self.upload_to_rapidgator_backup(file_path)
-                if backup_rg_url:
-                    logging.info(f"Rapidgator backup successful: {backup_rg_url}")
-            except Exception as e:
-                logging.error(f"Rapidgator backup upload error: {str(e)}")
-                backup_rg_url = ''
+            # Step 5: Rapidgator Backup Upload (optional)
+            backup_rg_url = ''
+            if self.use_backup_rg:
+                try:
+                    backup_rg_url = self.upload_to_rapidgator_backup(file_path)
+                    if backup_rg_url:
+                        logging.info(
+                            f"Rapidgator backup successful: {backup_rg_url}"
+                        )
+                except Exception as e:
+                    logging.error(f"Rapidgator backup upload error: {str(e)}")
+                    backup_rg_url = ''
+            else:
+                logging.debug("Rapidgator backup disabled; skipping upload")
 
             # Return results if any uploads were successful
             if uploaded_urls:

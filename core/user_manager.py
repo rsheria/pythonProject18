@@ -356,7 +356,7 @@ class UserManager:
             default_settings = {
                 'download_dir': os.path.join(os.path.expanduser('~'), 'Downloads', 'ForumBot'),
                 'upload_hosts': ['rapidgator.net', 'katfile.com'],
-                'use_megaupload': False,
+                'use_backup_rg': False,
                 'page_from': 1,
                 'page_to': 5,
                 'katfile_api_key': '',

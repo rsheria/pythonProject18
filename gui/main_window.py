@@ -173,6 +173,9 @@ class ForumBotGUI(QMainWindow):
             if self.active_upload_hosts:
                 self.config['upload_hosts'] = list(self.active_upload_hosts)
 
+        # Rapidgator backup preference
+        self.use_backup_rg = bool(self.config.get('use_backup_rg', False))
+
         # Initialize the handler first
         self.progress_handler = None
         self.upload_handler = UploadStatusHandler()
@@ -188,6 +191,7 @@ class ForumBotGUI(QMainWindow):
             config=self.config,
             user_manager=self.user_manager
         )
+        self.bot.use_backup_rg = self.use_backup_rg
         
         # Initialize Rapidgator token from config
         self.bot.rapidgator_token = self.config.get('rapidgator_api_token', '')
@@ -358,6 +362,10 @@ class ForumBotGUI(QMainWindow):
         # Connect the hosts updated signal
         self.settings_tab.hosts_updated.connect(self.on_upload_hosts_updated)
 
+        # Connect Rapidgator backup toggle
+        self.settings_tab.use_backup_rg_changed.connect(self.on_use_backup_rg_changed)
+
+
         # إضافته لمنطقة المحتوى
         self.content_area.addWidget(self.settings_tab)
 
@@ -435,6 +443,27 @@ class ForumBotGUI(QMainWindow):
         except Exception as e:
             logging.error(f"❌ Error updating upload hosts: {e}")
             QMessageBox.critical(self, "Error", f"Failed to update upload hosts: {str(e)}")
+
+    def on_use_backup_rg_changed(self, enabled: bool):
+        """Handle Rapidgator backup toggle from settings."""
+        try:
+            self.use_backup_rg = bool(enabled)
+            self.config['use_backup_rg'] = self.use_backup_rg
+
+            # Update bot instance if available
+            if hasattr(self, 'bot') and self.bot:
+                self.bot.use_backup_rg = self.use_backup_rg
+
+            # Persist user preference
+            if self.user_manager.get_current_user():
+                self.user_manager.set_user_setting('use_backup_rg', self.use_backup_rg)
+
+            logging.info(
+                f"Rapidgator backup uploads {'enabled' if self.use_backup_rg else 'disabled'}"
+            )
+        except Exception as e:
+            logging.error(f"Error updating Rapidgator backup preference: {e}")
+
 
     def populate_megathreads_category_tree(self):
         self.megathreads_category_model.clear()
@@ -3778,7 +3807,7 @@ class ForumBotGUI(QMainWindow):
                     thread_dir,  # مسار المجلد
                     thread_id,  # ID الموضوع
                     upload_hosts=self.active_upload_hosts,  # قائمة المضيفات المفعّلة
-                    enable_mega=self.mega_upload_enabled  # تفعيل Mega.nz إن وُجد
+
                 )
                 self.upload_workers[row] = upload_worker
 

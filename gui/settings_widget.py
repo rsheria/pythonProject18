@@ -21,6 +21,8 @@ class SettingsWidget(QWidget):
     download_directory_changed = pyqtSignal(str)
     # Signal emitted when hosts list is updated
     hosts_updated = pyqtSignal(list)
+    # Signal emitted when Rapidgator backup option toggled
+    use_backup_rg_changed = pyqtSignal(bool)
 
     def __init__(self, config):
         super().__init__()
@@ -48,7 +50,10 @@ class SettingsWidget(QWidget):
                 date_filters = [{'type': 'relative', 'value': 3, 'unit': 'days'}]
             self.date_filters = list(date_filters)
         else:
-            self.date_filters = list(self.config.get('date_filters', [{'type': 'relative', 'value': 3, 'unit': 'days'}]))
+            self.date_filters = list(
+                self.config.get('date_filters', [{'type': 'relative', 'value': 3, 'unit': 'days'}])
+            )
+
         
         self.init_ui()
         
@@ -135,6 +140,14 @@ class SettingsWidget(QWidget):
         self.rapidgator_status_label = QLabel()
         self.rapidgator_status_label.setVisible(False)
         rg_layout.addWidget(self.rapidgator_status_label)
+        # Checkbox to enable Rapidgator backup uploads
+        self.use_backup_rg_checkbox = QCheckBox("Use Rapidgator backup uploads")
+        rg_layout.addWidget(self.use_backup_rg_checkbox)
+
+        # Emit signal when checkbox toggled
+        self.use_backup_rg_checkbox.toggled.connect(
+            lambda checked: self.use_backup_rg_changed.emit(bool(checked))
+        )
 
         sc_layout.addWidget(rg_group)
 
@@ -485,6 +498,8 @@ class SettingsWidget(QWidget):
             # Reset date filters
             self.date_filters = [{'type': 'relative', 'value': 3, 'unit': 'days'}]
             self._load_date_filters_into_list()
+            # Reset Rapidgator backup option
+            self.use_backup_rg_checkbox.setChecked(False)
             
             # Reset priority settings
             self.reset_priority_to_defaults()
@@ -574,6 +589,9 @@ class SettingsWidget(QWidget):
                     # Enable validate button if token exists
                     if hasattr(self, 'validate_token_btn') and self.validate_token_btn:
                         self.validate_token_btn.setEnabled(bool(rapidgator_token))
+                # Rapidgator backup option
+                if hasattr(self, 'use_backup_rg_checkbox') and self.use_backup_rg_checkbox:
+                    self.use_backup_rg_checkbox.setChecked(settings_source.get('use_backup_rg', False))
                 
                 # Update the bot's Rapidgator token if parent has bot attribute
                 if (hasattr(self, 'parent') and self.parent() and 
@@ -742,7 +760,8 @@ class SettingsWidget(QWidget):
                 'rapidgator_pass': rg_pass,
                 'rapidgator_2fa': rg_code,
                 'rapidgator_api_token': new_rapidgator_token,
-                'download_hosts_priority': current_priority
+                'download_hosts_priority': current_priority,
+                'use_backup_rg': self.use_backup_rg_checkbox.isChecked()
             }
             
             # Update the bot's Rapidgator token if parent has bot attribute and token has changed
@@ -782,6 +801,8 @@ class SettingsWidget(QWidget):
 
             # Emit updated hosts list so the main window can react immediately
             self.hosts_updated.emit(new_hosts)
+            # Emit backup RG state
+            self.use_backup_rg_changed.emit(self.use_backup_rg_checkbox.isChecked())
 
             # Show success message
             QMessageBox.information(self, "Success", "Settings saved successfully!")
