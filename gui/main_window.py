@@ -967,7 +967,17 @@ class ForumBotGUI(QMainWindow):
 
         tree_item.setBackground(0, brush_bg)
         tree_item.setForeground(0, brush_fg)
-            
+    def set_backup_link_status_color(self, item: QTableWidgetItem, alive: bool) -> None:
+        """Color the Rapidgator link cell based on availability."""
+        try:
+            if not item:
+                return
+            if alive:
+                item.setBackground(QColor(144, 238, 144))  # light green
+            else:
+                item.setBackground(QColor(255, 99, 71))  # tomato red
+        except Exception as exc:
+            logging.error(f"Failed setting backup link color: {exc}")
     def init_megathreads_view(self):
         """Initialize the Megathreads view with categories and threads"""
         # Create the main widget and layout
@@ -1880,10 +1890,15 @@ class ForumBotGUI(QMainWindow):
             QMessageBox.warning(self, "No Selection", "Please select a thread to check Rapidgator links.")
             return
 
-        # ---- ONE-TIME TOKEN CHECK ----
+        # Ensure a Rapidgator token is available
         if not (self.bot.upload_rapidgator_token or self.bot.rapidgator_token):
-            logging.warning("No Rapidgator API token found; skipping link checks for selected thread.")
-            return
+            # Try loading from disk or performing API login
+            loaded = self.bot.load_token('main') or self.bot.load_token('backup')
+            if not loaded and not (self.bot.api_login('main') or self.bot.api_login('backup')):
+                logging.warning(
+                    "No Rapidgator API token found; skipping link checks for selected thread."
+                )
+                return
 
         selected_row = selected_items[0].row()
         thread_id = self.backup_threads_table.item(selected_row, 1).text()
@@ -1922,10 +1937,10 @@ class ForumBotGUI(QMainWindow):
 
         # Mark table cell color based on result
         if dead_found:
-            rapidgator_cell_item.setBackground(QColor(255, 99, 71))  # red
+            self.set_backup_link_status_color(rapidgator_cell_item, False)
             thread_info['rapidgator_status'] = 'dead'
         else:
-            rapidgator_cell_item.setBackground(QColor(144, 238, 144))  # green
+            self.set_backup_link_status_color(rapidgator_cell_item, True)
             thread_info['rapidgator_status'] = 'alive'
 
         self.backup_threads[thread_title] = thread_info
@@ -1939,10 +1954,12 @@ class ForumBotGUI(QMainWindow):
         If ``thread_id`` is provided, only check links for that thread.
         Updates ``dead_rapidgator_links`` and ``rapidgator_status``.
         """
-        # ---- ONE-TIME TOKEN CHECK ----
+        # Ensure a Rapidgator token is available for link checks
         if not (self.bot.upload_rapidgator_token or self.bot.rapidgator_token):
-            logging.warning("No Rapidgator API token found. Skipping check_rapidgator_links().")
-            return
+            loaded = self.bot.load_token('main') or self.bot.load_token('backup')
+            if not loaded and not (self.bot.api_login('main') or self.bot.api_login('backup')):
+                logging.warning("No Rapidgator API token found. Skipping check_rapidgator_links().")
+                return
 
         if thread_id:
             threads_to_check = {
@@ -1994,9 +2011,9 @@ class ForumBotGUI(QMainWindow):
                     rapidgator_cell_item = self.backup_threads_table.item(row, 2)
                     if rapidgator_cell_item:
                         if thread_info['rapidgator_status'] == 'dead':
-                            rapidgator_cell_item.setBackground(QColor(255, 99, 71))  # red
+                            self.set_backup_link_status_color(rapidgator_cell_item, False)
                         elif thread_info['rapidgator_status'] == 'alive':
-                            rapidgator_cell_item.setBackground(QColor(144, 238, 144))  # green
+                            self.set_backup_link_status_color(rapidgator_cell_item, True)
                         else:
                             rapidgator_cell_item.setBackground(QColor(255, 255, 255))
                     break
@@ -2026,10 +2043,12 @@ class ForumBotGUI(QMainWindow):
         Check Rapidgator links for ALL threads in backup_threads_table,
         but avoid repeated pop-ups if the Rapidgator token is missing.
         """
-        # ---- ONE-TIME TOKEN CHECK ----
+        # Ensure a Rapidgator token is available for link checks
         if not (self.bot.upload_rapidgator_token or self.bot.rapidgator_token):
-            logging.warning("No Rapidgator API token found; skipping Rapidgator link checks for ALL threads.")
-            return
+            loaded = self.bot.load_token('main') or self.bot.load_token('backup')
+            if not loaded and not (self.bot.api_login('main') or self.bot.api_login('backup')):
+                logging.warning("No Rapidgator API token found; skipping Rapidgator link checks for ALL threads.")
+                return
 
         for row in range(self.backup_threads_table.rowCount()):
             thread_title_item = self.backup_threads_table.item(row, 0)
@@ -2053,11 +2072,11 @@ class ForumBotGUI(QMainWindow):
                     dead_found = True
 
             if dead_found:
-                rapidgator_cell_item.setBackground(QColor(255, 99, 71))  # red
+                self.set_backup_link_status_color(rapidgator_cell_item, False)
                 thread_info['rapidgator_status'] = 'dead'
             else:
                 if rapidgator_links:
-                    rapidgator_cell_item.setBackground(QColor(144, 238, 144))  # green
+                    self.set_backup_link_status_color(rapidgator_cell_item, True)
                     thread_info['rapidgator_status'] = 'alive'
                 else:
                     # no links
@@ -4815,11 +4834,11 @@ class ForumBotGUI(QMainWindow):
 
             if rapidgator_status == 'dead':
                 # Dead links present
-                rapidgator_item.setBackground(QColor(255, 99, 71))
+                self.set_backup_link_status_color(rapidgator_item, False)
                 rapidgator_item.setToolTip("Some Rapidgator links are dead.")
             elif rapidgator_status == 'alive':
                 # All links alive
-                rapidgator_item.setBackground(QColor(144, 238, 144))
+                self.set_backup_link_status_color(rapidgator_item, True)
                 rapidgator_item.setToolTip("All Rapidgator links are alive.")
             else:
                 # No links or no status

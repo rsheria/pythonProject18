@@ -578,7 +578,7 @@ class ForumBotSelenium:
             return ''
 
     def check_rapidgator_link_status(self, link):
-        """Check a Rapidgator link using the /file/info endpoint."""
+        """Check a Rapidgator link using the /file/check_link endpoint."""
         # Prefer main token but fall back to backup
         account_type = None
         if self.upload_rapidgator_token:
@@ -599,26 +599,23 @@ class ForumBotSelenium:
         token = self.upload_rapidgator_token if account_type == 'main' else self.rapidgator_token
 
         # Extract file_id from URL
-        try:
-            file_id = link.rstrip('/').split('/')[-2]
-        except Exception:
-            logging.error("Unable to parse Rapidgator file ID from %s", link)
-            return {'status': 'DEAD'}
-
-        api_url = "https://rapidgator.net/api/v2/file/info"
+        api_url = "https://rapidgator.net/api/v2/file/check_link"
         params = {
             'token': token,
-            'file_id': file_id
+            'url': link,
         }
 
         try:
             response = requests.get(api_url, params=params, timeout=10)
             if response.status_code == 200:
                 data = response.json()
-                if data.get('response_status') == 200:
-                    return {'status': 'ACCESS', **data.get('response', {})}
+                if data.get('status') == 200:
+                    info_list = data.get('response', [])
+                    if info_list:
+                        return info_list[0]
+                    return {'status': 'DEAD'}
                 else:
-                    logging.warning("Link appears dead: %s", data.get('response_details'))
+                    logging.warning("Link appears dead: %s", data.get('details'))
                     return {'status': 'DEAD'}
 
                 return file_data
