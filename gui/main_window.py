@@ -153,7 +153,26 @@ class StatusColorDelegate(QStyledItemDelegate):
         else:
             # Fallback to default painting
             super().paint(painter, option, index)
+class LinkStatusDelegate(QStyledItemDelegate):
+    """Paint Rapidgator link cells green or red based on alive/dead status."""
 
+    def paint(self, painter, option, index):
+        status = index.data(Qt.UserRole)
+        if status in ("alive", "dead"):
+            alive = status == "alive"
+            bg = QColor(144, 238, 144) if alive else QColor(255, 99, 71)
+            if option.state & QStyle.State_Selected:
+                # Darken when selected so text remains readable
+                bg = bg.darker(110)
+            painter.save()
+            painter.fillRect(option.rect, bg)
+            painter.setPen(Qt.black)
+            painter.drawText(option.rect.adjusted(4, 0, -4, 0),
+                             Qt.AlignVCenter | Qt.AlignLeft,
+                             index.data())
+            painter.restore()
+        else:
+            super().paint(painter, option, index)
 class ForumBotGUI(QMainWindow):
     # Define Qt signals for thread-safe UI updates
     thread_status_updated = pyqtSignal()
@@ -973,8 +992,10 @@ class ForumBotGUI(QMainWindow):
             if not item:
                 return
             if alive:
+                item.setData(Qt.UserRole, "alive")
                 item.setBackground(QColor(144, 238, 144))  # light green
             else:
+                item.setData(Qt.UserRole, "dead")
                 item.setBackground(QColor(255, 99, 71))  # tomato red
         except Exception as exc:
             logging.error(f"Failed setting backup link color: {exc}")
@@ -1826,6 +1847,10 @@ class ForumBotGUI(QMainWindow):
         self.backup_threads_table.setAlternatingRowColors(True)
         self.backup_threads_table.setWordWrap(True)
         self.backup_threads_table.setShowGrid(True)
+        # Apply custom delegate for per-link coloring
+        self.backup_status_delegate = LinkStatusDelegate(self.backup_threads_table)
+        self.backup_threads_table.setItemDelegate(self.backup_status_delegate)
+
 
         # ألوان مميّزة للـ selection (تعمل فى Light و Dark)
         self.backup_threads_table.setStyleSheet(
@@ -1915,6 +1940,8 @@ class ForumBotGUI(QMainWindow):
             # If no links, mark status = 'none'
             thread_info = self.backup_threads.get(thread_title, {})
             thread_info['rapidgator_status'] = 'none'
+            rapidgator_cell_item.setBackground(QColor(255, 255, 255))
+            rapidgator_cell_item.setData(Qt.UserRole, None)
             self.backup_threads[thread_title] = thread_info
             self.save_backup_threads_data()
             return
@@ -2016,6 +2043,7 @@ class ForumBotGUI(QMainWindow):
                             self.set_backup_link_status_color(rapidgator_cell_item, True)
                         else:
                             rapidgator_cell_item.setBackground(QColor(255, 255, 255))
+                            rapidgator_cell_item.setData(Qt.UserRole, None)
                     break
 
         self.save_backup_threads_data()
@@ -2081,6 +2109,7 @@ class ForumBotGUI(QMainWindow):
                 else:
                     # no links
                     rapidgator_cell_item.setBackground(QColor(255, 255, 255))
+                    rapidgator_cell_item.setData(Qt.UserRole, None)
                     thread_info['rapidgator_status'] = 'none'
 
             self.backup_threads[thread_title] = thread_info
@@ -4844,9 +4873,11 @@ class ForumBotGUI(QMainWindow):
                 # No links or no status
                 if rapidgator_links:
                     rapidgator_item.setBackground(QColor(255, 255, 255))
+                    rapidgator_item.setData(Qt.UserRole, None)
                     rapidgator_item.setToolTip("Rapidgator links available, status not checked yet.")
                 else:
                     rapidgator_item.setBackground(QColor(255, 255, 255))
+                    rapidgator_item.setData(Qt.UserRole, None)
                     rapidgator_item.setToolTip("No Rapidgator links found.")
 
             self.backup_threads_table.setItem(row_position, 2, rapidgator_item)
