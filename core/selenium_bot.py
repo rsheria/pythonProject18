@@ -486,6 +486,8 @@ class ForumBotSelenium:
                 'apihash': api_hash,
                 'link-to-protect': all_urls_string,
                 'output': 'xml',
+                'captcha': 'on',
+                'captchatype': 'Re',
             }
             logging.debug(f"API Params: {api_params}")
 
