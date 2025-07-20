@@ -1476,8 +1476,8 @@ class ForumBotGUI(QMainWindow):
     def load_log_file(self):
         log_path = os.path.join(DATA_DIR, 'forum_bot.log')
         if not os.path.exists(log_path):
-            # إذا الملف غير موجود، نكتفي بتحذير بسيط ولا نرفع استثناء
-            logging.warning(f"No log file found at {log_path}, skipping load.")
+            # If the log file hasn't been created yet, silently skip loading it
+            # rather than spamming the user's log with warnings.
             return
 
         try:
