@@ -54,7 +54,6 @@ Thumbs.db
 *.code-workspace
 
 # Project specific sensitive data
-data/
 !data/README.md
 *.log
 *.pkl
