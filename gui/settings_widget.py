@@ -159,6 +159,8 @@ class SettingsWidget(QWidget):
         self.upload_hosts_list.setDragDropMode(QAbstractItemView.InternalMove)
         self.upload_hosts_list.setDefaultDropAction(Qt.MoveAction)
         self.upload_hosts_list.model().rowsMoved.connect(self._on_upload_hosts_reordered)
+        # provide backward compatibility for any code referencing 'hosts_list'
+        self.hosts_list = self.upload_hosts_list
         upl_layout.addWidget(self.upload_hosts_list)
 
 
