@@ -1,0 +1,56 @@
+2025-07-19 01:54:09,062:INFO:Application started.
+2025-07-19 01:54:09,085:INFO:Configuration loaded successfully.
+2025-07-19 01:54:09,085:DEBUG:\U0001f4e5 Default download directory set to: E:/house of dragons (will be updated after user login)
+2025-07-19 01:54:09,090:DEBUG:Loaded DOWNLOAD_HOSTS: ['rapidgator', 'nitroflare', 'ddownload', 'katfile', 'rapidgator.net']
+2025-07-19 01:54:09,090:DEBUG:Loaded UPLOAD_HOSTS: ['rapidgator', 'ddownload', 'nitroflare', 'katfile']
+2025-07-19 01:54:09,090:DEBUG:Loaded backup host: 
+2025-07-19 01:54:09,090:DEBUG:Loaded Keeplinks.org credentials: Username=
+2025-07-19 01:54:09,090:DEBUG:Loaded Image Host config: {'host': 'imgur', 'client_id': 'your_imgur_client_id', 'client_secret': 'your_imgur_client_secret'}
+2025-07-19 02:13:47,753:INFO:Application started.
+2025-07-19 02:13:47,772:INFO:Configuration loaded successfully.
+2025-07-19 02:13:47,773:DEBUG:\U0001f4e5 Default download directory set to: E:/house of dragons (will be updated after user login)
+2025-07-19 02:13:47,779:DEBUG:Loaded DOWNLOAD_HOSTS: ['rapidgator', 'nitroflare', 'ddownload', 'katfile', 'rapidgator.net']
+2025-07-19 02:13:47,779:DEBUG:Loaded UPLOAD_HOSTS: ['rapidgator', 'nitroflare', 'ddownload', 'katfile']
+2025-07-19 02:13:47,779:DEBUG:Loaded backup host: 
+2025-07-19 02:13:47,779:DEBUG:Loaded Keeplinks.org credentials: Username=
+2025-07-19 02:13:47,779:DEBUG:Loaded Image Host config: {'host': 'imgur', 'client_id': 'your_imgur_client_id', 'client_secret': 'your_imgur_client_secret'}
+2025-07-19 02:24:22,662:INFO:Application started.
+2025-07-19 02:24:22,683:INFO:Configuration loaded successfully.
+2025-07-19 02:24:22,683:DEBUG:\U0001f4e5 Default download directory set to: E:/house of dragons (will be updated after user login)
+2025-07-19 02:24:22,689:DEBUG:Loaded DOWNLOAD_HOSTS: ['rapidgator', 'nitroflare', 'ddownload', 'katfile', 'rapidgator.net']
+2025-07-19 02:24:22,689:DEBUG:Loaded UPLOAD_HOSTS: ['rapidgator', 'nitroflare', 'ddownload', 'katfile']
+2025-07-19 02:24:22,689:DEBUG:Loaded backup host: 
+2025-07-19 02:24:22,689:DEBUG:Loaded Keeplinks.org credentials: Username=
+2025-07-19 02:24:22,689:DEBUG:Loaded Image Host config: {'host': 'imgur', 'client_id': 'your_imgur_client_id', 'client_secret': 'your_imgur_client_secret'}
+2025-07-19 02:25:32,913:INFO:Application started.
+2025-07-19 02:25:32,934:INFO:Configuration loaded successfully.
+2025-07-19 02:25:32,934:DEBUG:\U0001f4e5 Default download directory set to: E:/house of dragons (will be updated after user login)
+2025-07-19 02:25:32,941:DEBUG:Loaded DOWNLOAD_HOSTS: ['rapidgator', 'nitroflare', 'ddownload', 'katfile', 'rapidgator.net']
+2025-07-19 02:25:32,941:DEBUG:Loaded UPLOAD_HOSTS: ['rapidgator']
+2025-07-19 02:25:32,941:DEBUG:Loaded backup host: 
+2025-07-19 02:25:32,941:DEBUG:Loaded Keeplinks.org credentials: Username=
+2025-07-19 02:25:32,941:DEBUG:Loaded Image Host config: {'host': 'imgur', 'client_id': 'your_imgur_client_id', 'client_secret': 'your_imgur_client_secret'}
+2025-07-19 13:12:45,062:INFO:Application started.
+2025-07-19 13:12:45,083:INFO:Configuration loaded successfully.
+2025-07-19 13:12:45,083:DEBUG:\U0001f4e5 Default download directory set to: E:/house of dragons (will be updated after user login)
+2025-07-19 13:12:45,091:DEBUG:Loaded DOWNLOAD_HOSTS: ['rapidgator', 'nitroflare', 'ddownload', 'katfile', 'rapidgator.net']
+2025-07-19 13:12:45,091:DEBUG:Loaded UPLOAD_HOSTS: ['rapidgator', 'nitroflare', 'ddownload', 'katfile']
+2025-07-19 13:12:45,091:DEBUG:Loaded backup host: rapidgator
+2025-07-19 13:12:45,091:DEBUG:Loaded Keeplinks.org credentials: Username=
+2025-07-19 13:12:45,091:DEBUG:Loaded Image Host config: {'host': 'imgur', 'client_id': 'your_imgur_client_id', 'client_secret': 'your_imgur_client_secret'}
+2025-07-19 16:07:59,668:INFO:Application started.
+2025-07-19 16:07:59,691:INFO:Configuration loaded successfully.
+2025-07-19 16:07:59,692:DEBUG:\U0001f4e5 Default download directory set to: E:/house of dragons (will be updated after user login)
+2025-07-19 16:07:59,700:DEBUG:Loaded DOWNLOAD_HOSTS: ['rapidgator', 'nitroflare', 'ddownload', 'katfile', 'rapidgator.net']
+2025-07-19 16:07:59,700:DEBUG:Loaded UPLOAD_HOSTS: ['rapidgator', 'nitroflare', 'ddownload', 'katfile', 'rapidgator-backup']
+2025-07-19 16:07:59,700:DEBUG:Loaded backup host: rapidgator
+2025-07-19 16:07:59,700:DEBUG:Loaded Keeplinks.org credentials: Username=
+2025-07-19 16:07:59,700:DEBUG:Loaded Image Host config: {'host': 'imgur', 'client_id': 'your_imgur_client_id', 'client_secret': 'your_imgur_client_secret'}
+2025-07-20 21:44:20,668:INFO:Application started.
+2025-07-20 21:44:20,690:INFO:Configuration loaded successfully.
+2025-07-20 21:44:20,690:DEBUG:\U0001f4e5 Default download directory set to: E:/house of dragons (will be updated after user login)
+2025-07-20 21:44:20,697:DEBUG:Loaded DOWNLOAD_HOSTS: ['rapidgator', 'nitroflare', 'ddownload', 'katfile', 'rapidgator.net']
+2025-07-20 21:44:20,698:DEBUG:Loaded UPLOAD_HOSTS: []
+2025-07-20 21:44:20,698:DEBUG:Loaded backup host: rapidgator
+2025-07-20 21:44:20,698:DEBUG:Loaded Keeplinks.org credentials: Username=
+2025-07-20 21:44:20,698:DEBUG:Loaded Image Host config: {'host': 'imgur', 'client_id': 'your_imgur_client_id', 'client_secret': 'your_imgur_client_secret'}
