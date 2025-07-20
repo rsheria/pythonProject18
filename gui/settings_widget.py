@@ -576,7 +576,7 @@ class SettingsWidget(QWidget):
             # If user is logged in and this isn't an initial load, use user
             # settings. Otherwise use config for most values but leave
             # user-specific sections like upload hosts blank.
-            if self.user_manager.get_current_user() and not initial:
+            if self.user_manager.get_current_user():
                 settings_source = self.user_manager.get_all_user_settings()
                 source_name = f"user '{self.user_manager.get_current_user()}'"
 
@@ -590,7 +590,7 @@ class SettingsWidget(QWidget):
                 
                 # Upload Hosts
                 if hasattr(self, 'upload_hosts_list') and self.upload_hosts_list:
-                    if self.user_manager.get_current_user() and not initial:
+                    if self.user_manager.get_current_user():
                         upload_hosts = settings_source.get('upload_hosts', [])
                     else:
                         upload_hosts = []
