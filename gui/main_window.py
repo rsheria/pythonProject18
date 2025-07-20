@@ -2453,6 +2453,27 @@ class ForumBotGUI(QMainWindow):
             # Update bot file paths to use user-specific folders
             if hasattr(self, 'bot') and self.bot:
                 self.bot.update_user_file_paths()
+
+            # Load persisted upload hosts for the user
+            try:
+                saved_hosts = self.user_manager.get_user_setting('upload_hosts', [])
+                if isinstance(saved_hosts, list):
+                    self.active_upload_hosts = list(saved_hosts)
+                    self.config['upload_hosts'] = list(saved_hosts)
+                    if hasattr(self.bot, 'upload_hosts'):
+                        self.bot.upload_hosts = list(saved_hosts)
+
+                    # Ensure backup host toggling matches user preference
+                    self.use_backup_rg = bool(
+                        self.user_manager.get_user_setting('use_backup_rg', False)
+                    )
+                    if self.use_backup_rg and 'rapidgator-backup' not in self.active_upload_hosts:
+                        self.active_upload_hosts.append('rapidgator-backup')
+                    elif not self.use_backup_rg and 'rapidgator-backup' in self.active_upload_hosts:
+                        self.active_upload_hosts.remove('rapidgator-backup')
+                    self.config['upload_hosts'] = list(self.active_upload_hosts)
+            except Exception as e:
+                logging.error(f"Error applying user upload hosts: {e}", exc_info=True)
                 
         
         # Initialize the application with user-specific data
