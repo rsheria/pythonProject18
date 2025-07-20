@@ -573,7 +573,7 @@ class SettingsWidget(QWidget):
             settings_source = self.config
             source_name = "global config (no user)"
 
-            # Determine which user's settings to load. When `initial` is True
+            # Determine which user's settings to load. When ``initial`` is True
             # we purposely ignore any remembered user so the widget starts in a
             # logged-out state.
             current_user = None if initial else self.user_manager.get_current_user()
@@ -593,18 +593,26 @@ class SettingsWidget(QWidget):
                 # Upload Hosts
                 if hasattr(self, 'upload_hosts_list') and self.upload_hosts_list:
                     self.upload_hosts_list.clear()
-                    if current_user:
-                        upload_hosts = settings_source.get('upload_hosts', [])
-                        upload_hosts = [h for h in upload_hosts if isinstance(h, str) and h.strip()]
-                        for host in upload_hosts:
-                            item = QListWidgetItem(host)
-                            item.setData(Qt.UserRole, host)
-                            item.setFlags(
-                                Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled
-                            )
-                            self.upload_hosts_list.addItem(item)
-                        self._sanitize_upload_host_items()
-                        self._renumber_upload_hosts()
+
+                    # Determine base defaults from config/environment
+                    default_hosts = self.config.get('upload_hosts', [])
+                    if not isinstance(default_hosts, list) or not default_hosts:
+                        default_hosts = ['rapidgator', 'nitroflare', 'ddownload', 'katfile']
+                        upload_hosts = settings_source.get('upload_hosts', default_hosts)
+                        if not isinstance(upload_hosts, list) or not upload_hosts:
+                            upload_hosts = list(default_hosts)
+                    else:
+                        upload_hosts = list(default_hosts)
+
+                    upload_hosts = [h for h in upload_hosts if isinstance(h, str) and h.strip()]
+                    for host in upload_hosts:
+                        item = QListWidgetItem(host)
+                        item.setData(Qt.UserRole, host)
+                        item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled)
+                        self.upload_hosts_list.addItem(item)
+
+                    self._sanitize_upload_host_items()
+                    self._renumber_upload_hosts()
 
                 # Page range
                 page_from = settings_source.get('page_from', 1)

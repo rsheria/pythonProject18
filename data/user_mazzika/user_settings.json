@@ -1,7 +1,8 @@
 {
     "download_dir": "C:\\Users\\rsher\\Downloads\\ForumBot",
     "upload_hosts": [
-        "nitroflare"
+        "nitroflare",
+        "rapidgator"
     ],
     "download_hosts_priority": [
         "rapidgator.net",
