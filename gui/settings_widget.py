@@ -159,7 +159,7 @@ class SettingsWidget(QWidget):
         self.upload_hosts_list.setDragDropMode(QAbstractItemView.InternalMove)
         self.upload_hosts_list.setDefaultDropAction(Qt.MoveAction)
         self.upload_hosts_list.model().rowsMoved.connect(self._on_upload_hosts_reordered)
-        # provide backward compatibility for any code referencing 'hosts_list'
+        # backward compatible alias
         self.hosts_list = self.upload_hosts_list
         upl_layout.addWidget(self.upload_hosts_list)
 
@@ -463,12 +463,23 @@ class SettingsWidget(QWidget):
         for idx in range(self.upload_hosts_list.count()):
             item = self.upload_hosts_list.item(idx)
             host = item.data(Qt.UserRole)
+            if not host:
+                text = item.text()
+                if '. ' in text:
+                    host = text.split('. ', 1)[1]
+                    item.setData(Qt.UserRole, host)
             item.setText(f"{idx + 1}. {host}")
 
     def get_current_upload_hosts(self):
         hosts = []
         for i in range(self.upload_hosts_list.count()):
-            host = self.upload_hosts_list.item(i).data(Qt.UserRole)
+            item = self.upload_hosts_list.item(i)
+            host = item.data(Qt.UserRole)
+            if not host:
+                text = item.text()
+                if '. ' in text:
+                    host = text.split('. ', 1)[1]
+                    item.setData(Qt.UserRole, host)
             if isinstance(host, str) and host.strip():
                 hosts.append(host)
         return hosts
