@@ -238,7 +238,9 @@ class SettingsWidget(QWidget):
         self.add_df_btn.clicked.connect(self.open_add_date_filter_dialog)
         self.remove_df_btn.clicked.connect(self.remove_selected_date_filter)
 
-        self.load_settings()
+        # The main window will call load_settings() once the login state is
+        # determined. Avoid loading user data here so the widget starts empty
+        # before any user logs in.
 
     def _load_date_filters_into_list(self):
         """اعرض الـ date_filters الحالية في QListWidget"""
