@@ -270,7 +270,9 @@ class UploadWorker(QThread):
         for i, host in enumerate(self.hosts):
             urls = self.upload_results[i]['urls']
             final[host] = urls
-            all_urls.extend(urls)
+            # Exclude Rapidgator-backup links from the Keeplinks list
+            if host != 'rapidgator-backup':
+                all_urls.extend(urls)
 
         # Add Keeplinks if we have any URLs
         if all_urls:
