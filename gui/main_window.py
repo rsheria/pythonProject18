@@ -436,6 +436,9 @@ class ForumBotGUI(QMainWindow):
             hosts_list (list): List of upload host names
         """
         try:
+            # Sanitize the incoming list to remove empty or invalid entries
+            hosts_list = [h for h in hosts_list if isinstance(h, str) and h.strip()]
+
             # Update the config
             self.config['upload_hosts'] = hosts_list
 

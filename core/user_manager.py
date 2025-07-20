@@ -380,6 +380,14 @@ class UserManager:
             for key, value in default_settings.items():
                 if key not in self.user_settings:
                     self.user_settings[key] = value
+            # Sanitize upload hosts list in case older files stored null entries
+            upload_hosts = self.user_settings.get('upload_hosts', [])
+            if not isinstance(upload_hosts, list):
+                upload_hosts = []
+            upload_hosts = [h for h in upload_hosts if isinstance(h, str) and h.strip()]
+            if not upload_hosts:
+                upload_hosts = list(default_upload_hosts)
+            self.user_settings['upload_hosts'] = upload_hosts
             
             # Save updated settings
             self._save_user_settings()

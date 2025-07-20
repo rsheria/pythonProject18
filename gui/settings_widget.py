@@ -469,7 +469,8 @@ class SettingsWidget(QWidget):
         hosts = []
         for i in range(self.upload_hosts_list.count()):
             host = self.upload_hosts_list.item(i).data(Qt.UserRole)
-            hosts.append(host)
+            if isinstance(host, str) and host.strip():
+                hosts.append(host)
         return hosts
 
     def add_new_host(self):
@@ -562,6 +563,8 @@ class SettingsWidget(QWidget):
                         upload_hosts = settings_source.get('upload_hosts', [])
                     else:
                         upload_hosts = []
+                    # Sanitize list to avoid None entries
+                    upload_hosts = [h for h in upload_hosts if isinstance(h, str) and h.strip()]
                     self.upload_hosts_list.clear()
                     for i, host in enumerate(upload_hosts, 1):
                         item = QListWidgetItem(f"{i}. {host}")
