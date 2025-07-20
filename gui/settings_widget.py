@@ -158,7 +158,9 @@ class SettingsWidget(QWidget):
         self.upload_hosts_list = QListWidget()
         self.upload_hosts_list.setDragDropMode(QAbstractItemView.InternalMove)
         self.upload_hosts_list.setDefaultDropAction(Qt.MoveAction)
-        self.upload_hosts_list.model().rowsMoved.connect(self._on_upload_hosts_reordered)
+        self.upload_hosts_list.model().rowsMoved.connect(
+            self._on_upload_hosts_reordered
+        )
         # backward compatible alias
         self.hosts_list = self.upload_hosts_list
         upl_layout.addWidget(self.upload_hosts_list)
@@ -443,7 +445,9 @@ class SettingsWidget(QWidget):
         for i, host in enumerate(self.config.get('upload_hosts', []), 1):
             item = QListWidgetItem(f"{i}. {host}")
             item.setData(Qt.UserRole, host)
+            item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled)
             self.upload_hosts_list.addItem(item)
+        self._sanitize_upload_host_items()
 
     def _on_upload_hosts_reordered(self, *args):
         self._renumber_upload_hosts()
@@ -469,17 +473,30 @@ class SettingsWidget(QWidget):
                     host = text.split('. ', 1)[1]
                     item.setData(Qt.UserRole, host)
             item.setText(f"{idx + 1}. {host}")
+        self._sanitize_upload_host_items()
 
-    def get_current_upload_hosts(self):
-        hosts = []
-        for i in range(self.upload_hosts_list.count()):
-            item = self.upload_hosts_list.item(i)
+    def _sanitize_upload_host_items(self):
+        """Ensure each upload host item stores the plain host string and has no check box."""
+        for idx in range(self.upload_hosts_list.count()):
+            item = self.upload_hosts_list.item(idx)
             host = item.data(Qt.UserRole)
             if not host:
                 text = item.text()
                 if '. ' in text:
                     host = text.split('. ', 1)[1]
-                    item.setData(Qt.UserRole, host)
+                else:
+                    host = text
+                item.setData(Qt.UserRole, host)
+            # remove any checkable flag inherited from old versions
+            item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled)
+            item.setText(f"{idx + 1}. {host}")
+
+    def get_current_upload_hosts(self):
+        self._sanitize_upload_host_items()
+        hosts = []
+        for i in range(self.upload_hosts_list.count()):
+            item = self.upload_hosts_list.item(i)
+            host = item.data(Qt.UserRole)
             if isinstance(host, str) and host.strip():
                 hosts.append(host)
         return hosts
@@ -488,17 +505,18 @@ class SettingsWidget(QWidget):
         host = self.new_host_edit.text().strip()
         if not host:
             return
-        for i in range(self.hosts_list.count()):
-            if self.hosts_list.item(i).text() == host:
+        for i in range(self.upload_hosts_list.count()):
+            if self.upload_hosts_list.item(i).data(Qt.UserRole) == host:
                 QMessageBox.warning(self, "Warning", f"Host '{host}' already exists.")
                 return
         item = QListWidgetItem(host)
-        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-        item.setCheckState(Qt.Checked)
-        self.hosts_list.addItem(item)
+        item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled)
+        item.setData(Qt.UserRole, host)
+        self.upload_hosts_list.addItem(item)
+        self._renumber_upload_hosts()
         self.new_host_edit.clear()
         # Emit signal with current hosts
-        current_hosts = [self.hosts_list.item(i).text() for i in range(self.hosts_list.count())]
+        current_hosts = self.get_current_upload_hosts()
         self.hosts_updated.emit(current_hosts)
         logging.info(f"Host added. Current hosts: {current_hosts}")
 
@@ -580,7 +598,9 @@ class SettingsWidget(QWidget):
                     for i, host in enumerate(upload_hosts, 1):
                         item = QListWidgetItem(f"{i}. {host}")
                         item.setData(Qt.UserRole, host)
+                        item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled)
                         self.upload_hosts_list.addItem(item)
+                    self._sanitize_upload_host_items()
 
                 # Page range
                 page_from = settings_source.get('page_from', 1)
