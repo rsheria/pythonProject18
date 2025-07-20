@@ -6224,7 +6224,16 @@ class ForumBotGUI(QMainWindow):
         host_layout = QHBoxLayout()
         host_layout.addWidget(QLabel("File Host:"))
         host_combo = QComboBox()
-        host_combo.addItems(["rapidgator.net", "katfile.com", "nitroflare.com", "ddownload.com", "rapidgator-backup", "other"])
+        # Populate combo with the currently active upload hosts so user settings
+        # are respected. Fall back to common defaults if list is empty.
+        combo_hosts = [
+            h if h != "rapidgator" else "rapidgator.net" for h in self.active_upload_hosts
+        ]
+        if not combo_hosts:
+            combo_hosts = ["rapidgator.net", "katfile.com", "nitroflare.com", "ddownload.com"]
+        if "rapidgator-backup" in self.active_upload_hosts and "rapidgator-backup" not in combo_hosts:
+            combo_hosts.append("rapidgator-backup")
+        host_combo.addItems(combo_hosts + ["other"])
         host_layout.addWidget(host_combo)
         layout.addLayout(host_layout)
         
