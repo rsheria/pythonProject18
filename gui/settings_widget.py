@@ -155,10 +155,12 @@ class SettingsWidget(QWidget):
         # 2) Upload Hosts
         upl_group = QGroupBox("Upload Hosts")
         upl_layout = QVBoxLayout(upl_group)
-        self.hosts_list = QListWidget()
-        self.hosts_list.setDragDropMode(QAbstractItemView.InternalMove)
-        self.hosts_list.itemChanged.connect(self._on_host_item_changed)
-        upl_layout.addWidget(self.hosts_list)
+        self.upload_hosts_list = QListWidget()
+        self.upload_hosts_list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.upload_hosts_list.setDefaultDropAction(Qt.MoveAction)
+        self.upload_hosts_list.model().rowsMoved.connect(self._on_upload_hosts_reordered)
+        upl_layout.addWidget(self.upload_hosts_list)
+
 
         add_row = QHBoxLayout()
         self.new_host_edit = QLineEdit()
@@ -435,30 +437,38 @@ class SettingsWidget(QWidget):
         if directory:
             self.download_edit.setText(directory)
 
-    def _refresh_hosts_list(self):
-        self.hosts_list.clear()
-        for host in self.config.get('upload_hosts', []):
-            item = QListWidgetItem(host)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked)
-            self.hosts_list.addItem(item)
-    def _on_host_item_changed(self, _):
-        """Emit hosts_updated when a host checkbox is toggled."""
-        current_hosts = [
-            self.hosts_list.item(i).text().strip()
-            for i in range(self.hosts_list.count())
-            if self.hosts_list.item(i).checkState() == Qt.Checked
-        ]
-        self.hosts_updated.emit(current_hosts)
+        self.upload_hosts_list.clear()
+        for i, host in enumerate(self.config.get('upload_hosts', []), 1):
+            item = QListWidgetItem(f"{i}. {host}")
+            item.setData(Qt.UserRole, host)
+            self.upload_hosts_list.addItem(item)
+
+    def _on_upload_hosts_reordered(self, *args):
+        self._renumber_upload_hosts()
+        self.hosts_updated.emit(self.get_current_upload_hosts())
     def delete_selected_host(self):
         """Delete the selected host from the list"""
-        row = self.hosts_list.currentRow()
+        row = self.upload_hosts_list.currentRow()
         if row >= 0:
-            self.hosts_list.takeItem(row)
+            self.upload_hosts_list.takeItem(row)
+            self._renumber_upload_hosts()
             # Emit signal with current hosts
-            current_hosts = [self.hosts_list.item(i).text() for i in range(self.hosts_list.count())]
+            current_hosts = self.get_current_upload_hosts()
             self.hosts_updated.emit(current_hosts)
             logging.info(f"Host deleted. Current hosts: {current_hosts}")
+
+    def _renumber_upload_hosts(self):
+        for idx in range(self.upload_hosts_list.count()):
+            item = self.upload_hosts_list.item(idx)
+            host = item.data(Qt.UserRole)
+            item.setText(f"{idx + 1}. {host}")
+
+    def get_current_upload_hosts(self):
+        hosts = []
+        for i in range(self.upload_hosts_list.count()):
+            host = self.upload_hosts_list.item(i).data(Qt.UserRole)
+            hosts.append(host)
+        return hosts
 
     def add_new_host(self):
         host = self.new_host_edit.text().strip()
@@ -485,7 +495,7 @@ class SettingsWidget(QWidget):
             self.download_edit.setText(self.config.get('download_dir', ''))
 
             # Reset hosts list
-            self.hosts_list.clear()
+            self.upload_hosts_list.clear()
             
             # Reset API keys
             self.katfile_api_key_input.clear()
@@ -545,21 +555,16 @@ class SettingsWidget(QWidget):
                     self.download_edit.setText(download_dir)
                 
                 # Upload Hosts
-                if hasattr(self, 'hosts_list') and self.hosts_list:
+                if hasattr(self, 'upload_hosts_list') and self.upload_hosts_list:
                     if self.user_manager.get_current_user() and not initial:
                         upload_hosts = settings_source.get('upload_hosts', [])
                     else:
-                        upload_hosts = []  # hide until user logs in
-                    self.hosts_list.clear()
-                    for host in upload_hosts:
-                        item = QListWidgetItem(host)
-                        item.setFlags(
-                            item.flags()
-                            | Qt.ItemIsEditable
-                            | Qt.ItemIsUserCheckable
-                        )
-                        item.setCheckState(Qt.Checked)
-                        self.hosts_list.addItem(item)
+                        upload_hosts = []
+                    self.upload_hosts_list.clear()
+                    for i, host in enumerate(upload_hosts, 1):
+                        item = QListWidgetItem(f"{i}. {host}")
+                        item.setData(Qt.UserRole, host)
+                        self.upload_hosts_list.addItem(item)
 
                 # Page range
                 page_from = settings_source.get('page_from', 1)
@@ -723,12 +728,7 @@ class SettingsWidget(QWidget):
         try:
             # Get values from UI
             new_download_dir = self.download_edit.text().strip()
-            new_hosts = []
-            for i in range(self.hosts_list.count()):
-                item = self.hosts_list.item(i)
-                host = item.text().strip()
-                if host and item.checkState() == Qt.Checked:
-                    new_hosts.append(host)
+            new_hosts = self.get_current_upload_hosts()
 
             new_from = self.page_from_spin.value()
             new_to = self.page_to_spin.value()
