@@ -902,6 +902,23 @@ class ForumBotGUI(QMainWindow):
         palette.setColor(QPalette.HighlightedText, QColor(theme.TEXT_ON_PRIMARY))
         self.setPalette(palette)
 
+        # Update posts section button styling when theme changes
+        self.apply_post_buttons_style()
+
+    def apply_post_buttons_style(self):
+        """Apply theme-aware styling to posts section buttons."""
+        if not hasattr(self, "posts_buttons"):
+            return
+        t = theme_manager.get_current_theme()
+        style = (
+            f"QPushButton {{ background: {t.BUTTON_BACKGROUND}; color: {getattr(t, 'BUTTON_TEXT_COLOR', t.TEXT_ON_PRIMARY)};"
+            f" border: 1px solid {t.BORDER}; border-radius: {t.RADIUS_SMALL}; padding:6px 12px; font-weight:600; }}"
+            f"QPushButton:hover {{ background: {t.BUTTON_HOVER}; }}"
+            f"QPushButton:pressed {{ background: {t.BUTTON_PRESSED}; }}"
+        )
+        for btn in self.posts_buttons:
+            btn.setStyleSheet(style)
+
         # 4) Auto-login logic (unchanged)
         current_user = self.user_manager.get_current_user() if self.user_manager else None
         logging.info(f"🔍 DEBUG: Bot is_logged_in: {self.bot.is_logged_in}")
@@ -1391,6 +1408,14 @@ class ForumBotGUI(QMainWindow):
         stop_tracking_btn.clicked.connect(lambda: self.stop_monitoring(self.category_tree.selectedIndexes()))
         category_controls_layout.addWidget(stop_tracking_btn)
         categories_layout.addLayout(category_controls_layout)
+        # Store buttons for styling
+        self.posts_buttons = [
+            add_category_btn,
+            remove_category_btn,
+            track_once_btn,
+            keep_tracking_btn,
+            stop_tracking_btn,
+        ]
         categories_layout.addWidget(self.category_tree)
         upper_splitter.addWidget(categories_widget)
 
@@ -1421,6 +1446,13 @@ class ForumBotGUI(QMainWindow):
         remove_buttons.addWidget(self.remove_all_button)
         threads_layout.addLayout(remove_buttons)
 
+        # Append to posts button list for theme updates
+        self.posts_buttons.extend([
+            self.remove_thread_button,
+            self.remove_all_button,
+        ])
+
+
         upper_splitter.addWidget(threads_widget)
 
         # Set Stretch Factors for Upper Splitter
@@ -1440,6 +1472,8 @@ class ForumBotGUI(QMainWindow):
         
         # Add container to content_area
         self.content_area.addWidget(posts_container)
+        # Apply initial styling to posts buttons
+        self.apply_post_buttons_style()
 
     def init_log_viewer(self):
         """Initialize a log viewer within the GUI."""
@@ -2899,14 +2933,6 @@ class ForumBotGUI(QMainWindow):
         self.proceed_template_button.setIcon(QIcon.fromTheme("edit"))
         self.proceed_template_button.clicked.connect(self.generate_template_for_selected_thread)
         actions_layout.addWidget(self.proceed_template_button)
-
-        self.test_color_button = QPushButton("🧪 Test Colors")
-        self.test_color_button.setToolTip("Test thread status color system (Blue→Yellow→Green)")
-        self.test_color_button.clicked.connect(self.test_color_status_system)
-        self.test_color_button.setStyleSheet(
-            "QPushButton { background-color: #ff6b35; color: white; font-weight: bold; }"
-        )
-        actions_layout.addWidget(self.test_color_button)
 
         threads_management_layout.addWidget(actions_bar)
 
@@ -7403,82 +7429,6 @@ class ForumBotGUI(QMainWindow):
         Mark a thread as post complete.
         """
         self.update_thread_status(category_name, thread_title, 'post_status', True)
-
-    def test_color_status_system(self):
-        """
-        🧪 TEST FUNCTION - Test the color status system with sample data
-        Tests the color progression: Blue → Yellow → Green
-        """
-        from PyQt5.QtCore import QTimer
-        from PyQt5.QtWidgets import QMessageBox
-        
-        logging.info("🧪 TESTING - Starting color status system test")
-        
-        # Get first thread from table for testing
-        if self.process_threads_table.rowCount() > 0:
-            title_item = self.process_threads_table.item(0, 0)
-            category_item = self.process_threads_table.item(0, 1)
-            
-            if title_item and category_item:
-                thread_title = title_item.text()
-                category_name = category_item.text()
-                
-                logging.info(f"🧪 TESTING - Using thread: {category_name}/{thread_title}")
-                
-                # Reset all statuses first
-                self.update_thread_status(category_name, thread_title, 'download_status', False)
-                self.update_thread_status(category_name, thread_title, 'upload_status', False)
-                self.update_thread_status(category_name, thread_title, 'post_status', False)
-                
-                # Create a timer for sequenced testing
-                self.test_timer = QTimer()
-                self.test_step = 0
-                self.test_category = category_name
-                self.test_thread = thread_title
-                
-                def run_test_step():
-                    if self.test_step == 0:
-                        # Step 1: Download complete (BLUE)
-                        logging.info("🧪 TESTING - Step 1: Setting download complete (expecting BLUE)")
-                        self.update_thread_status(self.test_category, self.test_thread, 'download_status', True)
-                        self.statusBar().showMessage("🧪 Testing: Download Complete - Row should be BLUE")
-                        
-                    elif self.test_step == 1:
-                        # Step 2: Upload complete (YELLOW)
-                        logging.info("🧪 TESTING - Step 2: Setting upload complete (expecting YELLOW)")
-                        self.update_thread_status(self.test_category, self.test_thread, 'upload_status', True)
-                        self.statusBar().showMessage("🧪 Testing: Upload Complete - Row should be YELLOW")
-                        
-                    elif self.test_step == 2:
-                        # Step 3: Post complete (GREEN)
-                        logging.info("🧪 TESTING - Step 3: Setting post complete (expecting GREEN)")
-                        self.update_thread_status(self.test_category, self.test_thread, 'post_status', True)
-                        self.statusBar().showMessage("🧪 Testing: Post Complete - Row should be GREEN")
-                        
-                    elif self.test_step == 3:
-                        # Final step: Show completion message
-                        self.test_timer.stop()
-                        logging.info("🧪 TESTING - Color status system test completed!")
-                        self.statusBar().showMessage("🧪 Color status system test completed! Check the logs for details.")
-                        QMessageBox.information(self, "Test Complete", 
-                                              f"Color status system test completed!\n"
-                                              f"Thread: {self.test_thread}\n"
-                                              f"Check the table row colors and logs for results.")
-                        return
-                        
-                    self.test_step += 1
-                    
-                # Start the test sequence
-                self.test_timer.timeout.connect(run_test_step)
-                self.test_timer.start(2000)  # 2 seconds between each step
-                run_test_step()  # Run first step immediately
-                
-            else:
-                logging.warning("🧪 TESTING - No valid thread found for testing")
-                QMessageBox.warning(self, "Test Error", "No valid thread found for testing")
-        else:
-            logging.warning("🧪 TESTING - No threads in table to test")
-            QMessageBox.warning(self, "Test Error", "No threads in table to test")
 
     def mark_download_complete(self, category_name, thread_title):
         """Mark thread as download complete"""
