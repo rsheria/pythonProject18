@@ -103,8 +103,10 @@ class SettingsWidget(QWidget):
         # 1) Download Settings
         dl_group = QGroupBox("Download Settings")
         dl_layout = QHBoxLayout(dl_group)
-        self.download_edit = QLineEdit()
-        dl_layout.addWidget(self.download_edit)
+
+        self.download_path_label = QLabel(self.config.get("download_dir", ""))
+        dl_layout.addWidget(self.download_path_label)
+
         browse_btn = QPushButton("Browse…")
         browse_btn.clicked.connect(self.browse_download)
         dl_layout.addWidget(browse_btn)
@@ -447,7 +449,7 @@ class SettingsWidget(QWidget):
         start = self.config.get('download_dir', os.getcwd())
         directory = QFileDialog.getExistingDirectory(self, "Select Download Directory", start)
         if directory:
-            self.download_edit.setText(directory)
+            self.download_path_label.setText(directory)
 
         self.upload_hosts_list.clear()
         for i, host in enumerate(self.config.get('upload_hosts', []), 1):
@@ -532,7 +534,7 @@ class SettingsWidget(QWidget):
         """Reset all settings to their default values."""
         try:
             # Reset download directory
-            self.download_edit.setText(self.config.get('download_dir', ''))
+            self.download_path_label.setText(self.config.get('download_dir', ''))
 
             # Reset hosts list
             self.upload_hosts_list.clear()
@@ -565,7 +567,7 @@ class SettingsWidget(QWidget):
         """Load settings from user manager and populate UI elements."""
         try:
             # Check if UI elements still exist
-            if not hasattr(self, "download_edit") or not self.download_edit:
+            if not hasattr(self, "download_path_label") or not self.download_path_label:
                 logging.warning("UI elements not initialized yet, skipping settings load")
                 return
             current_user = None if initial else self.user_manager.get_current_user()
@@ -582,7 +584,7 @@ class SettingsWidget(QWidget):
                     download_dir = settings_source.get(
                         "download_dir", self.config.get("download_dir", "")
                     )
-                self.download_edit.setText(download_dir)
+                self.download_path_label.setText(download_dir)
 
             # --- upload hosts ---
             self.upload_hosts_list.clear()
@@ -703,7 +705,7 @@ class SettingsWidget(QWidget):
         """Save current settings to user manager and update config."""
         try:
             # Get values from UI
-            new_download_dir = self.download_edit.text().strip()
+            new_download_dir = self.download_path_label.text().strip()
             new_hosts = self.get_current_upload_hosts()
 
             new_from = self.page_from_spin.value()
