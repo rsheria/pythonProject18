@@ -1,0 +1,36 @@
+{
+    "download_dir": "E:/Download BOT",
+    "upload_hosts": [
+        "rapidgator",
+        "nitroflare",
+        "ddownlaod",
+        "katfile"
+    ],
+    "download_hosts_priority": [
+        "rapidgator.net",
+        "katfile.com",
+        "ddownload.com",
+        "mega.nz",
+        "xup.in",
+        "nitroflare.com",
+        "f2h.io",
+        "filepv.com",
+        "filespayouts.com",
+        "uploady.io"
+    ],
+    "use_backup_rg": false,
+    "page_from": 1,
+    "page_to": 1,
+    "katfile_api_key": "",
+    "date_filters": [
+        {
+            "type": "relative",
+            "value": 3,
+            "unit": "days"
+        }
+    ],
+    "rapidgator_user": "",
+    "rapidgator_pass": "",
+    "rapidgator_2fa": "",
+    "rapidgator_api_token": ""
+}
