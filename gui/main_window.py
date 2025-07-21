@@ -404,9 +404,11 @@ class ForumBotGUI(QMainWindow):
         self.active_upload_hosts = list(self.config['upload_hosts'])
 
         # (اختياري) حدّث أي ويدجت عرض المسار
-        # مثلاً لو عندك label لعرض WinRAR path
-        self.winrar_exe_label.setText(f"WinRAR Executable: {self.config.get('winrar_exe_path')}")
-        
+        if hasattr(self, 'settings_tab'):
+            self.settings_tab.winrar_exe_label.setText(
+                f"WinRAR Executable: {self.config.get('winrar_exe_path')}"
+            )
+
     def on_download_directory_changed(self, new_download_dir):
         """
         Handle download directory changes from settings widget.
@@ -952,6 +954,10 @@ class ForumBotGUI(QMainWindow):
                 'C:/Program Files/WinRAR/WinRAR.exe'
             )
             self.winrar_exe_label.setText(f"WinRAR Executable: {winrar_exe_path}")
+            if hasattr(self, 'settings_tab'):
+                self.settings_tab.winrar_exe_label.setText(
+                    f"WinRAR Executable: {winrar_exe_path}"
+                )
 
         else:
             if self.user_manager and self.user_manager.get_current_user():
@@ -1326,16 +1332,6 @@ class ForumBotGUI(QMainWindow):
         self.login_button.clicked.connect(self.handle_login)
         login_group_layout.addWidget(self.login_button)
         login_layout.addWidget(login_group)
-
-        # Add the Select WinRAR Executable Button
-        self.select_winrar_exe_button = QPushButton('Select WinRAR Executable')
-        self.select_winrar_exe_button.clicked.connect(self.select_winrar_executable)
-        login_layout.addWidget(self.select_winrar_exe_button)
-
-        # Display the Current WinRAR Executable Path
-        self.winrar_exe_label = QLabel(
-            f"WinRAR Executable: {self.config.get('winrar_exe_path', 'C:/Program Files/WinRAR/WinRAR.exe')}")
-        login_layout.addWidget(self.winrar_exe_label)
 
         # Add stretch to push the buttons to the top
         login_layout.addStretch()
@@ -2189,7 +2185,10 @@ class ForumBotGUI(QMainWindow):
             else:
                 logging.warning("No .env file found. WinRAR executable path not saved to .env file.")
             # Update the label in the GUI
-            self.winrar_exe_label.setText(f"WinRAR Executable: {exe_path}")
+            if hasattr(self, 'settings_tab'):
+                self.settings_tab.winrar_exe_label.setText(
+                    f"WinRAR Executable: {exe_path}"
+                )
             # Provide feedback to the user
             QMessageBox.information(self, "WinRAR Executable Selected", f"WinRAR executable set to:\n{exe_path}")
             logging.info(f"WinRAR executable set to: {exe_path}")
@@ -2516,7 +2515,10 @@ class ForumBotGUI(QMainWindow):
 
         # Update WinRAR path display
         winrar_exe_path = self.config.get('winrar_exe_path', 'C:/Program Files/WinRAR/WinRAR.exe')
-        self.winrar_exe_label.setText(f"WinRAR Executable: {winrar_exe_path}")
+        if hasattr(self, 'settings_tab'):
+            self.settings_tab.winrar_exe_label.setText(
+                f"WinRAR Executable: {winrar_exe_path}"
+            )
 
     def on_login_failed(self, error_msg):
         """Handle failed login"""

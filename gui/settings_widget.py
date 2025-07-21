@@ -10,7 +10,8 @@ from PyQt5.QtWidgets import (
     QLineEdit, QPushButton, QListWidget, QListWidgetItem,
     QAbstractItemView, QCheckBox, QFileDialog, QMessageBox,
     QDialog, QRadioButton, QButtonGroup, QDateEdit, QSpinBox,
-    QComboBox, QDialogButtonBox, QLabel, QScrollArea
+    QComboBox, QDialogButtonBox, QLabel, QScrollArea,
+    QTabWidget
 )
 import os
 import logging
@@ -82,6 +83,22 @@ class SettingsWidget(QWidget):
         header.setStyleSheet("font-size:16px;font-weight:bold;margin-bottom:10px;")
         sc_layout.addWidget(header)
 
+        # Create tab widget for better organization
+        tabs = QTabWidget()
+        sc_layout.addWidget(tabs)
+
+        general_tab = QWidget()
+        general_layout = QVBoxLayout(general_tab)
+        tabs.addTab(general_tab, "General")
+
+        upload_tab = QWidget()
+        upload_layout = QVBoxLayout(upload_tab)
+        tabs.addTab(upload_tab, "Upload")
+
+        download_tab = QWidget()
+        download_layout = QVBoxLayout(download_tab)
+        tabs.addTab(download_tab, "Download")
+
         # ------------------------------------------------------------------
         # 1) Download Settings
         dl_group = QGroupBox("Download Settings")
@@ -91,37 +108,26 @@ class SettingsWidget(QWidget):
         browse_btn = QPushButton("Browse…")
         browse_btn.clicked.connect(self.browse_download)
         dl_layout.addWidget(browse_btn)
-        sc_layout.addWidget(dl_group)
 
-        # Katfile API
-        dl_layout.addWidget(QLabel("Katfile API Key:"))
-        self.katfile_api_key_input = QLineEdit()
-        self.katfile_api_key_input.setPlaceholderText("Enter Katfile API Key")
-        dl_layout.addWidget(self.katfile_api_key_input)
+        general_layout.addWidget(dl_group)
+
+        # WinRAR selection
+        winrar_group = QGroupBox("WinRAR")
+        winrar_layout = QHBoxLayout(winrar_group)
+        self.select_winrar_exe_button = QPushButton("Select WinRAR Executable")
+        self.select_winrar_exe_button.clicked.connect(
+            lambda: self.parent().select_winrar_executable()
+        )
+        winrar_layout.addWidget(self.select_winrar_exe_button)
+        self.winrar_exe_label = QLabel(
+            f"WinRAR Executable: {self.config.get('winrar_exe_path', 'C:/Program Files/WinRAR/WinRAR.exe')}"
+        )
+        winrar_layout.addWidget(self.winrar_exe_label)
+        general_layout.addWidget(winrar_group)
 
         # Rapidgator credentials + token
         rg_group = QGroupBox("Rapidgator")
         rg_layout = QVBoxLayout(rg_group)
-
-        # Credentials row
-        cred_row = QHBoxLayout()
-        cred_row.addWidget(QLabel("Email/Username:"))
-        self.rg_user_edit = QLineEdit()
-        self.rg_user_edit.setPlaceholderText("john@example.com")
-        cred_row.addWidget(self.rg_user_edit)
-
-        cred_row.addWidget(QLabel("Password:"))
-        self.rg_pass_edit = QLineEdit()
-        self.rg_pass_edit.setEchoMode(QLineEdit.Password)
-        cred_row.addWidget(self.rg_pass_edit)
-
-        cred_row.addWidget(QLabel("2FA:"))
-        self.rg_code_edit = QLineEdit()
-        self.rg_code_edit.setPlaceholderText("Optional")
-        self.rg_code_edit.setMaximumWidth(70)
-        cred_row.addWidget(self.rg_code_edit)
-
-        rg_layout.addLayout(cred_row)
 
         # API Token row
         token_row = QHBoxLayout()
@@ -149,7 +155,7 @@ class SettingsWidget(QWidget):
             lambda checked: self.use_backup_rg_changed.emit(bool(checked))
         )
 
-        sc_layout.addWidget(rg_group)
+        upload_layout.addWidget(rg_group)
 
         # ------------------------------------------------------------------
         # 2) Upload Hosts
@@ -176,7 +182,7 @@ class SettingsWidget(QWidget):
         del_btn.clicked.connect(self.delete_selected_host)
         add_row.addWidget(del_btn)
         upl_layout.addLayout(add_row)
-        sc_layout.addWidget(upl_group)
+        upload_layout.addWidget(upl_group)
 
         # — Date Filters —
         df_group = QGroupBox("Date Filters")
@@ -190,7 +196,7 @@ class SettingsWidget(QWidget):
         btn_row.addWidget(self.add_df_btn)
         btn_row.addWidget(self.remove_df_btn)
         df_layout.addLayout(btn_row)
-        sc_layout.addWidget(df_group)
+        general_layout.addWidget(df_group)
 
         # — Page Range (NEW) —
         pr_group = QGroupBox("Page Range")
@@ -205,7 +211,7 @@ class SettingsWidget(QWidget):
         self.page_to_spin.setMinimum(1)
         self.page_to_spin.setValue(1)
         pr_layout.addWidget(self.page_to_spin)
-        sc_layout.addWidget(pr_group)
+        general_layout.addWidget(pr_group)
 
         # — Download Hosts Priority —
         priority_group = QGroupBox("Download Hosts Priority")
@@ -221,7 +227,7 @@ class SettingsWidget(QWidget):
         priority_buttons.addWidget(reset_priority_btn)
         priority_buttons.addStretch()
         priority_layout.addLayout(priority_buttons)
-        sc_layout.addWidget(priority_group)
+        download_layout.addWidget(priority_group)
 
         # — Save / Reset Buttons —
         btn_box = QHBoxLayout()
@@ -532,7 +538,7 @@ class SettingsWidget(QWidget):
             self.upload_hosts_list.clear()
             
             # Reset API keys
-            self.katfile_api_key_input.clear()
+            # Reset token
             self.rapidgator_token_input.clear()
             
             # Reset page range
@@ -630,11 +636,7 @@ class SettingsWidget(QWidget):
                     self.page_from_spin.setValue(page_from)
                 if hasattr(self, 'page_to_spin') and self.page_to_spin:
                     self.page_to_spin.setValue(page_to)
-                
-                # Load API Keys
-                if hasattr(self, 'katfile_api_key_input') and self.katfile_api_key_input:
-                    self.katfile_api_key_input.setText(settings_source.get('katfile_api_key', ''))
-                
+
                 # Load Rapidgator token
                 rapidgator_token = settings_source.get('rapidgator_api_token', '')
                 if hasattr(self, 'rapidgator_token_input') and self.rapidgator_token_input:
@@ -700,12 +702,9 @@ class SettingsWidget(QWidget):
     def _validate_rapidgator_token(self):
         """Validate the Rapidgator API token or credentials"""
         token = self.rapidgator_token_input.text().strip()
-        username = self.rg_user_edit.text().strip()
-        password = self.rg_pass_edit.text().strip()
-        twofa = self.rg_code_edit.text().strip() or None
-        
-        if not token and not (username and password):
-            self.rapidgator_status_label.setText("Please enter token or username/password")
+
+        if not token:
+            self.rapidgator_status_label.setText("Please enter token")
             self.rapidgator_status_label.setStyleSheet("color: red;")
             return
             
@@ -714,31 +713,14 @@ class SettingsWidget(QWidget):
         self.rapidgator_status_label.setVisible(True)
         
         try:
-            # Create a temporary upload handler to validate the token/credentials
-            if token:
-                # If token is provided, validate it directly
-                handler = RapidgatorUploadHandler(
-                    filepath=Path("dummy.txt"),  # Dummy path for validation
-                    username=username or "dummy",
-                    password=password or "dummy",
-                    token=token,
-                    twofa_code=twofa
-                )
-                is_valid = handler.is_token_valid()
-            else:
-                # If no token but have username/password, try to get a new token
-                handler = RapidgatorUploadHandler(
-                    filepath=Path("dummy.txt"),  # Dummy path for validation
-                    username=username,
-                    password=password,
-                    token="",  # Empty to force new token generation
-                    twofa_code=twofa
-                )
-                is_valid = handler.is_token_valid()
-                if is_valid and hasattr(handler, 'token') and handler.token:
-                    # Update the token field with the new token
-                    self.rapidgator_token_input.setText(handler.token)
-                    token = handler.token
+            # Create a temporary upload handler to validate the token
+            handler = RapidgatorUploadHandler(
+                filepath=Path("dummy.txt"),
+                username="dummy",
+                password="dummy",
+                token=token,
+            )
+            is_valid = handler.is_token_valid()
             
             if is_valid:
                 self.rapidgator_status_label.setText("✅ Token is valid")
@@ -780,12 +762,7 @@ class SettingsWidget(QWidget):
 
             new_from = self.page_from_spin.value()
             new_to = self.page_to_spin.value()
-            new_api_key = self.katfile_api_key_input.text().strip()
-            
-            # Get Rapidgator credentials
-            rg_user = self.rg_user_edit.text().strip()
-            rg_pass = self.rg_pass_edit.text().strip()
-            rg_code = self.rg_code_edit.text().strip()
+
             new_rapidgator_token = self.rapidgator_token_input.text().strip()
             
             # Validate page range
@@ -803,10 +780,6 @@ class SettingsWidget(QWidget):
                 'date_filters': list(self.date_filters),
                 'page_from': new_from,
                 'page_to': new_to,
-                'katfile_api_key': new_api_key,
-                'rapidgator_user': rg_user,
-                'rapidgator_pass': rg_pass,
-                'rapidgator_2fa': rg_code,
                 'rapidgator_api_token': new_rapidgator_token,
                 'download_hosts_priority': current_priority,
                 'use_backup_rg': self.use_backup_rg_checkbox.isChecked()
