@@ -116,7 +116,7 @@ class SettingsWidget(QWidget):
         winrar_layout = QHBoxLayout(winrar_group)
         self.select_winrar_exe_button = QPushButton("Select WinRAR Executable")
         self.select_winrar_exe_button.clicked.connect(
-            lambda: self.parent().select_winrar_executable()
+            lambda: self.window().select_winrar_executable()
         )
         winrar_layout.addWidget(self.select_winrar_exe_button)
         self.winrar_exe_label = QLabel(
@@ -649,10 +649,10 @@ class SettingsWidget(QWidget):
                     self.use_backup_rg_checkbox.setChecked(settings_source.get('use_backup_rg', False))
                 
                 # Update the bot's Rapidgator token if parent has bot attribute
-                if (hasattr(self, 'parent') and self.parent() and 
-                    hasattr(self.parent(), 'bot') and hasattr(self.parent().bot, 'rapidgator_token')):
-                    
-                    self.parent().bot.rapidgator_token = rapidgator_token
+                if (hasattr(self.window(), 'bot') and
+                    hasattr(self.window().bot, 'rapidgator_token')):
+
+                    self.window().bot.rapidgator_token = rapidgator_token
                     logging.info("✅ Loaded Rapidgator token into bot instance")
                     
                     # Also update the token file for the current user if token exists
@@ -662,11 +662,11 @@ class SettingsWidget(QWidget):
                             expiry_time = int(time.time()) + (30 * 24 * 60 * 60)
                             
                             # Update bot's token and expiry
-                            self.parent().bot.rapidgator_token = rapidgator_token
-                            self.parent().bot.rapidgator_token_expiry = expiry_time
+                            self.window().bot.rapidgator_token = rapidgator_token
+                            self.window().bot.rapidgator_token_expiry = expiry_time
                             
                             # Save the token to the appropriate file
-                            self.parent().bot.save_token('download')
+                            self.window().bot.save_token('download')
                             logging.info("✅ Saved Rapidgator token to user's token file")
                         except Exception as e:
                             logging.error(f"Error saving Rapidgator token: {e}", exc_info=True)
@@ -727,17 +727,17 @@ class SettingsWidget(QWidget):
                 self.rapidgator_status_label.setStyleSheet("color: green;")
                 
                 # Save the token immediately if validation succeeds
-                if hasattr(self.parent(), 'bot') and hasattr(self.parent().bot, 'rapidgator_token'):
-                    self.parent().bot.rapidgator_token = token
+                if hasattr(self.window(), 'bot') and hasattr(self.window().bot, 'rapidgator_token'):
+                    self.window().bot.rapidgator_token = token
                     # Calculate expiry time (30 days from now)
                     expiry_time = int(time.time()) + (30 * 24 * 60 * 60)
-                    self.parent().bot.rapidgator_token_expiry = expiry_time
-                    self.parent().bot.save_token('download')
+                    self.window().bot.rapidgator_token_expiry = expiry_time
+                    self.window().bot.save_token('download')
                     
                     # Update token in all active handlers if they exist
-                    if hasattr(self.parent().bot, 'upload_worker') and hasattr(self.parent().bot.upload_worker, 'handlers'):
-                        if 'rapidgator' in self.parent().bot.upload_worker.handlers:
-                            self.parent().bot.upload_worker.handlers['rapidgator'].set_token(token)
+                    if hasattr(self.window().bot, 'upload_worker') and hasattr(self.window().bot.upload_worker, 'handlers'):
+                        if 'rapidgator' in self.window().bot.upload_worker.handlers:
+                            self.window().bot.upload_worker.handlers['rapidgator'].set_token(token)
                     
                     logging.info("✅ Validated and saved Rapidgator token")
             else:
@@ -786,11 +786,11 @@ class SettingsWidget(QWidget):
             }
             
             # Update the bot's Rapidgator token if parent has bot attribute and token has changed
-            if (hasattr(self.parent(), 'bot') and 
-                hasattr(self.parent().bot, 'rapidgator_token') and 
-                self.parent().bot.rapidgator_token != new_rapidgator_token):
-                
-                self.parent().bot.rapidgator_token = new_rapidgator_token
+            if (hasattr(self.window(), 'bot') and
+                hasattr(self.window().bot, 'rapidgator_token') and
+                self.window().bot.rapidgator_token != new_rapidgator_token):
+
+                self.window().bot.rapidgator_token = new_rapidgator_token
                 
                 # If we have a new token, save it with expiration
                 if new_rapidgator_token:
@@ -799,11 +799,11 @@ class SettingsWidget(QWidget):
                         expiry_time = int(time.time()) + (30 * 24 * 60 * 60)
                         
                         # Update bot's token and expiry
-                        self.parent().bot.rapidgator_token = new_rapidgator_token
-                        self.parent().bot.rapidgator_token_expiry = expiry_time
+                        self.window().bot.rapidgator_token = new_rapidgator_token
+                        self.window().bot.rapidgator_token_expiry = expiry_time
                         
                         # Save the token to the appropriate file
-                        self.parent().bot.save_token('download')
+                        self.window().bot.save_token('download')
                         logging.info("✅ Saved Rapidgator token to user's token file")
                     except Exception as e:
                         logging.error(f"Error saving Rapidgator token: {e}", exc_info=True)
