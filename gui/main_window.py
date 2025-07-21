@@ -7023,17 +7023,22 @@ class ForumBotGUI(QMainWindow):
             # Get user-specific download directory setting
             user_download_dir = self.user_manager.get_user_setting('download_dir')
             if user_download_dir:
-                # Update FileProcessor download directory
+
                 if hasattr(self, 'file_processor') and self.file_processor:
                     self.file_processor.download_dir = user_download_dir
-                
-                # Update bot download directory
+
                 if hasattr(self, 'bot') and self.bot:
                     self.bot.download_dir = user_download_dir
-                
-                logging.info(f"📂 Download directory updated for user '{current_user}': {user_download_dir}")
+                # keep config synced so widgets show the same path
+                self.config['download_dir'] = user_download_dir
+
+                logging.info(
+                    f"📂 Download directory updated for user '{current_user}': {user_download_dir}"
+                )
             else:
-                logging.debug(f"⚠️ No download directory setting found for user '{current_user}', using default")
+                logging.debug(
+                    f"⚠️ No download directory setting found for user '{current_user}', using default"
+                )
                 
         except Exception as e:
             logging.error(f"❌ Error updating download directory from user settings: {e}")
