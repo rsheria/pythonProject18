@@ -63,6 +63,30 @@ QPushButton:hover   {{ background:{t.BUTTON_HOVER}; }}
 QPushButton:pressed {{ background:{t.BUTTON_PRESSED}; }}
 QPushButton:disabled{{ background:{btn_dis}; color:{txt_dis}; }}
 
+/* ========== TAB WIDGET ========== */
+QTabWidget::pane {{
+    background: {t.SURFACE};
+    border: 1px solid {t.BORDER};
+    border-radius: {t.RADIUS_MEDIUM};
+}}
+QTabBar::tab {{
+    background: {t.SURFACE_VARIANT};
+    color: {t.TEXT_SECONDARY};
+    padding: 6px 12px;
+    margin: 2px;
+    border-radius: {t.RADIUS_SMALL};
+    font-family: {t.FONT_FAMILY};
+}}
+QTabBar::tab:selected {{
+    background: {t.PRIMARY};
+    color: {t.TEXT_ON_PRIMARY};
+}}
+QTabBar::tab:hover {{
+    background: {t.SURFACE_ELEVATED};
+    color: {t.TEXT_PRIMARY};
+}}
+
+
 /* ========== INPUTS ========== */
 QLineEdit, QTextEdit, QPlainTextEdit {{
     background:{t.INPUT_BACKGROUND};
