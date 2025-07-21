@@ -847,12 +847,9 @@ class ForumBotGUI(QMainWindow):
         toolbar.setIconSize(QSize(20, 20))  # Smaller icon size for a cleaner look
         toolbar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.addToolBar(toolbar)
-        toolbar.addAction(QIcon.fromTheme("document-save"), "Save Data", self.save_data)
         toolbar.addAction(QIcon.fromTheme("view-refresh"), "Refresh Categories", self.refresh_categories)
         toolbar.addAction(QIcon.fromTheme("system-log-out"), "Logout", self.handle_logout)
-        start_tracking_action = QAction(QIcon.fromTheme("media-playback-start"), "Start Tracking", self)
-        start_tracking_action.triggered.connect(self.start_tracking)
-        toolbar.addAction(start_tracking_action)
+
         # ─── Light / Dark Mode Toggle ─────────────────────────────
         self.theme_toggle_action = QAction("🌙 Light Mode", self)
         self.theme_toggle_action.setCheckable(True)
@@ -2303,7 +2300,6 @@ class ForumBotGUI(QMainWindow):
 
     def setup_shortcuts(self):
         # Existing shortcuts
-        QShortcut(QKeySequence("Ctrl+S"), self, self.save_data)
         QShortcut(QKeySequence("Ctrl+R"), self, self.refresh_categories)
         QShortcut(QKeySequence("Ctrl+L"), self, self.handle_logout)
         QShortcut(QKeySequence("Delete"), self, self.remove_selected_threads)
@@ -6150,14 +6146,6 @@ class ForumBotGUI(QMainWindow):
         self.statusBar().showMessage(f"Stopped monitoring selected categories.")
         logging.info(f"🏁 Finished stopping categories: {', '.join(categories_to_stop)}")
 
-    def start_tracking(self):
-        """Start tracking selected categories."""
-        indexes = self.category_tree.selectedIndexes()
-        if not indexes:
-            QMessageBox.warning(self, "No Selection", "Please select at least one category to start tracking.")
-            return
-        self.start_monitoring(indexes, mode='Keep Tracking')
-
     def monitoring_finished(self, category_name):
         """Handle the completion of a worker thread."""
         self.statusBar().showMessage(f'Monitoring finished for {category_name}.')
@@ -6566,50 +6554,6 @@ class ForumBotGUI(QMainWindow):
     def paste_threads(self):
         # Placeholder for paste functionality
         self.statusBar().showMessage('Paste functionality not implemented')
-
-    def save_data(self):
-        """Save thread data to a JSON file, including links."""
-        if not self.current_category:
-            QMessageBox.warning(self, "No Category Selected", "Please select a category first.")
-            return
-        category_name = self.current_category
-        threads = self.category_threads.get(category_name, {})
-        if not threads:
-            QMessageBox.information(self, "No Data", "There are no threads to save.")
-            return
-        sanitized_name = sanitize_filename(category_name)
-        
-        # Save to user-specific folder if user is logged in
-        if self.user_manager.get_current_user():
-            user_folder = self.user_manager.get_user_folder()
-            os.makedirs(user_folder, exist_ok=True)
-            filename = os.path.join(user_folder, f"threads_{sanitized_name}.json")
-        else:
-            # Fallback to global data folder
-            data_dir = get_data_folder()
-            filename = os.path.join(data_dir, f"threads_{sanitized_name}.json")
-        try:
-            serializable_threads = {}
-            for thread_title, thread_info in threads.items():
-                thread_url, thread_date, thread_id, file_hosts = thread_info
-                links = self.bot.thread_links.get(thread_title, {})
-                # Ensure links are unique per host
-                unique_links = {}
-                for host, link_list in links.items():
-                    unique_links[host] = list(set(link_list))
-                serializable_threads[thread_title] = {
-                    'thread_url': thread_url,
-                    'thread_date': thread_date,
-                    'thread_id': thread_id,
-                    'file_hosts': file_hosts,
-                    'links': unique_links  # Include links in the saved data
-                }
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(serializable_threads, f, ensure_ascii=False, indent=4)
-            QMessageBox.information(self, "Data Saved", f"Thread data saved to {filename}.")
-            logging.info(f"Thread data saved to {filename}.")
-        except Exception as e:
-            self.handle_exception(f"save_data for category '{category_name}'", e)
 
     def load_data(self, category_name):
         """Load thread data from JSON في فولدر data/."""
