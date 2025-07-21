@@ -1038,22 +1038,8 @@ class ForumBotGUI(QMainWindow):
         mega_threads_label.setFont(QFont("Arial", 12, QFont.Bold))
         mega_threads_layout.addWidget(mega_threads_label)
 
-        # Controls Layout for Megathreads
-        mega_controls_layout = QHBoxLayout()
-        mega_controls_layout.addWidget(QLabel('Track Date:'))
-        self.megathreads_date_filters = QLineEdit()
-        self.megathreads_date_filters.setPlaceholderText('e.g., Heute, Gestern, 2024')
-        mega_controls_layout.addWidget(self.megathreads_date_filters)
 
-        mega_controls_layout.addWidget(QLabel('Pages:'))
-        self.megathreads_page_from = QSpinBox()
-        self.megathreads_page_from.setMinimum(1)
-        mega_controls_layout.addWidget(self.megathreads_page_from)
-        mega_controls_layout.addWidget(QLabel('to'))
-        self.megathreads_page_to = QSpinBox()
-        self.megathreads_page_to.setMinimum(1)
-        mega_controls_layout.addWidget(self.megathreads_page_to)
-        mega_threads_layout.addLayout(mega_controls_layout)
+        # Controls Layout for Megathreads (removed tracking inputs)
 
         # Additional Control Buttons for tracking megathreads
         track_layout = QHBoxLayout()
@@ -1404,21 +1390,7 @@ class ForumBotGUI(QMainWindow):
         threads_label.setFont(QFont("Arial", 12, QFont.Bold))
         threads_layout.addWidget(threads_label)
 
-        # Controls Layout
-        controls_layout = QHBoxLayout()
-        controls_layout.addWidget(QLabel('Track Date:'))
-        self.date_filters = QLineEdit()
-        self.date_filters.setPlaceholderText('e.g., Heute, Gestern, 09.24')
-        controls_layout.addWidget(self.date_filters)
-        controls_layout.addWidget(QLabel('Pages:'))
-        self.page_from = QSpinBox()
-        self.page_from.setMinimum(1)
-        controls_layout.addWidget(self.page_from)
-        controls_layout.addWidget(QLabel('to'))
-        self.page_to = QSpinBox()
-        self.page_to.setMinimum(1)
-        controls_layout.addWidget(self.page_to)
-        threads_layout.addLayout(controls_layout)
+        # Controls Layout (removed tracking inputs)
 
         # Thread List (QListWidget)
         self.thread_list = QListWidget()
