@@ -579,11 +579,12 @@ class SettingsWidget(QWidget):
                 source_name = "no user"
 
                 # --- download directory ---
-                download_dir = ""
                 if current_user:
                     download_dir = settings_source.get(
                         "download_dir", self.config.get("download_dir", "")
                     )
+                else:
+                    download_dir = self.config.get("download_dir", "")
                 self.download_path_label.setText(download_dir)
 
             # --- upload hosts ---
