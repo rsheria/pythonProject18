@@ -577,7 +577,11 @@ class SettingsWidget(QWidget):
                 source_name = "no user"
 
                 # --- download directory ---
-                download_dir = settings_source.get("download_dir", "") if current_user else ""
+                download_dir = ""
+                if current_user:
+                    download_dir = settings_source.get(
+                        "download_dir", self.config.get("download_dir", "")
+                    )
                 self.download_edit.setText(download_dir)
 
             # --- upload hosts ---
@@ -752,12 +756,13 @@ class SettingsWidget(QWidget):
             
             # Save to user manager if logged in, otherwise to config
             if self.user_manager.get_current_user():
-                # Save all settings to user settings
+
                 for key, value in new_settings.items():
                     self.user_manager.set_user_setting(key, value)
+                    self.config[key] = value
                 logging.info("✅ Settings saved to user settings")
             else:
-                # Save to config if not logged in
+
                 for key, value in new_settings.items():
                     self.config[key] = value
                 logging.info("✅ Settings saved to config")
