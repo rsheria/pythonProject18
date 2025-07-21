@@ -562,132 +562,73 @@ class SettingsWidget(QWidget):
             QMessageBox.critical(self, "Error", f"Failed to reset settings: {e}")
 
     def load_settings(self, initial: bool = False):
-        """Load settings from user manager and populate UI elements.
-
-        Args:
-            initial: If True, ignore any remembered user and treat as no user
-                logged in. This keeps user-specific fields blank until the user
-                explicitly logs in.
-        """
+        """Load settings from user manager and populate UI elements."""
         try:
             # Check if UI elements still exist
-            if not hasattr(self, 'download_edit') or not self.download_edit:
+            if not hasattr(self, "download_edit") or not self.download_edit:
                 logging.warning("UI elements not initialized yet, skipping settings load")
                 return
-            # Default to global config in case any errors occur before we
-            # determine the appropriate settings source
-            settings_source = self.config
-            source_name = "global config (no user)"
-
-            # Determine which user's settings to load. When ``initial`` is True
-            # we purposely ignore any remembered user so the widget starts in a
-            # logged-out state.
             current_user = None if initial else self.user_manager.get_current_user()
-
             if current_user:
                 settings_source = self.user_manager.get_all_user_settings()
                 source_name = f"user '{current_user}'"
+            else:
+                settings_source = {}
+                source_name = "no user"
 
-            
-            # Safely set UI elements with existence checks
-            try:
-                # Download Directory
-                download_dir = settings_source.get('download_dir', '')
-                if hasattr(self, 'download_edit') and self.download_edit:
-                    self.download_edit.setText(download_dir)
-                
-                # Upload Hosts
-                if hasattr(self, 'upload_hosts_list') and self.upload_hosts_list:
-                    self.upload_hosts_list.clear()
+                # --- download directory ---
+                self.download_edit.setText(settings_source.get("download_dir", ""))
 
-                    # Determine base defaults from config/environment
-                    default_hosts = self.config.get('upload_hosts', [])
-                    if not isinstance(default_hosts, list) or not default_hosts:
-                        default_hosts = ['rapidgator', 'nitroflare', 'ddownload', 'katfile']
-                        upload_hosts = settings_source.get('upload_hosts', default_hosts)
-                        if not isinstance(upload_hosts, list) or not upload_hosts:
-                            upload_hosts = list(default_hosts)
-                    else:
-                        upload_hosts = list(default_hosts)
+            # --- upload hosts ---
+            self.upload_hosts_list.clear()
+            if current_user:
+                hosts = settings_source.get("upload_hosts", [])
+                if not isinstance(hosts, list) or not hosts:
+                    hosts = ["rapidgator", "nitroflare", "ddownload", "katfile"]
+            else:
+                hosts = []
+            for h in [h for h in hosts if isinstance(h, str) and h.strip()]:
+                item = QListWidgetItem(h)
+                item.setData(Qt.UserRole, h)
+                item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled)
+                self.upload_hosts_list.addItem(item)
+            self._sanitize_upload_host_items()
+            self._renumber_upload_hosts()
 
-                    upload_hosts = [h for h in upload_hosts if isinstance(h, str) and h.strip()]
-                    for host in upload_hosts:
-                        item = QListWidgetItem(host)
-                        item.setData(Qt.UserRole, host)
-                        item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled)
-                        self.upload_hosts_list.addItem(item)
+            # --- page range ---
+            page_from = int(settings_source.get("page_from", 1))
+            page_to = int(settings_source.get("page_to", 5))
+            self.page_from_spin.setValue(page_from)
+            self.page_to_spin.setValue(page_to)
 
-                    self._sanitize_upload_host_items()
-                    self._renumber_upload_hosts()
+            # --- Rapidgator token & backup option ---
+            token = settings_source.get("rapidgator_api_token", "") if current_user else ""
+            self.rapidgator_token_input.setText(token)
+            self.validate_token_btn.setEnabled(bool(token))
+            self.use_backup_rg_checkbox.setChecked(
+                bool(settings_source.get("use_backup_rg", False)) if current_user else False
+            )
 
-                # Page range
-                page_from = settings_source.get('page_from', 1)
-                page_to = settings_source.get('page_to', 5)
-                # Ensure values are integers for setValue
-                try:
-                    page_from = int(page_from)
-                    page_to = int(page_to)
-                except (ValueError, TypeError):
-                    page_from = 1
-                    page_to = 5
-                
-                # Set page range spin boxes
-                if hasattr(self, 'page_from_spin') and self.page_from_spin:
-                    self.page_from_spin.setValue(page_from)
-                if hasattr(self, 'page_to_spin') and self.page_to_spin:
-                    self.page_to_spin.setValue(page_to)
+            # --- date filters ---
+            df = settings_source.get(
+                "date_filters", [
+                    {"type": "relative", "value": 3, "unit": "days"}
+                ]
+            )
+            if not isinstance(df, list):
+                df = [{"type": "relative", "value": 3, "unit": "days"}]
+            self.date_filters = list(df)
+            self._load_date_filters_into_list()
 
-                # Load Rapidgator token
-                rapidgator_token = settings_source.get('rapidgator_api_token', '')
-                if hasattr(self, 'rapidgator_token_input') and self.rapidgator_token_input:
-                    self.rapidgator_token_input.setText(rapidgator_token)
-                    # Enable validate button if token exists
-                    if hasattr(self, 'validate_token_btn') and self.validate_token_btn:
-                        self.validate_token_btn.setEnabled(bool(rapidgator_token))
-                # Rapidgator backup option
-                if hasattr(self, 'use_backup_rg_checkbox') and self.use_backup_rg_checkbox:
-                    self.use_backup_rg_checkbox.setChecked(settings_source.get('use_backup_rg', False))
-                
-                # Update the bot's Rapidgator token if parent has bot attribute
-                if (hasattr(self.window(), 'bot') and
-                    hasattr(self.window().bot, 'rapidgator_token')):
+            # --- priority list ---
+            if hasattr(self, "load_priority_settings"):
+                self.load_priority_settings()
 
-                    self.window().bot.rapidgator_token = rapidgator_token
-                    logging.info("✅ Loaded Rapidgator token into bot instance")
-                    
-                    # Also update the token file for the current user if token exists
-                    if rapidgator_token:
-                        try:
-                            # Calculate expiry time (30 days from now)
-                            expiry_time = int(time.time()) + (30 * 24 * 60 * 60)
-                            
-                            # Update bot's token and expiry
-                            self.window().bot.rapidgator_token = rapidgator_token
-                            self.window().bot.rapidgator_token_expiry = expiry_time
-                            
-                            # Save the token to the appropriate file
-                            self.window().bot.save_token('download')
-                            logging.info("✅ Saved Rapidgator token to user's token file")
-                        except Exception as e:
-                            logging.error(f"Error saving Rapidgator token: {e}", exc_info=True)
-                
-                # Load priority settings
-                if hasattr(self, 'load_priority_settings'):
-                    self.load_priority_settings()
-                
-                logging.info(f"✅ Settings loaded successfully from {source_name}.")
-                
-            except RuntimeError as re:
-                # Handle case where C++ object has been deleted
-                if 'wrapped C/C++ object' in str(re):
-                    logging.warning("UI objects no longer available, skipping settings update")
-                    return
-                raise  # Re-raise if it's a different error
+            logging.info(f"✅ Settings loaded successfully from {source_name}.")
                 
         except Exception as e:
             logging.error(f"❌ Error loading settings: {e}", exc_info=True)
-            # Only show message box if UI is still available
-            if hasattr(self, 'isVisible') and self.isVisible():
+            if hasattr(self, "isVisible") and self.isVisible():
                 QMessageBox.critical(self, "Error", f"Failed to load settings: {e}")
 
     def _on_rapidgator_token_changed(self, text):

@@ -186,6 +186,12 @@ class ForumBotGUI(QMainWindow):
         super().__init__()
         self.config = config
         self.user_manager = get_user_manager()
+        # Ensure no previously restored session leaks into the new UI
+        if self.user_manager.get_current_user():
+            logging.info(
+                f"\U0001f501 Session found for user: {self.user_manager.get_current_user()} — clearing for fresh start"
+            )
+            self.user_manager.clear_current_session()
         self.active_upload_hosts = list(self.config.get('upload_hosts', []))
         if not self.active_upload_hosts:
             env_hosts = os.getenv('UPLOAD_HOSTS', '')
@@ -315,17 +321,6 @@ class ForumBotGUI(QMainWindow):
 
         # ملء شجرة Megathreads بعد كل شيء
         self.populate_megathreads_category_tree()
-        
-        # Check if user session was restored but don't auto-load user data
-        # Users must explicitly login to see their data (strict data isolation)
-        current_user = self.user_manager.get_current_user()
-        if current_user:
-            logging.info(f"🔄 Session found for user: {current_user}, but data loading deferred until explicit login")
-            # Clear any restored session for strict data isolation
-            self.user_manager.clear_current_session()
-            # Clear all user data from memory to prevent data leakage
-            self.clear_user_data_on_logout()
-            logging.info("🔒 Session cleared - user must login explicitly to access data")
 
     # ------------------------- NEW ENHANCEMENT START -------------------------
     def on_theme_toggled(self, checked: bool):
@@ -2230,73 +2225,6 @@ class ForumBotGUI(QMainWindow):
         except Exception as e:
             logging.error(f"Error opening thread URL in WebDriver: {e}", exc_info=True)
             QMessageBox.critical(self, "Error", f"Failed to open thread: {e}")
-
-    def handle_logout(self):
-        """Handle user logout and clear session data"""
-        try:
-            # Clear current user session in UserManager
-            current_user = self.user_manager.get_current_user()
-            if current_user:
-                logging.info(f"🚪 User '{current_user}' logging out")
-                self.user_manager.clear_current_user()
-            
-            # Clear bot session
-            if self.bot:
-                self.bot.logout()
-            
-            # Reset login controls
-            self.login_button.setEnabled(True)
-            self.username_input.setEnabled(True)
-            self.password_input.setEnabled(True)
-            self.username_input.clear()
-            self.password_input.clear()
-            
-            # Clear UI data
-            self.category_model.clear()
-            self.megathreads_category_model.clear()
-            self.thread_list.clear()
-            self.megathreads_tree.clear()
-            self.bbcode_editor.clear()
-            self.megathreads_bbcode_editor.clear()
-            
-            # CRITICAL: Save all user data before clearing it
-            logging.info("💾 Saving user data before logout...")
-            try:
-                self.save_process_threads_data()
-                self.save_backup_threads_data()
-                self.save_replied_thread_ids()
-                if hasattr(self, 'megathreads_process_threads') and self.megathreads_process_threads:
-                    self.save_megathreads_process_threads_data()
-                if hasattr(self, 'bot') and self.bot:
-                    self.bot.save_processed_thread_ids()
-                logging.info("✅ User data saved successfully before logout")
-            except Exception as save_error:
-                logging.error(f"❌ Error saving user data before logout: {save_error}", exc_info=True)
-            
-            # Clear all user-specific data comprehensively
-            self.clear_user_data_on_logout()
-            
-            # Reset config username for backward compatibility
-            self.config['username'] = ''
-            
-            # Update bot file paths back to global folders
-            if hasattr(self, 'bot') and self.bot:
-                self.bot.update_user_file_paths()
-            
-            # Refresh settings widget to clear user-specific settings
-            if hasattr(self, 'settings_widget'):
-                self.settings_widget.reset_settings()
-            
-            # Reload user-specific data (will load default/empty data when no user logged in)
-            self.reload_user_specific_data()
-            
-            # Update status
-            self.statusBar().showMessage('Logged out successfully. Please log in.')
-            logging.info("✅ Logout completed successfully")
-            
-        except Exception as e:
-            logging.error(f"Error during logout: {str(e)}", exc_info=True)
-            QMessageBox.critical(self, "Logout Error", f"Error during logout: {str(e)}")
 
     def setup_shortcuts(self):
         # Existing shortcuts
