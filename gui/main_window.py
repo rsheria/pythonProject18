@@ -1310,17 +1310,6 @@ class ForumBotGUI(QMainWindow):
         login_group_layout.addWidget(self.login_button)
         login_layout.addWidget(login_group)
 
-        # Add Buttons for Thread Management Below Login Bar
-        self.remove_thread_button = QPushButton('Remove Selected Thread(s)')
-        self.remove_thread_button.clicked.connect(self.remove_selected_threads)
-        login_layout.addWidget(self.remove_thread_button)
-
-        self.remove_all_button = QPushButton('Remove All Threads')
-        self.remove_all_button.clicked.connect(self.remove_all_threads)
-        login_layout.addWidget(self.remove_all_button)
-
-
-
         # Add the Select WinRAR Executable Button
         self.select_winrar_exe_button = QPushButton('Select WinRAR Executable')
         self.select_winrar_exe_button.clicked.connect(self.select_winrar_executable)
@@ -1421,6 +1410,16 @@ class ForumBotGUI(QMainWindow):
         # Buttons for fetching and viewing links were removed per request
         threads_layout.addWidget(QLabel("Extracted Threads"))
         threads_layout.addWidget(self.thread_list)
+
+        # Buttons for removing threads (moved from sidebar)
+        remove_buttons = QHBoxLayout()
+        self.remove_thread_button = QPushButton('Remove Selected Thread(s)')
+        self.remove_thread_button.clicked.connect(self.remove_selected_threads)
+        remove_buttons.addWidget(self.remove_thread_button)
+        self.remove_all_button = QPushButton('Remove All Threads')
+        self.remove_all_button.clicked.connect(self.remove_all_threads)
+        remove_buttons.addWidget(self.remove_all_button)
+        threads_layout.addLayout(remove_buttons)
 
         upper_splitter.addWidget(threads_widget)
 
@@ -6661,6 +6660,10 @@ class ForumBotGUI(QMainWindow):
                 self.bot.thread_links.pop(thread_title, None)
                 # Remove from processed_thread_ids if necessary
                 self.bot.processed_thread_ids.discard(thread_id)
+            # Persist changes
+            self.save_category_data(self.current_category)
+            self.bot.save_processed_thread_ids()
+
 
             self.statusBar().showMessage(f'Removed {len(selected_items)} thread(s)')
             logging.info(f"Removed {len(selected_items)} thread(s) from category '{self.current_category}'.")
@@ -6691,6 +6694,13 @@ class ForumBotGUI(QMainWindow):
             # Remove all links associated with the category
             for thread_title in threads.keys():
                 self.bot.thread_links.pop(thread_title, None)
+            # Update internal store and persist removal
+            self.category_threads[category_name] = {}
+            # delete saved file if exists
+            filename = self.get_category_threads_filepath(category_name)
+            if os.path.exists(filename):
+                os.remove(filename)
+            self.bot.save_processed_thread_ids()
 
             self.statusBar().showMessage(f'Removed all threads from "{category_name}".')
             logging.info(f"Removed all threads from category '{category_name}'.")
@@ -6749,6 +6759,18 @@ class ForumBotGUI(QMainWindow):
             data_dir = get_data_folder()
             os.makedirs(data_dir, exist_ok=True)
             return os.path.join(data_dir, "process_threads.json")
+
+    def get_category_threads_filepath(self, category_name):
+        """Return the filepath for a category's threads JSON."""
+        sanitized_name = sanitize_filename(category_name)
+        if self.user_manager.get_current_user():
+            user_folder = self.user_manager.get_user_folder()
+            os.makedirs(user_folder, exist_ok=True)
+            return os.path.join(user_folder, f"threads_{sanitized_name}.json")
+        else:
+            data_dir = get_data_folder()
+            os.makedirs(data_dir, exist_ok=True)
+            return os.path.join(data_dir, f"threads_{sanitized_name}.json")
 
     def save_process_threads_data(self):
         """
@@ -6819,9 +6841,7 @@ class ForumBotGUI(QMainWindow):
         threads = self.category_threads.get(category_name, {})
         if not threads:
             return
-        data_dir = get_data_folder()
-        sanitized_name = sanitize_filename(category_name)
-        filename = os.path.join(data_dir, f"{sanitized_name}_threads.json")
+        filename = self.get_category_threads_filepath(category_name)
 
         try:
             serializable_threads = {}
