@@ -1418,14 +1418,7 @@ class ForumBotGUI(QMainWindow):
         self.thread_list = QListWidget()
         self.thread_list.setSelectionMode(QAbstractItemView.SingleSelection)
         self.thread_list.itemClicked.connect(self.on_thread_selected)
-        thread_controls_layout = QHBoxLayout()
-        fetch_button = QPushButton("Fetch")
-        fetch_button.clicked.connect(lambda: self.fetch_thread_content(self.thread_list.currentItem()) if self.thread_list.currentItem() else None)
-        thread_controls_layout.addWidget(fetch_button)
-        view_links_button = QPushButton("View Links")
-        view_links_button.clicked.connect(lambda: self.view_links(self.thread_list.currentItem().data(Qt.UserRole + 2)) if self.thread_list.currentItem() else None)
-        thread_controls_layout.addWidget(view_links_button)
-        threads_layout.addLayout(thread_controls_layout)
+        # Buttons for fetching and viewing links were removed per request
         threads_layout.addWidget(QLabel("Extracted Threads"))
         threads_layout.addWidget(self.thread_list)
 
@@ -6397,14 +6390,17 @@ class ForumBotGUI(QMainWindow):
                 self.bbcode_editor.setPlainText(bbcode_content)
                 logging.info(f"Displayed BBCode for thread '{thread_title}' in editor.")
 
-                # Save BBCode to process_threads
-                if self.current_category and thread_title in self.process_threads.get(self.current_category, {}):
-                    self.process_threads[self.current_category][thread_title]['bbcode_content'] = bbcode_content
+                # Save BBCode to process_threads so it can be reused without another fetch
+                if self.current_category:
+                    cat = self.current_category
+                    if cat not in self.process_threads:
+                        self.process_threads[cat] = {}
+                    if thread_title not in self.process_threads[cat]:
+                        self.process_threads[cat][thread_title] = {'thread_url': thread_url}
+                    self.process_threads[cat][thread_title]['bbcode_content'] = bbcode_content
                     self.save_process_threads_data()
-                    logging.info(f"Saved BBCode for thread '{thread_title}' in category '{self.current_category}'.")
-                else:
-                    logging.warning(
-                        f"Thread '{thread_title}' not found in process_threads for category '{self.current_category}'.")
+                    logging.info(
+                        f"Saved BBCode for thread '{thread_title}' in category '{cat}'.")
             else:
                 QMessageBox.warning(self, "Empty Content", "No content fetched from the thread.")
                 logging.warning(f"No HTML content fetched for thread '{thread_title}'.")
