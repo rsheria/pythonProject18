@@ -2463,6 +2463,7 @@ class ForumBotGUI(QMainWindow):
                 self.save_backup_threads_data()   # Save backup threads
                 self.save_replied_thread_ids()    # Save replied thread IDs
                 self.save_megathreads_process_threads_data()  # Save megathreads
+                self.megathreads_category_manager.save_categories()  # Save megathreads categories
                 self.bot.save_processed_thread_ids()  # Save processed thread IDs
                 logging.info("✅ User data saved successfully")
                 
@@ -6637,6 +6638,7 @@ class ForumBotGUI(QMainWindow):
         for category_name in self.category_threads:
             self.save_category_data(category_name)
         self.category_manager.save_categories()
+        self.megathreads_category_manager.save_categories()
         self.bot.save_processed_thread_ids()  # Save processed thread IDs on close
         self.save_process_threads_data()  # Save Process Threads data
         self.save_megathreads_process_threads_data()  # Save Megathreads data
@@ -6839,6 +6841,9 @@ class ForumBotGUI(QMainWindow):
             # Reload categories for both managers
             self.category_manager.load_categories()
             self.megathreads_category_manager.load_categories()
+            # Refresh category views after reloading
+            self.populate_category_tree(load_saved=True)
+            self.populate_megathreads_category_tree()
             
             # Reload all user-specific data files
             self.load_process_threads_data()
