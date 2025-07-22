@@ -2462,6 +2462,7 @@ class ForumBotGUI(QMainWindow):
                 self.save_process_threads_data()  # Save current process threads to user folder
                 self.save_backup_threads_data()   # Save backup threads
                 self.save_replied_thread_ids()    # Save replied thread IDs
+                self.save_megathreads_process_threads_data()  # Save megathreads
                 self.bot.save_processed_thread_ids()  # Save processed thread IDs
                 logging.info("✅ User data saved successfully")
                 
@@ -6638,6 +6639,7 @@ class ForumBotGUI(QMainWindow):
         self.category_manager.save_categories()
         self.bot.save_processed_thread_ids()  # Save processed thread IDs on close
         self.save_process_threads_data()  # Save Process Threads data
+        self.save_megathreads_process_threads_data()  # Save Megathreads data
         if hasattr(self, 'process_threads'):
             self.save_process_threads_data()
         if self.bot:
@@ -6842,6 +6844,7 @@ class ForumBotGUI(QMainWindow):
             self.load_process_threads_data()
             self.load_backup_threads_data()
             self.load_replied_thread_ids()
+            self.load_megathreads_process_threads_data()
             
             # Run migration for old links format if needed
             self.migrate_old_links_format()
