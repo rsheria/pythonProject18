@@ -3911,19 +3911,17 @@ class ForumBotGUI(QMainWindow):
                 self.save_process_threads_data()
 
                 # 8) Also reflect in backup_threads to keep them in sync
-                backup_info = self.backup_threads.get(thread_title, {})
-                backup_info['thread_id'] = thread_id
-                backup_info['rapidgator_links'] = rapidgator_links
-                backup_info['rapidgator_backup_links'] = backup_rg_urls
-                backup_info['keeplinks_link'] = new_keeplinks
+                if backup_rg_urls:
+                    backup_info = self.backup_threads.get(thread_title, {})
+                    backup_info['thread_id'] = thread_id
+                    backup_info['rapidgator_links'] = rapidgator_links
+                    backup_info['rapidgator_backup_links'] = backup_rg_urls
+                    backup_info['keeplinks_link'] = new_keeplinks
 
-                backup_info['katfile_links'] = katfile_links
-                self.backup_threads[thread_title] = backup_info
-                self.save_backup_threads_data()
-                self.populate_backup_threads_table()
-
-                # 9) Refresh the Process Threads table so new color is applied
-                self.populate_process_threads_table(self.process_threads)
+                    backup_info['katfile_links'] = katfile_links
+                    self.backup_threads[thread_title] = backup_info
+                    self.save_backup_threads_data()
+                    self.populate_backup_threads_table()
 
             else:
                 logging.warning(f"Thread '{thread_title}' not found in category '{category_name}' after upload.")
@@ -4550,21 +4548,24 @@ class ForumBotGUI(QMainWindow):
                     'keeplinks': keeplinks_url,
                 }
 
-            # Update backup threads data, storing all Mega links as newline-separated
-            self.backup_threads[thread_title] = {
-                'thread_id': thread_id,
-                'rapidgator_links': [url for url in uploaded_urls if 'rapidgator.net' in url],
-                'rapidgator_backup_links': list(backup_rg_urls) if backup_rg_urls else [],
-                'keeplinks_link': keeplinks_url,
-            }
+            # Update backup threads data only if Rapidgator backup links exist
+            if backup_rg_urls:
+                self.backup_threads[thread_title] = {
+                    'thread_id': thread_id,
+                    'rapidgator_links': [url for url in uploaded_urls if 'rapidgator.net' in url],
+                    'rapidgator_backup_links': list(backup_rg_urls),
+                    'keeplinks_link': keeplinks_url,
+                }
 
             # Save updated data
             self.save_process_threads_data()
-            self.save_backup_threads_data()
+            if backup_rg_urls:
+                self.save_backup_threads_data()
 
             # Refresh UI components
             self.populate_process_threads_table(self.process_threads)
-            self.populate_backup_threads_table()
+            if backup_rg_urls:
+                self.populate_backup_threads_table()
 
             # Ensure the updated row is visible
             row = self.get_thread_row(thread_title)
