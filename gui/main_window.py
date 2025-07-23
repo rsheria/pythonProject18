@@ -39,7 +39,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
 from PyQt5.QtGui import QGuiApplication, QScreen
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread, QObject, QSize, QMutex, QMutexLocker, QDateTime, Q_ARG, QMetaObject
 from PyQt5.QtGui import QIcon, QFont, QPixmap, QStandardItemModel, QStandardItem, QKeySequence, QTextCursor, QBrush, QColor, QPalette
-
+from .stats_widget import StatsWidget
 # Import modern UI components
 from .components import (
     ModernSidebar, ModernCard, ModernSectionCard, 
@@ -1324,7 +1324,9 @@ class ForumBotGUI(QMainWindow):
         self.login_button.clicked.connect(self.handle_login)
         login_group_layout.addWidget(self.login_button)
         login_layout.addWidget(login_group)
-
+        # Stats widget under login form
+        self.stats_widget = StatsWidget()
+        login_layout.addWidget(self.stats_widget)
         # Add stretch to push the buttons to the top
         login_layout.addStretch()
 
@@ -2443,7 +2445,8 @@ class ForumBotGUI(QMainWindow):
             self.settings_tab.winrar_exe_label.setText(
                 f"WinRAR Executable: {winrar_exe_path}"
             )
-
+        if hasattr(self, 'stats_widget'):
+            self.stats_widget.start_auto_refresh()
     def on_login_failed(self, error_msg):
         """Handle failed login"""
         # Re-enable login controls
@@ -2496,7 +2499,8 @@ class ForumBotGUI(QMainWindow):
                 if hasattr(self, 'settings_tab'):
                     # Clear settings UI since no user is logged in
                     self.settings_tab.load_settings(initial=True)
-
+                if hasattr(self, 'stats_widget'):
+                    self.stats_widget.clear()
                 logging.info(" Logout completed successfully")
             except Exception as e:
                 self.handle_exception("handle_logout", e)

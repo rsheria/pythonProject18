@@ -19,7 +19,7 @@ from typing import Dict, Any, Optional, Set
 from utils import sanitize_filename
 from config.config import DATA_DIR
 from utils.paths import get_data_folder
-
+import requests
 
 class UserManager:
     """
@@ -34,6 +34,7 @@ class UserManager:
         self.current_user: Optional[str] = None
         self.user_data_dir: Optional[str] = None
         self.user_settings: Dict[str, Any] = {}
+        self._site_sessions: Dict[str, requests.Session] = {}
         self.data_dir = get_data_folder()
         
         # Ensure data directory exists
@@ -67,6 +68,8 @@ class UserManager:
             
             # Save as last session
             self._save_last_session()
+            # clear previous site sessions when switching user
+            self._site_sessions.clear()
             
             logging.info(f"✅ User session initialized for: {self.current_user}")
             logging.info(f"📁 User data directory: {self.user_data_dir}")
@@ -335,6 +338,7 @@ class UserManager:
         self.current_user = None
         self.user_data_dir = None
         self.user_settings.clear()
+        self._site_sessions.clear()
         
         # Clear last session file
         last_session_file = os.path.join(self.data_dir, '.last_session')
@@ -373,7 +377,11 @@ class UserManager:
                 'page_from': 1,
                 'page_to': 5,
                 'katfile_api_key': '',
-                'date_filters': ['Last 3 days']
+                'date_filters': ['Last 3 days'],
+                'stats_target': {
+                    'daily_downloads': 0,
+                    'daily_revenue': 0.0,
+                },
             }
             
             # Update with defaults for missing keys
@@ -439,7 +447,75 @@ class UserManager:
         
         except Exception as e:
             logging.error(f"❌ Failed to save last session: {e}")
-    
+
+    # ------------------------------------------------------------------
+    # Stats helpers
+    # ------------------------------------------------------------------
+    def get_main_account(self, site: str) -> Optional[Dict[str, Any]]:
+        """Return credentials dict for the given site.
+
+        For Rapidgator multiple accounts may exist; the one with
+        ``is_main`` set to ``True`` is returned.
+        """
+        sites = self.user_settings.get("sites", {})
+        creds = sites.get(site)
+        if site == "rapidgator" and isinstance(creds, list):
+            for acc in creds:
+                if acc.get("is_main"):
+                    return acc
+            return creds[0] if creds else None
+        if isinstance(creds, dict):
+            return creds
+        return None
+
+    def get_session(self, site: str) -> Optional[requests.Session]:
+        """Return an authenticated requests.Session for *site*."""
+        if site in self._site_sessions:
+            return self._site_sessions[site]
+
+        account = self.get_main_account(site)
+        if not account:
+            logging.warning(f"No credentials found for site '{site}'")
+            return None
+
+        sess = requests.Session()
+        try:
+            if site == "rapidgator":
+                sess.post(
+                    "https://rapidgator.net/auth/login",
+                    data={"login": account.get("username"), "password": account.get("password")},
+                    timeout=15,
+                )
+            elif site == "nitroflare":
+                sess.post(
+                    "https://nitroflare.com/login",
+                    data={"email": account.get("username"), "password": account.get("password")},
+                    timeout=15,
+                )
+            elif site == "dddownload":
+                sess.post(
+                    "https://ddownload.com/",
+                    data={"op": "login", "login": account.get("username"), "password": account.get("password")},
+                    timeout=15,
+                )
+            elif site == "katfile":
+                sess.post(
+                    "https://katfile.com/",
+                    data={"op": "login", "login": account.get("username"), "password": account.get("password")},
+                    timeout=15,
+                )
+            elif site == "keeplinks":
+                sess.post(
+                    "https://www.keeplinks.org/auth/login",
+                    data={"email": account.get("username"), "password": account.get("password")},
+                    timeout=15,
+                )
+        except Exception as exc:
+            logging.error(f"❌ Login failed for {site}: {exc}")
+
+        self._site_sessions[site] = sess
+        return sess
+
     def clear_session(self):
         """Clear the current user session and reset state."""
         logging.info(f"🔄 Clearing session for user: {self.current_user}")

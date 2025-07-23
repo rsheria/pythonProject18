@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QWidget, QGroupBox, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QListWidget, QListWidgetItem,
     QAbstractItemView, QCheckBox, QFileDialog, QMessageBox,
-    QDialog, QRadioButton, QButtonGroup, QDateEdit, QSpinBox,
+    QDialog, QRadioButton, QButtonGroup, QDateEdit, QSpinBox, QDoubleSpinBox,
     QComboBox, QDialogButtonBox, QLabel, QScrollArea,
     QTabWidget
 )
@@ -214,7 +214,19 @@ class SettingsWidget(QWidget):
         self.page_to_spin.setValue(1)
         pr_layout.addWidget(self.page_to_spin)
         general_layout.addWidget(pr_group)
-
+        # --- Stats Target ---
+        stats_group = QGroupBox("Stats Target")
+        stats_layout = QHBoxLayout(stats_group)
+        stats_layout.addWidget(QLabel("Daily Downloads"))
+        self.target_dl_spin = QSpinBox()
+        self.target_dl_spin.setRange(0, 1000000)
+        stats_layout.addWidget(self.target_dl_spin)
+        stats_layout.addWidget(QLabel("Daily Revenue"))
+        self.target_rev_spin = QDoubleSpinBox()
+        self.target_rev_spin.setRange(0, 1000000)
+        self.target_rev_spin.setDecimals(2)
+        stats_layout.addWidget(self.target_rev_spin)
+        general_layout.addWidget(stats_group)
         # — Download Hosts Priority —
         priority_group = QGroupBox("Download Hosts Priority")
         priority_layout = QVBoxLayout(priority_group)
@@ -546,7 +558,11 @@ class SettingsWidget(QWidget):
             # Reset page range
             self.page_from_spin.setValue(1)
             self.page_to_spin.setValue(5)
-            
+
+            # Reset stats target
+            self.target_dl_spin.setValue(0)
+            self.target_rev_spin.setValue(0.0)
+
             # Reset date filters
             self.date_filters = [{'type': 'relative', 'value': 3, 'unit': 'days'}]
             self._load_date_filters_into_list()
@@ -608,6 +624,11 @@ class SettingsWidget(QWidget):
             page_to = int(settings_source.get("page_to", 5))
             self.page_from_spin.setValue(page_from)
             self.page_to_spin.setValue(page_to)
+            target = settings_source.get(
+                "stats_target", {"daily_downloads": 0, "daily_revenue": 0}
+            )
+            self.target_dl_spin.setValue(int(target.get("daily_downloads", 0)))
+            self.target_rev_spin.setValue(float(target.get("daily_revenue", 0)))
 
             # --- Rapidgator token & backup option ---
             token = settings_source.get("rapidgator_api_token", "") if current_user else ""
@@ -731,7 +752,11 @@ class SettingsWidget(QWidget):
                 'page_to': new_to,
                 'rapidgator_api_token': new_rapidgator_token,
                 'download_hosts_priority': current_priority,
-                'use_backup_rg': self.use_backup_rg_checkbox.isChecked()
+                'use_backup_rg': self.use_backup_rg_checkbox.isChecked(),
+                'stats_target': {
+                    'daily_downloads': self.target_dl_spin.value(),
+                    'daily_revenue': float(self.target_rev_spin.value()),
+                },
             }
             
             # Update the bot's Rapidgator token if parent has bot attribute and token has changed
