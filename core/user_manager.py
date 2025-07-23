@@ -570,8 +570,12 @@ class UserManager:
             return None
 
         try:
-            cookies = browser_cookie3.load(domain_name=domain)
-            sess.cookies.update(cookies)
+            cookies = browser_cookie3.load()
+            filtered = requests.cookies.RequestsCookieJar()
+            for c in cookies:
+                if domain in c.domain:
+                    filtered.set_cookie(c)
+            sess.cookies.update(filtered)
         except Exception as exc:
             logging.error("❌ Failed to load cookies for %s: %s", site, exc)
             return None
