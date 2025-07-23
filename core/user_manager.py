@@ -19,6 +19,7 @@ from typing import Dict, Any, Optional, Set
 from utils import sanitize_filename
 from config.config import DATA_DIR
 from utils.paths import get_data_folder
+import browser_cookie3
 import requests
 
 class UserManager:
@@ -547,110 +548,40 @@ class UserManager:
         return False
 
         # --------------  مكانه الصحيح خارج أى دالة أخرى -------------- #
-    def _login(
-        self,
-        site: str,
-        session: requests.Session,
-        username: str,
-        password: str,
-    ) -> bool:
-        """يحاول تسجيل الدخول للموقع المطلوب ويُعيد True عند النجاح."""
-
-        try:
-            # ---------- Rapidgator ( API أسهل من الفورم الكلاسيكى ) ----------
-            if site == "rapidgator":
-                r = session.post(
-                    "https://rapidgator.net/api/v2/user/login",
-                    data={"login": username, "password": password},
-                    timeout=15,
-                )
-                sid = (r.json().get("response") or {}).get("session_id")
-                if sid:
-                    # نضيف الكوكى يدويًا حتى الصفحات العادية تعتبرنا Logged‑in
-                    session.cookies.set("user__", sid, domain=".rapidgator.net")
-
-            # ---------- Nitroflare ------------------------------------------------
-            elif site == "nitroflare":
-                # خطوة 1: جلب nfmsid cookie
-                session.get("https://nitroflare.com/login", timeout=15)
-                # خطوة 2: POST بيانات الدخول
-                session.post(
-                    "https://nitroflare.com/login",
-                    data={
-                        "user": username,
-                        "pass": password,
-                        "login": "Login",
-                        "redirect": "/member",
-                    },
-                    headers={"Referer": "https://nitroflare.com/login"},
-                    timeout=15,
-                )
-
-            # ---------- DDDownload ----------------------------------------------
-            elif site == "dddownload":
-                session.post(
-                    "http://dddownload.com/",
-                    data={"op": "login", "login": username, "password": password},
-                    headers={"Referer": "http://dddownload.com/"},
-                    timeout=15,
-                    verify=False,          # نتجنب خطأ TLS handshake
-                )
-
-            # ---------- KatFile -------------------------------------------------
-            elif site == "katfile":
-                session.post(
-                    "http://katfile.com/",
-                    data={"op": "login", "login": username, "password": password},
-                    headers={"Referer": "http://katfile.com/"},
-                    timeout=15,
-                    verify=False,
-                )
-
-            # ---------- KeepLinks ----------------------------------------------
-            elif site == "keeplinks":
-                session.post(
-                    "https://www.keeplinks.org/login",
-                    data={
-                        "username": username,
-                        "password": password,
-                        "hiddenaction": "Login",
-                    },
-                    headers={"Referer": "https://www.keeplinks.org/login"},
-                    timeout=15,
-                )
-
-            # ---------- موقع غير مدعوم -----------------------------------------
-            else:
-                return False
-
-        except Exception as exc:
-            logging.error("❌ Login failed for %s: %s", site, exc)
-            return False
-
-        # تحقُّق سريع بعد POST
-        return self._is_logged_in(site, session)
-
 
     def get_session(self, site: str) -> Optional[requests.Session]:
         """Return an authenticated requests.Session for *site*."""
         sess = self._site_sessions.get(site)
         if sess and self._is_logged_in(site, sess):
             return sess
-
-        account = self.get_main_account(site)
-        if not account:
-            logging.warning(f"No credentials found for site '{site}'")
-            return None
-
-        if not sess:
             sess = requests.Session()
 
-        if self._login(site, sess, account.get("username", ""), account.get("password", "")):
+            domain_map = {
+                "rapidgator": ".rapidgator.net",
+                "nitroflare": ".nitroflare.com",
+                "dddownload": ".dddownload.com",
+                "katfile": ".katfile.com",
+                "keeplinks": ".keeplinks.org",
+            }
+
+            domain = domain_map.get(site)
+            if not domain:
+                logging.error("Unsupported site: %s", site)
+            return None
+
+        try:
+            cookies = browser_cookie3.load(domain_name=domain)
+            sess.cookies.update(cookies)
+        except Exception as exc:
+            logging.error("❌ Failed to load cookies for %s: %s", site, exc)
+            return None
+
+        if self._is_logged_in(site, sess):
             self._site_sessions[site] = sess
-            logging.info("Logged-in session cached for %s", site)
+            logging.info("✅ Session loaded from browser cookies for %s", site)
             return sess
 
-        logging.error("Unable to login to %s", site)
+        logging.error("❌ Browser cookies invalid for %s", site)
         return None
     def clear_session(self):
         """Clear the current user session and reset state."""
