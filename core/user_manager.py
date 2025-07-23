@@ -549,44 +549,53 @@ class UserManager:
 
         # --------------  مكانه الصحيح خارج أى دالة أخرى -------------- #
 
+    # ------------------------------------------------------------------
+    # Sessions via browser-cookie3
+    # ------------------------------------------------------------------
     def get_session(self, site: str) -> Optional[requests.Session]:
-        """Return an authenticated requests.Session for *site*."""
+        """Return an authenticated `requests.Session` for *site*.
+
+        يحاول أولاً إعادة جلسة مُخزَّنة؛
+        وإلا يحمِّل كوكى المتصفّح (Chrome/Firefox) لهذا الدومين.
+        """
+        # 1) Session مخزَّنة بالفعل؟
         sess = self._site_sessions.get(site)
         if sess and self._is_logged_in(site, sess):
             return sess
-            sess = requests.Session()
 
-            domain_map = {
-                "rapidgator": ".rapidgator.net",
-                "nitroflare": ".nitroflare.com",
-                "dddownload": ".dddownload.com",
-                "katfile": ".katfile.com",
-                "keeplinks": ".keeplinks.org",
-            }
+        # 2) نحتاج جلسة جديدة
+        sess = requests.Session()
 
-            domain = domain_map.get(site)
-            if not domain:
-                logging.error("Unsupported site: %s", site)
+        domain_map = {
+            "rapidgator": ".rapidgator.net",
+            "nitroflare": ".nitroflare.com",
+            "dddownload": ".dddownload.com",
+            "katfile":    ".katfile.com",
+            "keeplinks":  ".keeplinks.org",
+        }
+        domain = domain_map.get(site)
+        if not domain:
+            logging.error("Unsupported site '%s' for get_session()", site)
             return None
 
+        # 3) تحميل كوكى المتصفّح
         try:
-            cookies = browser_cookie3.load()
-            filtered = requests.cookies.RequestsCookieJar()
-            for c in cookies:
-                if domain in c.domain:
-                    filtered.set_cookie(c)
-            sess.cookies.update(filtered)
+            # browser_cookie3 expects domain_name **without** leading dot
+            cookies = browser_cookie3.load(domain_name=domain.lstrip("."))
+            sess.cookies.update(cookies)
         except Exception as exc:
             logging.error("❌ Failed to load cookies for %s: %s", site, exc)
             return None
 
+        # 4) فحص أن الكوكى فعّالة (مُسجَّلة الدخول)
         if self._is_logged_in(site, sess):
             self._site_sessions[site] = sess
             logging.info("✅ Session loaded from browser cookies for %s", site)
             return sess
 
-        logging.error("❌ Browser cookies invalid for %s", site)
+        logging.error("❌ Browser cookies invalid or expired for %s", site)
         return None
+
     def clear_session(self):
         """Clear the current user session and reset state."""
         logging.info(f"🔄 Clearing session for user: {self.current_user}")
