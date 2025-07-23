@@ -523,7 +523,7 @@ class UserManager:
         return None
 
     def _is_logged_in(self, site: str, session: requests.Session) -> bool:
-        """Return True if session is authenticated for *site*."""
+        """Check whether *session* is currently authenticated for *site*."""
         try:
             if site == "rapidgator":
                 r = session.get("https://rapidgator.net/profile", timeout=15)
@@ -547,7 +547,7 @@ class UserManager:
         return False
 
         def _login(self, site: str, session: requests.Session, username: str, password: str) -> bool:
-            """Attempt login and return True if successful."""
+            """Attempt to authenticate *session* for *site* using provided credentials."""
         try:
             if site == "rapidgator":
                 session.post(
