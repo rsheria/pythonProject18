@@ -546,46 +546,90 @@ class UserManager:
             logging.debug("Login check failed for %s: %s", site, exc)
         return False
 
-        def _login(self, site: str, session: requests.Session, username: str, password: str) -> bool:
-            """Attempt to authenticate *session* for *site* using provided credentials."""
+        # --------------  مكانه الصحيح خارج أى دالة أخرى -------------- #
+    def _login(
+        self,
+        site: str,
+        session: requests.Session,
+        username: str,
+        password: str,
+    ) -> bool:
+        """يحاول تسجيل الدخول للموقع المطلوب ويُعيد True عند النجاح."""
+
         try:
+            # ---------- Rapidgator ( API أسهل من الفورم الكلاسيكى ) ----------
             if site == "rapidgator":
-                session.post(
-                    "https://rapidgator.net/auth/login",
-                    data={"login": username, "password": password, "submit": "Login"},
+                r = session.post(
+                    "https://rapidgator.net/api/v2/user/login",
+                    data={"login": username, "password": password},
                     timeout=15,
                 )
+                sid = (r.json().get("response") or {}).get("session_id")
+                if sid:
+                    # نضيف الكوكى يدويًا حتى الصفحات العادية تعتبرنا Logged‑in
+                    session.cookies.set("user__", sid, domain=".rapidgator.net")
+
+            # ---------- Nitroflare ------------------------------------------------
             elif site == "nitroflare":
+                # خطوة 1: جلب nfmsid cookie
+                session.get("https://nitroflare.com/login", timeout=15)
+                # خطوة 2: POST بيانات الدخول
                 session.post(
                     "https://nitroflare.com/login",
-                    data={"user": username, "pass": password, "login": "Login"},
+                    data={
+                        "user": username,
+                        "pass": password,
+                        "login": "Login",
+                        "redirect": "/member",
+                    },
+                    headers={"Referer": "https://nitroflare.com/login"},
                     timeout=15,
                 )
+
+            # ---------- DDDownload ----------------------------------------------
             elif site == "dddownload":
                 session.post(
-                    "https://dddownload.com/",
+                    "http://dddownload.com/",
                     data={"op": "login", "login": username, "password": password},
+                    headers={"Referer": "http://dddownload.com/"},
                     timeout=15,
+                    verify=False,          # نتجنب خطأ TLS handshake
                 )
+
+            # ---------- KatFile -------------------------------------------------
             elif site == "katfile":
                 session.post(
-                    "https://katfile.com/",
+                    "http://katfile.com/",
                     data={"op": "login", "login": username, "password": password},
+                    headers={"Referer": "http://katfile.com/"},
                     timeout=15,
+                    verify=False,
                 )
+
+            # ---------- KeepLinks ----------------------------------------------
             elif site == "keeplinks":
                 session.post(
                     "https://www.keeplinks.org/login",
-                    data={"username": username, "password": password, "hiddenaction": "Login"},
+                    data={
+                        "username": username,
+                        "password": password,
+                        "hiddenaction": "Login",
+                    },
+                    headers={"Referer": "https://www.keeplinks.org/login"},
                     timeout=15,
                 )
+
+            # ---------- موقع غير مدعوم -----------------------------------------
             else:
                 return False
 
         except Exception as exc:
-            logging.error(f"❌ Login failed for {site}: {exc}")
+            logging.error("❌ Login failed for %s: %s", site, exc)
+            return False
 
+        # تحقُّق سريع بعد POST
         return self._is_logged_in(site, session)
+
 
     def get_session(self, site: str) -> Optional[requests.Session]:
         """Return an authenticated requests.Session for *site*."""
