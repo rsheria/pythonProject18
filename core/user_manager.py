@@ -382,6 +382,32 @@ class UserManager:
                     'daily_downloads': 0,
                     'daily_revenue': 0.0,
                 },
+                'sites': {
+                    'rapidgator': [
+                        {
+                            'username': os.getenv('UPLOAD_RAPIDGATOR_USERNAME',
+                                                  os.getenv('UPLOAD_RAPIDGATOR_LOGIN', '')),
+                            'password': os.getenv('UPLOAD_RAPIDGATOR_PASSWORD', ''),
+                            'is_main': True,
+                        }
+                    ],
+                    'nitroflare': {
+                        'username': os.getenv('NITROFLARE_LOGIN', ''),
+                        'password': os.getenv('NITROFLARE_PASSWORD', ''),
+                    },
+                    'dddownload': {
+                        'username': os.getenv('DDOWNLOAD_LOGIN', ''),
+                        'password': os.getenv('DDOWNLOAD_PASSWORD', ''),
+                    },
+                    'katfile': {
+                        'username': os.getenv('KATFILE_LOGIN', ''),
+                        'password': os.getenv('KATFILE_PASSWORD', ''),
+                    },
+                    'keeplinks': {
+                        'username': os.getenv('KEEP_LINKS_USERNAME', ''),
+                        'password': os.getenv('KEEP_LINKS_PASSWORD', ''),
+                    },
+                },
             }
             
             # Update with defaults for missing keys
@@ -466,6 +492,34 @@ class UserManager:
             return creds[0] if creds else None
         if isinstance(creds, dict):
             return creds
+        # Fallback to environment variables if not configured in settings
+        env_map = {
+            "rapidgator": (
+                os.getenv("UPLOAD_RAPIDGATOR_USERNAME")
+                or os.getenv("UPLOAD_RAPIDGATOR_LOGIN", ""),
+                os.getenv("UPLOAD_RAPIDGATOR_PASSWORD", ""),
+            ),
+            "nitroflare": (
+                os.getenv("NITROFLARE_LOGIN", ""),
+                os.getenv("NITROFLARE_PASSWORD", ""),
+            ),
+            "dddownload": (
+                os.getenv("DDOWNLOAD_LOGIN", ""),
+                os.getenv("DDOWNLOAD_PASSWORD", ""),
+            ),
+            "katfile": (
+                os.getenv("KATFILE_LOGIN", ""),
+                os.getenv("KATFILE_PASSWORD", ""),
+            ),
+            "keeplinks": (
+                os.getenv("KEEP_LINKS_USERNAME", ""),
+                os.getenv("KEEP_LINKS_PASSWORD", ""),
+            ),
+        }
+        if site in env_map:
+            user, pwd = env_map[site]
+            if user and pwd:
+                return {"username": user, "password": pwd}
         return None
 
     def get_session(self, site: str) -> Optional[requests.Session]:

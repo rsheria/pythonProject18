@@ -49,22 +49,55 @@ class _StatsWorker(QRunnable):
                     "from": self.date_from,
                     "to": self.date_to,
                 }
-                resp = self.session.get("https://nitroflare.com/ajax/affiliates.php", params=params, timeout=20)
-                data = resp.json()
+                resp = self.session.get(
+                    "https://nitroflare.com/ajax/affiliates.php",
+                    params=params,
+                    headers={"X-Requested-With": "XMLHttpRequest"},
+                    timeout=20,
+                )
+                data = resp.json() if resp.content else []
+                dl = dl_rev = sales = sales_rev = 0.0
+                if isinstance(data, list):
+                    import re
+                    for row in data:
+                        ppd = row.get("ppd", "0/0")
+                        m = re.search(r"(\d+)\s*/\s*\$?([\d.,]+)", ppd)
+                        if m:
+                            dl += int(m.group(1))
+                            dl_rev += float(m.group(2).replace(",", ""))
+                        sales_str = row.get("sales", "0/0")
+                        m = re.search(r"(\d+)\s*/\s*\$?([\d.,]+)", sales_str)
+                        if m:
+                            sales += int(m.group(1))
+                            sales_rev += float(m.group(2).replace(",", ""))
                 stats = {
-                    "dl": int(data.get("downloads", 0)),
-                    "dl_rev": float(data.get("pps_download", 0)),
-                    "sales": int(data.get("sales", 0)),
-                    "sales_rev": float(data.get("pps_sales", 0)),
+                    "dl": int(dl),
+                    "dl_rev": float(dl_rev),
+                    "sales": int(sales),
+                    "sales_rev": float(sales_rev),
                 }
             elif self.site == "dddownload":
                 url = (
                     f"https://ddownload.com/?op=my_reports&ajax=1&date1={self.date_from}&date2={self.date_to}"
                 )
-                stats = self.session.get(url, timeout=20).json()
+                r = self.session.get(url, timeout=20)
+                data = r.json() if r.headers.get("Content-Type", "").startswith("application/json") else {}
+                stats = {
+                    "dl": int(data.get("downloads", 0)),
+                    "dl_rev": float(data.get("profit_dl", 0)),
+                    "sales": int(data.get("sales", 0)),
+                    "sales_rev": float(data.get("profit_sales", 0)),
+                }
             elif self.site == "katfile":
                 url = f"https://katfile.com/?op=my_reports&ajax=1&date1={self.date_from}&date2={self.date_to}"
-                stats = self.session.get(url, timeout=20).json()
+                r = self.session.get(url, timeout=20)
+                data = r.json() if r.headers.get("Content-Type", "").startswith("application/json") else {}
+                stats = {
+                    "dl": int(data.get("downloads", 0)),
+                    "dl_rev": float(data.get("profit_dl", 0)),
+                    "sales": int(data.get("sales", 0)),
+                    "sales_rev": float(data.get("profit_sales", 0)),
+                }
             elif self.site == "keeplinks":
                 r = self.session.get("https://www.keeplinks.org/earnings", timeout=20)
                 import re
@@ -134,6 +167,7 @@ class StatsWidget(QWidget):
     # --------------------------------------------------------------
     def refresh(self) -> None:
         sites = self.user_manager.get_user_setting("sites", {})
+        sites = {k: v for k, v in sites.items() if v}
         if not sites:
             logging.info("StatsWidget: No site accounts configured")
             self.model.removeRows(0, self.model.rowCount())
