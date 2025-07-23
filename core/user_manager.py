@@ -581,7 +581,7 @@ class UserManager:
         # 3) تحميل كوكى المتصفّح
         try:
             # browser_cookie3 expects domain_name **without** leading dot
-            cookies = browser_cookie3.load(domain_name=domain.lstrip("."))
+            cookies = browser_cookie3.firefox(domain_name=domain.lstrip("."))
             sess.cookies.update(cookies)
         except Exception as exc:
             logging.error("❌ Failed to load cookies for %s: %s", site, exc)
