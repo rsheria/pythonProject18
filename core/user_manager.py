@@ -522,54 +522,92 @@ class UserManager:
                 return {"username": user, "password": pwd}
         return None
 
+    def _is_logged_in(self, site: str, session: requests.Session) -> bool:
+        """Return True if session is authenticated for *site*."""
+        try:
+            if site == "rapidgator":
+                r = session.get("https://rapidgator.net/profile", timeout=15)
+                return r.status_code == 200 and "Premium status" in r.text
+            if site == "nitroflare":
+                r = session.get("https://nitroflare.com/member", timeout=15)
+                return "logout" in r.text.lower()
+            if site == "dddownload":
+                r = session.get("https://dddownload.com/?op=my_reports&ajax=1", timeout=15)
+                ct = r.headers.get("Content-Type", "").lower()
+                return ct.startswith("application/json")
+            if site == "katfile":
+                r = session.get("https://katfile.com/?op=my_reports&ajax=1", timeout=15)
+                ct = r.headers.get("Content-Type", "").lower()
+                return ct.startswith("application/json")
+            if site == "keeplinks":
+                r = session.get("https://www.keeplinks.org/earnings", timeout=15)
+                return "Today's Earnings" in r.text
+        except Exception as exc:
+            logging.debug("Login check failed for %s: %s", site, exc)
+        return False
+
+        def _login(self, site: str, session: requests.Session, username: str, password: str) -> bool:
+            """Attempt login and return True if successful."""
+        try:
+            if site == "rapidgator":
+                session.post(
+                    "https://rapidgator.net/auth/login",
+                    data={"login": username, "password": password, "submit": "Login"},
+                    timeout=15,
+                )
+            elif site == "nitroflare":
+                session.post(
+                    "https://nitroflare.com/login",
+                    data={"user": username, "pass": password, "login": "Login"},
+                    timeout=15,
+                )
+            elif site == "dddownload":
+                session.post(
+                    "https://dddownload.com/",
+                    data={"op": "login", "login": username, "password": password},
+                    timeout=15,
+                )
+            elif site == "katfile":
+                session.post(
+                    "https://katfile.com/",
+                    data={"op": "login", "login": username, "password": password},
+                    timeout=15,
+                )
+            elif site == "keeplinks":
+                session.post(
+                    "https://www.keeplinks.org/login",
+                    data={"username": username, "password": password, "hiddenaction": "Login"},
+                    timeout=15,
+                )
+            else:
+                return False
+
+        except Exception as exc:
+            logging.error(f"❌ Login failed for {site}: {exc}")
+
+        return self._is_logged_in(site, session)
+
     def get_session(self, site: str) -> Optional[requests.Session]:
         """Return an authenticated requests.Session for *site*."""
-        if site in self._site_sessions:
-            return self._site_sessions[site]
+        sess = self._site_sessions.get(site)
+        if sess and self._is_logged_in(site, sess):
+            return sess
 
         account = self.get_main_account(site)
         if not account:
             logging.warning(f"No credentials found for site '{site}'")
             return None
 
-        sess = requests.Session()
-        try:
-            if site == "rapidgator":
-                sess.post(
-                    "https://rapidgator.net/auth/login",
-                    data={"login": account.get("username"), "password": account.get("password")},
-                    timeout=15,
-                )
-            elif site == "nitroflare":
-                sess.post(
-                    "https://nitroflare.com/login",
-                    data={"email": account.get("username"), "password": account.get("password")},
-                    timeout=15,
-                )
-            elif site == "dddownload":
-                sess.post(
-                    "https://ddownload.com/",
-                    data={"op": "login", "login": account.get("username"), "password": account.get("password")},
-                    timeout=15,
-                )
-            elif site == "katfile":
-                sess.post(
-                    "https://katfile.com/",
-                    data={"op": "login", "login": account.get("username"), "password": account.get("password")},
-                    timeout=15,
-                )
-            elif site == "keeplinks":
-                sess.post(
-                    "https://www.keeplinks.org/auth/login",
-                    data={"email": account.get("username"), "password": account.get("password")},
-                    timeout=15,
-                )
-        except Exception as exc:
-            logging.error(f"❌ Login failed for {site}: {exc}")
+        if not sess:
+            sess = requests.Session()
 
-        self._site_sessions[site] = sess
-        return sess
+        if self._login(site, sess, account.get("username", ""), account.get("password", "")):
+            self._site_sessions[site] = sess
+            logging.info("Logged-in session cached for %s", site)
+            return sess
 
+        logging.error("Unable to login to %s", site)
+        return None
     def clear_session(self):
         """Clear the current user session and reset state."""
         logging.info(f"🔄 Clearing session for user: {self.current_user}")
