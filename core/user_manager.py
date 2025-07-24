@@ -17,15 +17,11 @@ import logging
 from datetime import datetime
 from typing import Dict, Any, Optional, Set
 from utils import sanitize_filename
-from config.config import DATA_DIR
 from utils.paths import get_data_folder
-import browser_cookie3
 import requests
 
 DATA_DIR = pathlib.Path(__file__).resolve().parent.parent / "data"
-CHROME_PROFILE = (
-    r"C:\Users\rsher\AppData\Local\Google\Chrome\User Data\Profile 1"
-)
+
 
 class UserManager:
     """
@@ -577,11 +573,13 @@ class UserManager:
             except Exception as exc:
                 logging.error("❌ Failed to inject cookies for %s: %s", site, exc)
     # ------------------------------------------------------------------
+    # Sessions via shared JSON cookies
+    # ------------------------------------------------------------------
     def get_session(self, site: str) -> Optional[requests.Session]:
         """Return an authenticated `requests.Session` for *site*.
 
         يحاول أولاً إعادة جلسة مُخزَّنة؛
-        وإلا يحمِّل كوكى المتصفّح (Chrome/Firefox) لهذا الدومين.
+        وإلا يحمِّل كوكى JSON المشترَكة لهذا الدومين.
         """
         # 1) Session مخزَّنة بالفعل؟
         sess = self._site_sessions.get(site)
@@ -593,38 +591,10 @@ class UserManager:
         self._inject_json_cookies(sess, site)
         if self._is_logged_in(site, sess):
             self._site_sessions[site] = sess
+            logging.info("✅ Session loaded from JSON for %s", site)
             return sess
 
-        domain_map = {
-            "rapidgator": ".rapidgator.net",
-            "nitroflare": ".nitroflare.com",
-            "dddownload": ".dddownload.com",
-            "katfile":    ".katfile.com",
-            "keeplinks":  ".keeplinks.org",
-        }
-        domain = domain_map.get(site)
-        if not domain:
-            logging.error("Unsupported site '%s' for get_session()", site)
-            return None
-
-        # 3) تحميل كوكى المتصفّح
-        try:
-            cookies = browser_cookie3.chrome(
-                domain_name=domain.lstrip("."),
-                profile=r"C:\Users\rsher\AppData\Local\Google\Chrome\User Data\Profile 1",
-            )
-        except Exception as exc:
-            logging.error("❌ Failed to load cookies for %s: %s", site, exc)
-            return None
-        sess.cookies.update(cookies)
-
-        # 4) فحص أن الكوكى فعّالة (مُسجَّلة الدخول)
-        if self._is_logged_in(site, sess):
-            self._site_sessions[site] = sess
-            logging.info("✅ Session loaded from browser cookies for %s", site)
-            return sess
-
-        logging.error("❌ Browser cookies invalid or expired for %s", site)
+        logging.error("❌ JSON cookies invalid or expired for %s", site)
         return None
 
     def clear_session(self):
