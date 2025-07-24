@@ -586,7 +586,7 @@ class UserManager:
         try:
             cookies = browser_cookie3.chrome(
                 domain_name=domain.lstrip("."),
-                profile=CHROME_PROFILE,
+                cookie_file=os.path.join(CHROME_PROFILE, "Cookies"),
             )
         except Exception as exc:
             logging.error("❌ Failed to load cookies for %s: %s", site, exc)
