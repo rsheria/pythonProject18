@@ -12,7 +12,7 @@ Author: Cascade AI Assistant
 """
 
 import os
-import json
+import json, pathlib
 import logging
 from datetime import datetime
 from typing import Dict, Any, Optional, Set
@@ -22,6 +22,7 @@ from utils.paths import get_data_folder
 import browser_cookie3
 import requests
 
+DATA_DIR = pathlib.Path(__file__).resolve().parent.parent / "data"
 CHROME_PROFILE = (
     r"C:\Users\rsher\AppData\Local\Google\Chrome\User Data\Profile 1"
 )
@@ -551,10 +552,30 @@ class UserManager:
             logging.debug("Login check failed for %s: %s", site, exc)
         return False
 
-        # --------------  مكانه الصحيح خارج أى دالة أخرى -------------- #
-
-    # ------------------------------------------------------------------
-    # Sessions via browser-cookie3
+    def _inject_json_cookies(self, sess: requests.Session, site: str):
+            """Load shared JSON cookie file from /data/ and add to *sess*."""
+            file_map = {
+                "rapidgator": "cookies_rapidgator.json",
+                "nitroflare": "cookies_nitroflare.json",
+                "dddownload": "cookies_dddownload.json",
+                "katfile": "cookies_katfile.json",
+                "keeplinks": "cookies_keeplinks.json",
+            }
+            fname = file_map.get(site)
+            if not fname:
+                return
+            path = DATA_DIR / fname
+            if not path.exists():
+                return
+            try:
+                for c in json.load(path.open(encoding="utf-8")):
+                    sess.cookies.set(
+                        c["name"], c["value"],
+                        domain=c.get("domain", ""), path=c.get("path", "/"),
+                    )
+                logging.info("✅ JSON cookies injected for %s", site)
+            except Exception as exc:
+                logging.error("❌ Failed to inject cookies for %s: %s", site, exc)
     # ------------------------------------------------------------------
     def get_session(self, site: str) -> Optional[requests.Session]:
         """Return an authenticated `requests.Session` for *site*.
@@ -569,6 +590,10 @@ class UserManager:
 
         # 2) نحتاج جلسة جديدة
         sess = requests.Session()
+        self._inject_json_cookies(sess, site)
+        if self._is_logged_in(site, sess):
+            self._site_sessions[site] = sess
+            return sess
 
         domain_map = {
             "rapidgator": ".rapidgator.net",
