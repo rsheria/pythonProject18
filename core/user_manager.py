@@ -22,6 +22,10 @@ from utils.paths import get_data_folder
 import browser_cookie3
 import requests
 
+CHROME_PROFILE = (
+    r"C:\Users\rsher\AppData\Local\Google\Chrome\User Data\Profile 1"
+)
+
 class UserManager:
     """
     Centralized user management system that handles:
@@ -580,12 +584,14 @@ class UserManager:
 
         # 3) تحميل كوكى المتصفّح
         try:
-            # browser_cookie3 expects domain_name **without** leading dot
-            cookies = browser_cookie3.firefox(domain_name=domain.lstrip("."))
-            sess.cookies.update(cookies)
+            cookies = browser_cookie3.chrome(
+                domain_name=domain.lstrip("."),
+                profile=CHROME_PROFILE,
+            )
         except Exception as exc:
             logging.error("❌ Failed to load cookies for %s: %s", site, exc)
             return None
+        sess.cookies.update(cookies)
 
         # 4) فحص أن الكوكى فعّالة (مُسجَّلة الدخول)
         if self._is_logged_in(site, sess):
