@@ -33,6 +33,19 @@ from core.user_manager import get_user_manager
 _LOG = logging.getLogger(__name__)
 _PAIR_RE = re.compile(r"(\d+)\s*/\s*[\$€]?\s*([\d.,]+)")
 
+def _as_decimal(val: str) -> Decimal:
+    """Return Decimal without thousands separators."""
+    val = (val or "").strip()
+    val = val.replace("\u202f", "").replace("\xa0", "").replace(" ", "")
+    if "," in val and "." in val:
+        val = val.replace(",", "")
+    else:
+        val = val.replace(",", ".")
+    try:
+        return Decimal(val)
+    except Exception:
+        return Decimal("0")
+
 # ignore InsecureRequestWarning when we fall back to verify=False
 warnings.filterwarnings("ignore", message="Unverified HTTPS request*")
 
@@ -74,7 +87,7 @@ class _StatsWorker(QRunnable):
     def _parse_pair(self, s: str) -> tuple[int, float]:
         """'15 / $3.20' → (15, 3.20)"""
         m = _PAIR_RE.search(s or "")
-        return (int(m.group(1)), float(m.group(2).replace(",", ""))) if m else (0, 0.0)
+        return (int(m.group(1)), float(_as_decimal(m.group(2)))) if m else (0, 0.0)
 
     def _safe_get(self, url: str, **kw) -> requests.Response:
         """GET with retry over HTTP+verify=False if SSL handshake fails."""
@@ -85,28 +98,50 @@ class _StatsWorker(QRunnable):
             insecure_url = url.replace("https://", "http://", 1)
             return self.session.get(insecure_url, timeout=20, verify=False, **kw)
 
+    def _safe_post(self, url: str, **kw) -> requests.Response:
+        """POST with retry over HTTP+verify=False if SSL handshake fails."""
+        try:
+            return self.session.post(url, timeout=20, **kw)
+        except requests.exceptions.SSLError:
+            _LOG.warning("SSL handshake failed for %s – retrying insecure", url)
+            insecure_url = url.replace("https://", "http://", 1)
+            return self.session.post(insecure_url, timeout=20, verify=False, **kw)
+
+
     # ------------------------- main run ---------------------------------- #
     def run(self) -> None:  # noqa: D401
         stats: Dict[str, Any] = {"dl": 0, "dl_rev": 0.0, "sales": 0, "sales_rev": 0.0}
         try:
             # ------- Rapidgator -------------------------------------------------
             if self.site == "rapidgator":
-                url = (
-                    "https://rapidgator.net/stat/statfiles"
-                    f"?from={self.date_from}&to={self.date_to}&ajax=1&length=1000&draw=1"
+                payload = {
+                    "from": self.date_from,
+                    "to": self.date_to,
+                    "draw": "1",
+                    "start": "0",
+                    "length": "1000",
+                    "search[value]": "",
+                    "order[0][column]": "0",
+                    "order[0][dir]": "asc",
+                }
+                resp = self._safe_post(
+                    "https://rapidgator.net/stat/statfiles",
+                    data=payload,
+                    headers={"X-Requested-With": "XMLHttpRequest"},
                 )
-                resp = self._safe_get(
-                    url, headers={"X-Requested-With": "XMLHttpRequest"}
-                )
-                data = self._safe_json(resp)
+                try:
+                    data = resp.json()
+                except Exception:
+                    _LOG.debug("%s raw: %s", self.site, resp.text[:300])
+                    data = {}
                 if isinstance(data, dict):
                     for row in data.get("data", []):
                         if isinstance(row, list) and row and row[0] == self.date_from:
                             stats = {
                                 "dl": int(row[1]),
-                                "dl_rev": float(str(row[2]).replace(",", "")),
+                                "dl_rev": float(_as_decimal(str(row[2]))),
                                 "sales": int(row[3]),
-                                "sales_rev": float(str(row[4]).replace(",", "")),
+                                "sales_rev": float(_as_decimal(str(row[4]))),
                             }
                             break
 
@@ -124,45 +159,41 @@ class _StatsWorker(QRunnable):
                 #
                 # Step 2 – call the JSON endpoint with an explicit Referer
                 #
-                params = {
-                    "action": "fetchPPS",
-                    "from": self.date_from,
-                    "to": self.date_to,
-                }
-                resp = self.session.get(
+                body = (
+                    f"action=fetchPPS&from={self.date_from}&to={self.date_to}"
+                )
+                resp = self._safe_post(
                     "https://nitroflare.com/ajax/affiliates.php",
-                    params=params,
+                    data=body,
                     headers={
                         "X-Requested-With": "XMLHttpRequest",
                         "Referer": "https://nitroflare.com/member?s=affiliates",
+                        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
                     },
                     timeout=20,
                 )
 
-                rows = []
-                if resp.headers.get("Content-Type", "").startswith("application/json"):
-                    try:
-                        rows = resp.json()
-                    except Exception:
-                        rows = []
+                try:
+                    rows = resp.json()
+                except Exception:
+                    _LOG.debug("%s raw: %s", self.site, resp.text[:300])
+                    rows = []
 
                 dl = dl_rev = sales = sales_rev = 0.0
 
 
                 for row in rows:
-                    # PPD Unique DLs column
-                    ppd = row.get("ppd", "0/0")
-                    m = re.search(r"(\d+)\s*/\s*\$?([\d.,]+)", ppd)
-                    if m:
-                        dl += int(m.group(1))
-                        dl_rev += float(m.group(2).replace(",", ""))
+                    row_date = str(row.get("date") or row.get("day") or "")
+                    if row_date and not (self.date_from <= row_date <= self.date_to):
+                        continue
 
-                    # Sales / Rebills column
-                    sales_str = row.get("sales", "0/0")
-                    m = re.search(r"(\d+)\s*/\s*\$?([\d.,]+)", sales_str)
-                    if m:
-                        sales += int(m.group(1))
-                        sales_rev += float(m.group(2).replace(",", ""))
+                    dl_i, rev_i = self._parse_pair(row.get("ppd", "0/0"))
+                    dl += dl_i
+                    dl_rev += rev_i
+
+                    sales_i, sales_rev_i = self._parse_pair(row.get("sales", "0/0"))
+                    sales += sales_i
+                    sales_rev += sales_rev_i
 
                 stats = {
                     "dl": int(dl),
