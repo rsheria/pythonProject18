@@ -93,37 +93,21 @@ class _StatsWorker(QRunnable):
             if self.site == "rapidgator":
                 url = (
                     "https://rapidgator.net/stat/statfiles"
-                    f"?from={self.date_from}&to={self.date_to}&draw=1"
+                    f"?from={self.date_from}&to={self.date_to}&ajax=1&length=1000&draw=1"
                 )
                 resp = self._safe_get(
                     url, headers={"X-Requested-With": "XMLHttpRequest"}
                 )
                 data = self._safe_json(resp)
-                row = None
-                if isinstance(data, dict) and data.get("data"):
-                    row = data["data"][-1]
-                if isinstance(row, list) and len(row) >= 5:
-                    stats.update(
-                        dl=int(row[1]),
-                        dl_rev=float(str(row[2]).replace(",", "")),
-                        sales=int(row[3]),
-                        sales_rev=float(str(row[4]).replace(",", "")),
-                    )
-                else:
-                    html = self._safe_get(
-                        f"https://rapidgator.net/stat/statfiles?from={self.date_from}&to={self.date_to}"
-                    ).text
-                    for m in re.finditer(r"<tr[^>]*>(.*?)</tr>", html, re.S):
-                        tr = m.group(1)
-                        if "Total" in tr:
-                            cells = re.findall(r"<td[^>]*>([^<]*)", tr)
-                            if len(cells) >= 5:
-                                stats.update(
-                                    dl=int(cells[1].strip()),
-                                    dl_rev=float(cells[2].strip().lstrip("$€").replace(",", "")),
-                                    sales=int(cells[3].strip()),
-                                    sales_rev=float(cells[4].strip().lstrip("$€").replace(",", "")),
-                                )
+                if isinstance(data, dict):
+                    for row in data.get("data", []):
+                        if isinstance(row, list) and row and row[0] == self.date_from:
+                            stats = {
+                                "dl": int(row[1]),
+                                "dl_rev": float(str(row[2]).replace(",", "")),
+                                "sales": int(row[3]),
+                                "sales_rev": float(str(row[4]).replace(",", "")),
+                            }
                             break
 
             # ------- Nitroflare -------------------------------------------------
@@ -210,10 +194,9 @@ class _StatsWorker(QRunnable):
             # ------- KeepLinks ---------------------------------------------------
             elif self.site == "keeplinks":
                 html = self._safe_get("https://www.keeplinks.org/earnings").text
-                m = re.search(
-                    r"table\.table-bordered[\s\S]*?<tr>[\s\S]*?<td[^>]*>([\d.]+)", html
-                )
-                stats["dl_rev"] = float(m.group(1)) if m else 0.0
+                m = re.search(r"Today's Earnings</th>.*?<td[^>]*>([\d.]+)", html, re.S)
+                today_rev = float(m.group(1)) if m else 0.0
+                stats = {"dl": 0, "dl_rev": today_rev, "sales": 0, "sales_rev": 0.0}
 
         except Exception as exc:  # pragma: no cover
             _LOG.error("Stats fetch failed for %s: %s", self.site, exc, exc_info=False)
