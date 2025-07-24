@@ -529,7 +529,11 @@ class UserManager:
         try:
             if site == "rapidgator":
                 r = session.get("https://rapidgator.net/profile", timeout=15)
-                return r.status_code == 200 and "Premium status" in r.text
+                if r.status_code != 200:
+                    return False
+                page = r.text.lower()
+                # ✓ يعمل سواء كان الحساب Free أو Premium
+                return ("logout" in page) or ("my balance" in page) or ("premium expires" in page)
             if site == "nitroflare":
                 r = session.get("https://nitroflare.com/member", timeout=15)
                 return "logout" in r.text.lower()
@@ -565,10 +569,16 @@ class UserManager:
                 return
             try:
                 for c in json.load(path.open(encoding="utf-8")):
-                    sess.cookies.set(
-                        c["name"], c["value"],
-                        domain=c.get("domain", ""), path=c.get("path", "/"),
+                    cookie = requests.cookies.create_cookie(
+                        name=c["name"],
+                        value=c["value"],
+                        domain=c.get("domain"),
+                        path=c.get("path", "/"),
+                        secure=c.get("secure", False),
+                        expires=int(c["expirationDate"])
+                        if "expirationDate" in c else None,
                     )
+                    sess.cookies.set_cookie(cookie)
                 logging.info("✅ JSON cookies injected for %s", site)
             except Exception as exc:
                 logging.error("❌ Failed to inject cookies for %s: %s", site, exc)

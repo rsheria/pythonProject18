@@ -1,74 +1,107 @@
-from config.config import DATA_DIR
 # main.py
+# =========
+# ‑ Central entry‑point for ForumBot
+# ‑ Adds dual‑logging: *console*  +  *main.log* (DATA_DIR)
+# ‑ Keeps all existing behaviour (dotenv, config‑load, GUI, …)
 
-import os
+from config.config import DATA_DIR     # ← DATA_DIR path from your config
+
+# ------------------------------------------------------------------
+# 0) Standard imports
+# ------------------------------------------------------------------
+import os, sys, logging
+from pathlib import Path
 from dotenv import load_dotenv
-
-# 1) حمِّل المتغيّرات من .env قبل أي كود تاني
-load_dotenv()   # بيفضّي os.environ بكل القيم من ملف .env
-
-# 2) تأكّد إن مسار .env صحيح (لو مش في نفس المجلد ممكن تحدد مساره الكامل)
-# from pathlib import Path
-# dotenv_path = Path(__file__).parent / '.env'
-# load_dotenv(dotenv_path=dotenv_path)
-
-# 3) تأكيد بسيط
-print("KEEPLINKS_API_HASH =", os.getenv('KEEPLINKS_API_HASH'))
-
-# 4) بقية الاستيرادات
-from downloaders.base_downloader import BaseDownloader
-print("✅ downloaders package loaded, BaseDownloader =", BaseDownloader)
-
-import sys
-import logging
 from PyQt5.QtWidgets import QApplication
 
-# استيراد دوال التكوين من مجلّد config
-from config.config import load_configuration
-# استيراد الواجهة من مجلّد gui
-from gui.main_window import ForumBotGUI
+# ------------------------------------------------------------------
+# 1) Logging: file + console
+# ------------------------------------------------------------------
+def _configure_logging() -> None:
+    log_fmt = '%(asctime)s %(levelname)s %(message)s'
+    formatter = logging.Formatter(log_fmt, datefmt='%H:%M:%S')
 
+    # console (PyCharm Run)
+    console = logging.StreamHandler(sys.stdout)
+    console.setFormatter(formatter)
+    console.setLevel(logging.DEBUG)
+
+    # file  (…/data/main.log)
+    logfile = Path(DATA_DIR) / 'main.log'
+    logfile.parent.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.FileHandler(logfile, encoding='utf‑8')
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(logging.DEBUG)
+
+    logging.basicConfig(
+        level=logging.DEBUG,
+        handlers=[console, file_handler],
+        force=True               # overrides any previous config
+    )
+
+_configure_logging()
+logging.info("Logger initialised.")
+
+# ------------------------------------------------------------------
+# 2) Load .env before anything reads os.environ
+# ------------------------------------------------------------------
+load_dotenv()        # reads .env in current working dir
+logging.info(".env loaded.")
+
+# ------------------------------------------------------------------
+# 3) Quick check (optional prints stay as before)
+# ------------------------------------------------------------------
+print("KEEPLINKS_API_HASH =", os.getenv('KEEPLINKS_API_HASH'))
+
+# ------------------------------------------------------------------
+# 4) Rest of imports that rely on environment variables
+# ------------------------------------------------------------------
+from downloaders.base_downloader import BaseDownloader       # noqa: E402
+from config.config import load_configuration                 # noqa: E402
+from gui.main_window import ForumBotGUI                      # noqa: E402
+
+print("✅ downloaders package loaded, BaseDownloader =", BaseDownloader)
+
+# ------------------------------------------------------------------
+# 5) Global exception hook → logs critical tracebacks
+# ------------------------------------------------------------------
 def global_exception_handler(exctype, value, traceback):
     logging.critical("Unhandled exception:", exc_info=(exctype, value, traceback))
     sys.__excepthook__(exctype, value, traceback)
 
-# ثبتّ معالج الأخطاء العام
 sys.excepthook = global_exception_handler
 
-
+# ------------------------------------------------------------------
+# 6) Main routine
+# ------------------------------------------------------------------
 def main():
-    # إعداد اللوجينج
-    logging.basicConfig(
-        filename=os.path.join(DATA_DIR, 'main.log'),
-        level=logging.DEBUG,
-        format='%(asctime)s:%(levelname)s:%(message)s'
-    )
-    logging.info("Application started.")
+    logging.info("Application starting…")
 
-    # إنشاء تطبيق Qt
+    # Qt application
     app = QApplication(sys.argv)
 
-    # 5) حمل التكوين (يقرأ من os.environ بعد load_dotenv)
+    # Load configuration
     try:
         config = load_configuration()
         logging.info("Configuration loaded successfully.")
     except Exception as e:
-        logging.critical(f"Configuration Error: {e}", exc_info=True)
+        logging.critical("Configuration Error: %s", e, exc_info=True)
         print(f"Configuration Error: {e}")
         sys.exit(1)
 
-    # 6) شغّل الواجهة
+    # Launch GUI
     try:
         gui = ForumBotGUI(config)
         gui.run()
     except Exception as e:
-        logging.critical(f"Failed to initialize ForumBotGUI: {e}", exc_info=True)
-        print(f"Failed to initialize ForumBotGUI: {e}")
+        logging.critical("Failed to initialise ForumBotGUI: %s", e, exc_info=True)
+        print(f"Failed to initialise ForumBotGUI: {e}")
         sys.exit(1)
 
     logging.info("Application exited gracefully.")
     sys.exit(app.exec_())
 
 
+# ------------------------------------------------------------------
 if __name__ == '__main__':
     main()

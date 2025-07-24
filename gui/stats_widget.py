@@ -142,7 +142,7 @@ class _StatsWorker(QRunnable):
                         rows = []
 
                 dl = dl_rev = sales = sales_rev = 0.0
-                import re
+
 
                 for row in rows:
                     # PPD Unique DLs column
