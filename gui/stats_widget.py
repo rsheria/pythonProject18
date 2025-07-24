@@ -107,23 +107,64 @@ class _StatsWorker(QRunnable):
 
             # ------- Nitroflare -------------------------------------------------
             elif self.site == "nitroflare":
-                params = {"action": "fetchPPS", "from": self.date_from, "to": self.date_to}
-                rows = self._safe_json(
-                    self._safe_get(
-                        "https://nitroflare.com/ajax/affiliates.php",
-                        params=params,
-                        headers={"X-Requested-With": "XMLHttpRequest"},
-                    )
+                #
+                # Step 1 – warm‑up: visit the affiliate page once to let the
+                #          server set any extra cookies / CSRF token
+                #
+                self.session.get(
+                    "https://nitroflare.com/member?s=affiliates",
+                    timeout=15,
                 )
-                if not isinstance(rows, list):
-                    rows = []
+
+                #
+                # Step 2 – call the JSON endpoint with an explicit Referer
+                #
+                params = {
+                    "action": "fetchPPS",
+                    "from": self.date_from,
+                    "to": self.date_to,
+                }
+                resp = self.session.get(
+                    "https://nitroflare.com/ajax/affiliates.php",
+                    params=params,
+                    headers={
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Referer": "https://nitroflare.com/member?s=affiliates",
+                    },
+                    timeout=20,
+                )
+
+                rows = []
+                if resp.headers.get("Content-Type", "").startswith("application/json"):
+                    try:
+                        rows = resp.json()
+                    except Exception:
+                        rows = []
+
+                dl = dl_rev = sales = sales_rev = 0.0
+                import re
+
                 for row in rows:
-                    dl_c, dl_r = self._parse_pair(row.get("ppd", "0/0"))
-                    s_c, s_r = self._parse_pair(row.get("sales", "0/0"))
-                    stats["dl"] += dl_c
-                    stats["dl_rev"] += dl_r
-                    stats["sales"] += s_c
-                    stats["sales_rev"] += s_r
+                    # PPD Unique DLs column
+                    ppd = row.get("ppd", "0/0")
+                    m = re.search(r"(\d+)\s*/\s*\$?([\d.,]+)", ppd)
+                    if m:
+                        dl += int(m.group(1))
+                        dl_rev += float(m.group(2).replace(",", ""))
+
+                    # Sales / Rebills column
+                    sales_str = row.get("sales", "0/0")
+                    m = re.search(r"(\d+)\s*/\s*\$?([\d.,]+)", sales_str)
+                    if m:
+                        sales += int(m.group(1))
+                        sales_rev += float(m.group(2).replace(",", ""))
+
+                stats = {
+                    "dl": int(dl),
+                    "dl_rev": float(dl_rev),
+                    "sales": int(sales),
+                    "sales_rev": float(sales_rev),
+                }
 
             # ------- DDDownload & KatFile ---------------------------------------
             elif self.site in {"dddownload", "katfile"}:
