@@ -30,6 +30,7 @@ from PyQt5.QtWidgets import (
 
 from core.user_manager import get_user_manager
 
+
 _LOG = logging.getLogger(__name__)
 _PAIR_RE = re.compile(r"(\d+)\s*/\s*[\$€]?\s*([\d.,]+)")
 
