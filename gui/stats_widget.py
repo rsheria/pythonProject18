@@ -92,18 +92,39 @@ class _StatsWorker(QRunnable):
             # ------- Rapidgator -------------------------------------------------
             if self.site == "rapidgator":
                 url = (
-                    "https://rapidgator.net/api/v2/user/premium_stats"
-                    f"?date_from={self.date_from}&date_to={self.date_to}"
+                    "https://rapidgator.net/stat/statfiles"
+                    f"?from={self.date_from}&to={self.date_to}&draw=1"
                 )
-                data = self._safe_json(self._safe_get(url))
-                if isinstance(data, dict):
-                    data = data.get("response") or {}
-                stats.update(
-                    dl=int(data.get("total_downloads", 0)),
-                    dl_rev=float(data.get("downloads_money", 0)),
-                    sales=int(data.get("sales", 0)),
-                    sales_rev=float(data.get("sales_money", 0)),
+                resp = self._safe_get(
+                    url, headers={"X-Requested-With": "XMLHttpRequest"}
                 )
+                data = self._safe_json(resp)
+                row = None
+                if isinstance(data, dict) and data.get("data"):
+                    row = data["data"][-1]
+                if isinstance(row, list) and len(row) >= 5:
+                    stats.update(
+                        dl=int(row[1]),
+                        dl_rev=float(str(row[2]).replace(",", "")),
+                        sales=int(row[3]),
+                        sales_rev=float(str(row[4]).replace(",", "")),
+                    )
+                else:
+                    html = self._safe_get(
+                        f"https://rapidgator.net/stat/statfiles?from={self.date_from}&to={self.date_to}"
+                    ).text
+                    for m in re.finditer(r"<tr[^>]*>(.*?)</tr>", html, re.S):
+                        tr = m.group(1)
+                        if "Total" in tr:
+                            cells = re.findall(r"<td[^>]*>([^<]*)", tr)
+                            if len(cells) >= 5:
+                                stats.update(
+                                    dl=int(cells[1].strip()),
+                                    dl_rev=float(cells[2].strip().lstrip("$€").replace(",", "")),
+                                    sales=int(cells[3].strip()),
+                                    sales_rev=float(cells[4].strip().lstrip("$€").replace(",", "")),
+                                )
+                            break
 
             # ------- Nitroflare -------------------------------------------------
             elif self.site == "nitroflare":
