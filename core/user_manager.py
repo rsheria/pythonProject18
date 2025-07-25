@@ -14,7 +14,7 @@ Author: Cascade AI Assistant
 import os
 import json, pathlib
 import logging
-from datetime import datetime
+from datetime import datetime, date
 from typing import Dict, Any, Optional, Set
 from utils import sanitize_filename
 from utils.paths import get_data_folder
@@ -581,15 +581,17 @@ class UserManager:
                 r = _safe_get(session, "https://nitroflare.com/member")
                 return "logout" in r.text.lower()
             if site == "ddownload":
+                today = date.today().strftime("%Y-%m-%d")
                 r = _safe_get(
                     session,
-                    "https://ddownload.com/?op=my_reports&date1=1970-01-01&date2=1970-01-01&show=Show",
+                    f"https://ddownload.com/?op=my_reports&date1={today}&date2={today}&show=Show",
                 )
                 return "var data" in r.text.lower()
             if site == "katfile":
+                today = date.today().strftime("%Y-%m-%d")
                 r = _safe_get(
                     session,
-                    "https://katfile.com/?op=my_reports&date1=1970-01-01&date2=1970-01-01&show=Show",
+                    f"https://katfile.com/?op=my_reports&date1={today}&date2={today}&show=Show",
                 )
                 return "var data" in r.text.lower()
             if site == "keeplinks":
