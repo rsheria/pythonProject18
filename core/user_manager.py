@@ -19,23 +19,20 @@ from typing import Dict, Any, Optional, Set
 from utils import sanitize_filename
 from utils.paths import get_data_folder
 import requests
+from requests.exceptions import SSLError, ConnectionError
 import re
 def _safe_get(session: requests.Session, url: str, **kw) -> requests.Response:
-    """GET with retry disabling SSL verification, then downgrading to HTTP."""
+    """GET with automatic fallback to HTTP on TLS/connection errors."""
     try:
         return session.get(url, timeout=15, **kw)
-    except requests.exceptions.SSLError:
-        logging.warning("SSL handshake failed for %s – retrying with verify=False", url)
-        try:
-            return session.get(url, timeout=15, verify=False, **kw)
-        except requests.exceptions.SSLError:
-            logging.warning("SSL handshake still failing for %s – falling back to HTTP", url)
-            insecure_url = url.replace("https://", "http://", 1)
-            return session.get(insecure_url, timeout=15, verify=False, **kw)
+    except (SSLError, ConnectionError):
+        logging.warning("HTTPS failed for %s – retrying over HTTP", url)
+        insecure_url = url.replace("https://", "http://", 1)
+        return session.post(insecure_url, timeout=15, verify=False, **kw)
 
 
 def _safe_post(session: requests.Session, url: str, **kw) -> requests.Response:
-    """POST with retry disabling SSL verification, then downgrading to HTTP."""
+    """POST with automatic fallback to HTTP on TLS/connection errors."""
     try:
         return session.post(url, timeout=15, **kw)
     except requests.exceptions.SSLError:
@@ -567,11 +564,11 @@ class UserManager:
             if site == "dddownload":
                 r = _safe_get(
                     session,
-                    "http://ww3.dddownload.com/?op=my_reports&ajax=1",
+                    "http://dddownload.com/?op=my_reports&ajax=1",
                     headers={"X-Requested-With": "XMLHttpRequest"},
                 )
                 ct = r.headers.get("Content-Type", "").lower()
-                return ct.startswith("application/json")
+                return r.headers.get("content-type", "").startswith("application/json")
             if site == "katfile":
                 r = _safe_get(session, "https://katfile.com/?op=my_reports&ajax=1")
                 ct = r.headers.get("Content-Type", "").lower()
@@ -617,32 +614,27 @@ class UserManager:
     def _login_dddownload(self, sess: requests.Session, user: str, password: str) -> bool:
         """Perform a form login to DDDownload."""
         try:
-            base = "https://dddownload.com"
+            base = "http://dddownload.com"
             resp = _safe_get(sess, f"{base}/login.html")
-            token = re.search(r'name="token"\s+value="([^"]+)"', resp.text or "")
-            token = token.group(1) if token else ""
-            action = re.search(r'<form[^>]*action="([^"]+)"', resp.text or "")
-            action = action.group(1) if action else "/login.html"
+            token = re.search(r'name="token"\s+value="([^"]+)"', resp.text).group(1)
 
             payload = {
                 "op": "login",
+                "login": user,
+                "password": password,
                 "token": token,
                 "rand": "",
                 "redirect": f"{base}/",
-                "login": user,
-                "password": password,
-                "rememberme": "on",
             }
 
             _safe_post(
                 sess,
-                f"{base}{action}" if action.startswith("/") else action,
+                f"{base}/",
                 data=payload,
                 headers={
                     "Origin": base,
                     "Referer": f"{base}/login.html",
                     "User-Agent": "Mozilla/5.0",
-                    "Content-Type": "application/x-www-form-urlencoded",
                 },
             )
 

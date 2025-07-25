@@ -15,6 +15,7 @@ from decimal import Decimal
 from typing import Any, Dict, List
 from bs4 import BeautifulSoup
 import requests
+from requests.exceptions import SSLError, ConnectionError
 from PyQt5.QtCore import QDate, QRunnable, QThreadPool, QObject, pyqtSignal
 from PyQt5.QtGui import QStandardItem, QStandardItemModel
 from PyQt5.QtWidgets import (
@@ -94,27 +95,20 @@ class _StatsWorker(QRunnable):
         """GET with retry disabling SSL verification, then downgrading to HTTP."""
         try:
             return self.session.get(url, timeout=20, **kw)
-        except requests.exceptions.SSLError:
-            _LOG.warning("SSL handshake failed for %s – retrying with verify=False", url)
-            try:
-                return self.session.get(url, timeout=20, verify=False, **kw)
-            except requests.exceptions.SSLError:
-                _LOG.warning("SSL handshake still failing for %s – falling back to HTTP", url)
-                insecure_url = url.replace("https://", "http://", 1)
-                return self.session.get(insecure_url, timeout=20, verify=False, **kw)
+        except (SSLError, ConnectionError):
+            _LOG.warning("HTTPS failed for %s – retrying over HTTP", url)
+            insecure_url = url.replace("https://", "http://", 1)
+            return self.session.get(insecure_url, timeout=20, verify=False, **kw)
+
 
     def _safe_post(self, url: str, **kw) -> requests.Response:
         """POST with retry disabling SSL verification, then downgrading to HTTP."""
         try:
             return self.session.post(url, timeout=20, **kw)
-        except requests.exceptions.SSLError:
-            _LOG.warning("SSL handshake failed for %s – retrying with verify=False", url)
-            try:
-                return self.session.post(url, timeout=20, verify=False, **kw)
-            except requests.exceptions.SSLError:
-                _LOG.warning("SSL handshake still failing for %s – falling back to HTTP", url)
-                insecure_url = url.replace("https://", "http://", 1)
-                return self.session.post(insecure_url, timeout=20, verify=False, **kw)
+        except (SSLError, ConnectionError):
+            _LOG.warning("HTTPS failed for %s – retrying over HTTP", url)
+            insecure_url = url.replace("https://", "http://", 1)
+            return self.session.post(insecure_url, timeout=20, verify=False, **kw)
 
 
     # ------------------------- main run ---------------------------------- #
@@ -173,19 +167,19 @@ class _StatsWorker(QRunnable):
 
             # ------- DDDownload & KatFile ---------------------------------------
             elif self.site == "dddownload":
-                proto = "http" if self.site == "dddownload" else "https"
+
                 url = (
-                    "https://dddownload.com/?op=my_reports&ajax=1"
+                    "http://dddownload.com/?op=my_reports&ajax=1"
                     f"&date1={self.date_from}&date2={self.date_to}"
                 )
                 rows = self._safe_json(
                     self._safe_get(url, headers={"X-Requested-With": "XMLHttpRequest"})
                 )
-                row: Dict[str, Any] = {}
                 if isinstance(rows, list) and rows:
-                    row = next((r for r in rows if r.get("day") == self.date_from), rows[-1])
-                elif isinstance(rows, dict):
-                    row = rows
+                    row = next((r for r in rows if r["day"] == self.date_from), rows[-1])
+                else:
+                    row = rows or {}
+
                 stats.update(
                     dl=int(row.get("downloads", 0)),
                     dl_rev=float(row.get("profit_dl", 0)),
