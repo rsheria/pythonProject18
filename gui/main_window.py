@@ -945,7 +945,6 @@ class ForumBotGUI(QMainWindow):
                 'winrar_exe_path',
                 'C:/Program Files/WinRAR/WinRAR.exe'
             )
-            self.winrar_exe_label.setText(f"WinRAR Executable: {winrar_exe_path}")
             if hasattr(self, 'settings_tab'):
                 self.settings_tab.winrar_exe_label.setText(
                     f"WinRAR Executable: {winrar_exe_path}"
@@ -2147,8 +2146,9 @@ class ForumBotGUI(QMainWindow):
                 logging.info("WinRAR directory saved to .env file.")
             else:
                 logging.warning("No .env file found. WinRAR directory not saved to .env file.")
-            # Update the label in the GUI
-            self.winrar_dir_label.setText(f"WinRAR Directory: {directory}")
+            # Update the label in the GUI if it exists
+            if hasattr(self, 'winrar_dir_label'):
+                self.winrar_dir_label.setText(f"WinRAR Directory: {directory}")
             # Provide feedback to the user
             QMessageBox.information(self, "WinRAR Directory Selected", f"WinRAR directory set to:\n{directory}")
             logging.info(f"WinRAR directory set to: {directory}")
