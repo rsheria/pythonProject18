@@ -20,6 +20,25 @@ from utils import sanitize_filename
 from utils.paths import get_data_folder
 import requests
 
+def _safe_get(session: requests.Session, url: str, **kw) -> requests.Response:
+    """GET with retry over HTTP+verify=False if SSL handshake fails."""
+    try:
+        return session.get(url, timeout=15, **kw)
+    except requests.exceptions.SSLError:
+        logging.warning("SSL handshake failed for %s – retrying insecure", url)
+        insecure_url = url.replace("https://", "http://", 1)
+        return session.get(insecure_url, timeout=15, verify=False, **kw)
+
+
+def _safe_post(session: requests.Session, url: str, **kw) -> requests.Response:
+    """POST with retry over HTTP+verify=False if SSL handshake fails."""
+    try:
+        return session.post(url, timeout=15, **kw)
+    except requests.exceptions.SSLError:
+        logging.warning("SSL handshake failed for %s – retrying insecure", url)
+        insecure_url = url.replace("https://", "http://", 1)
+        return session.post(insecure_url, timeout=15, verify=False, **kw)
+
 DATA_DIR = pathlib.Path(__file__).resolve().parent.parent / "data"
 
 
@@ -528,25 +547,25 @@ class UserManager:
         """Check whether *session* is currently authenticated for *site*."""
         try:
             if site == "rapidgator":
-                r = session.get("https://rapidgator.net/profile", timeout=15)
+                r = _safe_get(session, "https://rapidgator.net/profile")
                 if r.status_code != 200:
                     return False
                 page = r.text.lower()
                 # ✓ يعمل سواء كان الحساب Free أو Premium
                 return ("logout" in page) or ("my balance" in page) or ("premium expires" in page)
             if site == "nitroflare":
-                r = session.get("https://nitroflare.com/member", timeout=15)
+                r = _safe_get(session, "https://nitroflare.com/member")
                 return "logout" in r.text.lower()
             if site == "dddownload":
-                r = session.get("https://dddownload.com/?op=my_reports&ajax=1", timeout=15)
+                r = _safe_get(session, "https://dddownload.com/?op=my_reports&ajax=1")
                 ct = r.headers.get("Content-Type", "").lower()
                 return ct.startswith("application/json")
             if site == "katfile":
-                r = session.get("https://katfile.com/?op=my_reports&ajax=1", timeout=15)
+                r = _safe_get(session, "https://katfile.com/?op=my_reports&ajax=1")
                 ct = r.headers.get("Content-Type", "").lower()
                 return ct.startswith("application/json")
             if site == "keeplinks":
-                r = session.get("https://www.keeplinks.org/earnings", timeout=15)
+                r = _safe_get(session, "https://www.keeplinks.org/earnings")
                 return "Today's Earnings" in r.text
         except Exception as exc:
             logging.debug("Login check failed for %s: %s", site, exc)
