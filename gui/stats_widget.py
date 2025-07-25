@@ -165,7 +165,7 @@ class _StatsWorker(QRunnable):
 
             # ------- DDDownload & KatFile ---------------------------------------
             elif self.site in {"dddownload", "katfile"}:
-                base = "dddownload.com" if self.site == "dddownload" else "katfile.com"
+                base = "ddownload.com" if self.site == "dddownload" else "katfile.com"
                 url = (
                     f"https://{base}/?op=my_reports&ajax=1"
                     f"&date1={self.date_from}&date2={self.date_to}"

@@ -43,6 +43,25 @@ def get_nitroflare_stats(session: requests.Session, date_from: str, date_to: str
             return stats
 
         data = resp.json()
+        # New API returns JSON like:
+        # {"days":0,"data":{"2025-07-25":{"profAmount":0,"profCount":0,
+        #   "refAmount":0,"refCount":0,"bnrAmount":0,"bnrCount":0,
+        #   "ppdCount":"6","ppdAmount":0.018,"dlsCount":8}}}
+
+        if isinstance(data, dict) and isinstance(data.get("data"), dict):
+            day_data = next(iter(data["data"].values()), {})
+            sales_cnt = int(day_data.get("profCount", 0))
+            sales_rev = float(day_data.get("profAmount", 0))
+            unique_dl_cnt = int(day_data.get("ppdCount", 0))
+            unique_dl_rev = float(day_data.get("ppdAmount", 0))
+            stats.update(
+                dl=unique_dl_cnt,
+                dl_rev=unique_dl_rev,
+                sales=sales_cnt,
+                sales_rev=sales_rev,
+            )
+            return stats
+
         html = data.get("html") if isinstance(data, dict) else resp.text
         if not html:
             return stats
@@ -72,10 +91,6 @@ def get_nitroflare_stats(session: requests.Session, date_from: str, date_to: str
 
         unique_dl_cnt = _num(ppd_dl_str.split("/")[0])
         unique_dl_rev = _money(ppd_dl_str)
-
-        # Not currently displayed but kept for completeness
-        total_dl = _num(total_dl_str)
-        total_rev = _money(total_rev_str)
 
         stats.update(
             dl=unique_dl_cnt,
