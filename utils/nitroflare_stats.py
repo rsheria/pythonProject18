@@ -13,6 +13,7 @@ def get_nitroflare_stats(session: requests.Session, date_from: str, date_to: str
             "https://nitroflare.com/member?s=affiliates",
             timeout=15,
         )
+
         headers = {
             "User-Agent": "Mozilla/5.0",
             "X-Requested-With": "XMLHttpRequest",
@@ -22,10 +23,10 @@ def get_nitroflare_stats(session: requests.Session, date_from: str, date_to: str
             "Accept": "application/json, text/javascript, */*; q=0.01",
         }
 
-        # Pre-flight request to set CSRF randHash
+        rand_hash = session.cookies.get("randHash", "0")
         session.post(
             "https://nitroflare.com/ajax/randHash.php",
-            data={"randHash": "0"},
+            data={"randHash": rand_hash},
             headers=headers,
         )
 
@@ -63,12 +64,18 @@ def get_nitroflare_stats(session: requests.Session, date_from: str, date_to: str
 
         sales_str = cells[1].text
         ppd_dl_str = cells[2].text
+        total_dl_str = cells[3].text
+        total_rev_str = cells[6].text
 
         sales_cnt = _num(sales_str.split("/")[0])
         sales_rev = _money(sales_str)
 
         unique_dl_cnt = _num(ppd_dl_str.split("/")[0])
         unique_dl_rev = _money(ppd_dl_str)
+
+        # Not currently displayed but kept for completeness
+        total_dl = _num(total_dl_str)
+        total_rev = _money(total_rev_str)
 
         stats.update(
             dl=unique_dl_cnt,
