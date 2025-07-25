@@ -564,15 +564,15 @@ class UserManager:
             if site == "dddownload":
                 r = _safe_get(
                     session,
-                    "http://dddownload.com/?op=my_reports&ajax=1",
-                    headers={"X-Requested-With": "XMLHttpRequest"},
+                    "https://dddownload.com/?op=my_reports&date1=1970-01-01&date2=1970-01-01&show=Show",
                 )
-                ct = r.headers.get("Content-Type", "").lower()
-                return r.headers.get("content-type", "").startswith("application/json")
+                return "var data" in r.text.lower()
             if site == "katfile":
-                r = _safe_get(session, "https://katfile.com/?op=my_reports&ajax=1")
-                ct = r.headers.get("Content-Type", "").lower()
-                return ct.startswith("application/json")
+                r = _safe_get(
+                    session,
+                    "https://katfile.com/?op=my_reports&date1=1970-01-01&date2=1970-01-01&show=Show",
+                )
+                return "var data" in r.text.lower()
             if site == "keeplinks":
                 r = _safe_get(session, "https://www.keeplinks.org/earnings")
                 return "Today's Earnings" in r.text

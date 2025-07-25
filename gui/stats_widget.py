@@ -168,44 +168,60 @@ class _StatsWorker(QRunnable):
             # ------- DDDownload & KatFile ---------------------------------------
             elif self.site == "dddownload":
 
-                url = (
-                    "http://dddownload.com/?op=my_reports&ajax=1"
-                    f"&date1={self.date_from}&date2={self.date_to}"
+                base_url = (
+                    "https://dddownload.com/"
+                    f"?op=my_reports&date1={self.date_from}&date2={self.date_to}&show=Show"
                 )
-                rows = self._safe_json(
-                    self._safe_get(url, headers={"X-Requested-With": "XMLHttpRequest"})
+                resp = self._safe_get(
+                    base_url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0",
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Referer": "https://dddownload.com/",
+                    },
                 )
-                if isinstance(rows, list) and rows:
-                    row = next((r for r in rows if r["day"] == self.date_from), rows[-1])
-                else:
-                    row = rows or {}
+                m = re.search(r"var\s+data\s*=\s*(\[[^\]]+\])", resp.text)
+                if not m:
+                    raise RuntimeError("DDownload: data array not found")
 
-                stats.update(
-                    dl=int(row.get("downloads", 0)),
-                    dl_rev=float(row.get("profit_dl", 0)),
-                    sales=int(row.get("sales", 0)),
-                    sales_rev=float(row.get("profit_sales", 0)),
-                )
+                rows = json.loads(m.group(1))
+                row = rows[0] if rows else {}
+
+                dl_cnt = int(row.get("downloads", 0))
+                dl_rev = float(row.get("profit_dl", 0))
+                sales = int(row.get("sales", 0))
+                sales_rev = float(row.get("profit_sales", 0))
+
+                stats.update(dl=dl_cnt, dl_rev=dl_rev, sales=sales, sales_rev=sales_rev)
+
             elif self.site == "katfile":
-                url = (
-                    "https://katfile.com/?op=my_reports&ajax=1"
-                    f"&date1={self.date_from}&date2={self.date_to}"
-                )
-                rows = self._safe_json(
-                    self._safe_get(url, headers={"X-Requested-With": "XMLHttpRequest"})
+                base_url = (
+                    "https://katfile.com/"
+                    f"?op=my_reports&date1={self.date_from}&date2={self.date_to}&show=Show"
 
                 )
-                row: Dict[str, Any] = {}
-                if isinstance(rows, list) and rows:
-                    row = next((r for r in rows if r.get("day") == self.date_from), rows[-1])
-                elif isinstance(rows, dict):
-                    row = rows
-                stats.update(
-                    dl=int(row.get("downloads", 0)),
-                    dl_rev=float(row.get("profit_dl", 0)),
-                    sales=int(row.get("sales", 0)),
-                    sales_rev=float(row.get("profit_sales", 0)),
+                resp = self._safe_get(
+                    base_url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0",
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Referer": "https://katfile.com/",
+                    },
                 )
+
+                m = re.search(r"var\s+data\s*=\s*(\[[^\]]+\])", resp.text)
+                if not m:
+                    raise RuntimeError("KatFile: data array not found")
+
+                rows = json.loads(m.group(1))
+                row = rows[0] if rows else {}
+
+                dl_cnt = int(row.get("downloads", 0))
+                dl_rev = float(row.get("profit_dl", 0))
+                sales = int(row.get("sales", 0))
+                sales_rev = float(row.get("profit_sales", 0))
+
+                stats.update(dl=dl_cnt, dl_rev=dl_rev, sales=sales, sales_rev=sales_rev)
 
             # ------- KeepLinks ---------------------------------------------------
             elif self.site == "keeplinks":
