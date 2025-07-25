@@ -166,14 +166,14 @@ class _StatsWorker(QRunnable):
                 payload = {
                     "type": "fetchPPS",
                     "from": self.date_from,
-                    "to": self.date_to,
+                    "from": self.date_from,  # YYYY-MM-DD
+                    "to": self.date_to,  # YYYY-MM-DD
                 }
 
-                url,
-                data = payload,
+
                 resp = self._safe_post(
-                    "https://nitroflare.com/ajax/affiliates.php",
-                    data=body,
+                    url,
+                    data=payload,
                     headers={
                         "User-Agent": "Mozilla/5.0",
                         "X-Requested-With": "XMLHttpRequest",
@@ -192,24 +192,27 @@ class _StatsWorker(QRunnable):
                 # 0‑Date | 1‑Sales/Rebills | 2‑PPD Unique | 3‑Total DLs
                 # 4‑Referrals | 5‑Banners | 6‑Total $
                 txt_sales = cells[1].get_text(strip=True)
-                txt_dl = cells[3].get_text(strip=True)
-                txt_tot = cells[6].get_text(strip=True)
+                txt_dl    = cells[3].get_text(strip=True)
+                txt_tot   = cells[6].get_text(strip=True)
 
-                def _num(s: str) -> int:
+                # Helpers
+                def _num(s):
                     m = re.search(r"\d+", s)
                     return int(m.group()) if m else 0
 
-                def _money(s: str) -> float:
+                def _money(s):
                     m = re.search(r"([\d.]+)\$", s)
                     return float(m.group(1)) if m else 0.0
 
+                    # Sales column looks like "3 / 1 (12.50$)"
                     m_sales = re.search(r"(\d+)\s*/\s*(\d+).*\(([\d.]+)\$", txt_sales)
                     sales_cnt = int(m_sales.group(1)) if m_sales else 0
                     sales_rev = float(m_sales.group(3)) if m_sales else 0.0
 
-                    sales_i, sales_rev_i = self._parse_pair(row.get("sales", "0/0"))
-                    sales += sales_i
-                    sales_rev += sales_rev_i
+                    total_dl = _num(txt_dl)
+                    total_rev = _money(txt_tot)  # grand total column
+
+                    dl_rev = max(total_rev - sales_rev, 0.0)
 
                 stats = {
                     "dl": total_dl,
