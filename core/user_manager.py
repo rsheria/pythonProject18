@@ -24,13 +24,17 @@ import re
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 def _safe_get(session: requests.Session, url: str, **kw) -> requests.Response:
-    """GET with automatic fallback to HTTP on TLS/connection errors."""
+    """GET with fallback to disable TLS verification, then downgrade to HTTP."""
     try:
         return session.get(url, timeout=15, **kw)
     except (SSLError, ConnectionError):
-        logging.warning("HTTPS failed for %s – retrying over HTTP", url)
-        insecure_url = url.replace("https://", "http://", 1)
-        return session.post(insecure_url, timeout=15, verify=False, **kw)
+        logging.warning("HTTPS failed for %s – retrying with verify=False", url)
+        try:
+            return session.get(url, timeout=15, verify=False, **kw)
+        except (SSLError, ConnectionError):
+            logging.warning("HTTPS still failing for %s – falling back to HTTP", url)
+            insecure_url = url.replace("https://", "http://", 1)
+            return session.get(insecure_url, timeout=15, verify=False, **kw)
 
 
 def _safe_post(session: requests.Session, url: str, **kw) -> requests.Response:
