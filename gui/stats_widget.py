@@ -159,59 +159,63 @@ class _StatsWorker(QRunnable):
 
             # ------- Nitroflare -------------------------------------------------
             elif self.site == "nitroflare":
-                #
-                # Step 1 – warm‑up: visit the affiliate page once to let the
-                #          server set any extra cookies / CSRF token
-                #
-                self.session.get(
-                    "https://nitroflare.com/member?s=affiliates",
-                    timeout=15,
-                )
+                # -----------------------------------------------------------------
+                # New HTML/AJAX workflow – call the backend used by affiliate.js
+                # -----------------------------------------------------------------
+                url = "https://nitroflare.com/ajax/affiliate.php"
+                payload = {
+                    "type": "fetchPPS",
+                    "from": self.date_from,
+                    "to": self.date_to,
+                }
 
-                #
-                # Step 2 – call the JSON endpoint with an explicit Referer
-                #
-                body = (
-                    f"action=fetchPPS&from={self.date_from}&to={self.date_to}"
-                )
+                url,
+                data = payload,
                 resp = self._safe_post(
                     "https://nitroflare.com/ajax/affiliates.php",
                     data=body,
                     headers={
+                        "User-Agent": "Mozilla/5.0",
                         "X-Requested-With": "XMLHttpRequest",
                         "Referer": "https://nitroflare.com/member?s=affiliates",
-                        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
                     },
-                    timeout=20,
                 )
 
-                try:
-                    rows = resp.json()
-                except Exception:
-                    _LOG.debug("%s raw: %s", self.site, resp.text[:300])
-                    rows = []
+                # The endpoint returns plain <tr> rows, NOT full HTML
+                soup = BeautifulSoup(f"<table>{resp.text}</table>", "html.parser")
+                first_row = soup.select_one("tr")
+                if not first_row:
+                    raise RuntimeError("NitroFlare: stats row not found")
 
-                dl = dl_rev = sales = sales_rev = 0.0
+                cells = first_row.find_all("td")
+                # Column order:
+                # 0‑Date | 1‑Sales/Rebills | 2‑PPD Unique | 3‑Total DLs
+                # 4‑Referrals | 5‑Banners | 6‑Total $
+                txt_sales = cells[1].get_text(strip=True)
+                txt_dl = cells[3].get_text(strip=True)
+                txt_tot = cells[6].get_text(strip=True)
 
+                def _num(s: str) -> int:
+                    m = re.search(r"\d+", s)
+                    return int(m.group()) if m else 0
 
-                for row in rows:
-                    row_date = str(row.get("date") or row.get("day") or "")
-                    if row_date and not (self.date_from <= row_date <= self.date_to):
-                        continue
+                def _money(s: str) -> float:
+                    m = re.search(r"([\d.]+)\$", s)
+                    return float(m.group(1)) if m else 0.0
 
-                    dl_i, rev_i = self._parse_pair(row.get("ppd", "0/0"))
-                    dl += dl_i
-                    dl_rev += rev_i
+                    m_sales = re.search(r"(\d+)\s*/\s*(\d+).*\(([\d.]+)\$", txt_sales)
+                    sales_cnt = int(m_sales.group(1)) if m_sales else 0
+                    sales_rev = float(m_sales.group(3)) if m_sales else 0.0
 
                     sales_i, sales_rev_i = self._parse_pair(row.get("sales", "0/0"))
                     sales += sales_i
                     sales_rev += sales_rev_i
 
                 stats = {
-                    "dl": int(dl),
-                    "dl_rev": float(dl_rev),
-                    "sales": int(sales),
-                    "sales_rev": float(sales_rev),
+                    "dl": total_dl,
+                    "dl_rev": dl_rev,
+                    "sales": sales_cnt,
+                    "sales_rev": sales_rev,
                 }
 
             # ------- DDDownload & KatFile ---------------------------------------
