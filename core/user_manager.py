@@ -617,28 +617,35 @@ class UserManager:
     def _login_dddownload(self, sess: requests.Session, user: str, password: str) -> bool:
         """Perform a form login to DDDownload."""
         try:
-            resp = _safe_get(sess, "http://ww3.dddownload.com/login.html")
-            m = re.search(r'name="token" value="([^"]+)' , resp.text)
-            token = m.group(1) if m else ""
+            base = "https://dddownload.com"
+            resp = _safe_get(sess, f"{base}/login.html")
+            token = re.search(r'name="token"\s+value="([^"]+)"', resp.text or "")
+            token = token.group(1) if token else ""
+            action = re.search(r'<form[^>]*action="([^"]+)"', resp.text or "")
+            action = action.group(1) if action else "/login.html"
+
             payload = {
                 "op": "login",
                 "token": token,
                 "rand": "",
-                "redirect": "http://ww3.dddownload.com/",
+                "redirect": f"{base}/",
                 "login": user,
                 "password": password,
+                "rememberme": "on",
             }
+
             _safe_post(
                 sess,
-                "http://ww3.dddownload.com/",
+                f"{base}{action}" if action.startswith("/") else action,
                 data=payload,
                 headers={
-                    "Origin": "http://ww3.dddownload.com",
-                    "Referer": "http://ww3.dddownload.com/login.html",
-                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": base,
+                    "Referer": f"{base}/login.html",
                     "User-Agent": "Mozilla/5.0",
+                    "Content-Type": "application/x-www-form-urlencoded",
                 },
             )
+
             return self._is_logged_in("dddownload", sess)
         except Exception as exc:
             logging.debug("dddownload login failed: %s", exc)

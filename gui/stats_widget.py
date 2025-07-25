@@ -172,15 +172,34 @@ class _StatsWorker(QRunnable):
                 stats.update(nf_stats)
 
             # ------- DDDownload & KatFile ---------------------------------------
-            elif self.site in {"dddownload", "katfile"}:
-                host = "ww3.dddownload.com" if self.site == "dddownload" else "katfile.com"
+            elif self.site == "dddownload":
                 proto = "http" if self.site == "dddownload" else "https"
                 url = (
-                    f"{proto}://{host}/?op=my_reports&ajax=1"
+                    "https://dddownload.com/?op=my_reports&ajax=1"
                     f"&date1={self.date_from}&date2={self.date_to}"
                 )
                 rows = self._safe_json(
                     self._safe_get(url, headers={"X-Requested-With": "XMLHttpRequest"})
+                )
+                row: Dict[str, Any] = {}
+                if isinstance(rows, list) and rows:
+                    row = next((r for r in rows if r.get("day") == self.date_from), rows[-1])
+                elif isinstance(rows, dict):
+                    row = rows
+                stats.update(
+                    dl=int(row.get("downloads", 0)),
+                    dl_rev=float(row.get("profit_dl", 0)),
+                    sales=int(row.get("sales", 0)),
+                    sales_rev=float(row.get("profit_sales", 0)),
+                )
+            elif self.site == "katfile":
+                url = (
+                    "https://katfile.com/?op=my_reports&ajax=1"
+                    f"&date1={self.date_from}&date2={self.date_to}"
+                )
+                rows = self._safe_json(
+                    self._safe_get(url, headers={"X-Requested-With": "XMLHttpRequest"})
+
                 )
                 row: Dict[str, Any] = {}
                 if isinstance(rows, list) and rows:
