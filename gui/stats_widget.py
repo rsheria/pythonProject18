@@ -173,12 +173,15 @@ class _StatsWorker(QRunnable):
 
             # ------- DDDownload & KatFile ---------------------------------------
             elif self.site in {"dddownload", "katfile"}:
-                base = "ddownload.com" if self.site == "dddownload" else "katfile.com"
+                host = "ww3.dddownload.com" if self.site == "dddownload" else "katfile.com"
+                proto = "http" if self.site == "dddownload" else "https"
                 url = (
-                    f"https://{base}/?op=my_reports&ajax=1"
+                    f"{proto}://{host}/?op=my_reports&ajax=1"
                     f"&date1={self.date_from}&date2={self.date_to}"
                 )
-                rows = self._safe_json(self._safe_get(url))
+                rows = self._safe_json(
+                    self._safe_get(url, headers={"X-Requested-With": "XMLHttpRequest"})
+                )
                 row: Dict[str, Any] = {}
                 if isinstance(rows, list) and rows:
                     row = next((r for r in rows if r.get("day") == self.date_from), rows[-1])

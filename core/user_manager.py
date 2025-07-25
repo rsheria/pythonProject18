@@ -19,25 +19,33 @@ from typing import Dict, Any, Optional, Set
 from utils import sanitize_filename
 from utils.paths import get_data_folder
 import requests
-
+import re
 def _safe_get(session: requests.Session, url: str, **kw) -> requests.Response:
-    """GET with retry over HTTP+verify=False if SSL handshake fails."""
+    """GET with retry disabling SSL verification, then downgrading to HTTP."""
     try:
         return session.get(url, timeout=15, **kw)
     except requests.exceptions.SSLError:
-        logging.warning("SSL handshake failed for %s – retrying insecure", url)
-        insecure_url = url.replace("https://", "http://", 1)
-        return session.get(insecure_url, timeout=15, verify=False, **kw)
+        logging.warning("SSL handshake failed for %s – retrying with verify=False", url)
+        try:
+            return session.get(url, timeout=15, verify=False, **kw)
+        except requests.exceptions.SSLError:
+            logging.warning("SSL handshake still failing for %s – falling back to HTTP", url)
+            insecure_url = url.replace("https://", "http://", 1)
+            return session.get(insecure_url, timeout=15, verify=False, **kw)
 
 
 def _safe_post(session: requests.Session, url: str, **kw) -> requests.Response:
-    """POST with retry over HTTP+verify=False if SSL handshake fails."""
+    """POST with retry disabling SSL verification, then downgrading to HTTP."""
     try:
         return session.post(url, timeout=15, **kw)
     except requests.exceptions.SSLError:
-        logging.warning("SSL handshake failed for %s – retrying insecure", url)
-        insecure_url = url.replace("https://", "http://", 1)
-        return session.post(insecure_url, timeout=15, verify=False, **kw)
+        logging.warning("SSL handshake failed for %s – retrying with verify=False", url)
+        try:
+            return session.post(url, timeout=15, verify=False, **kw)
+        except requests.exceptions.SSLError:
+            logging.warning("SSL handshake still failing for %s – falling back to HTTP", url)
+            insecure_url = url.replace("https://", "http://", 1)
+            return session.post(insecure_url, timeout=15, verify=False, **kw)
 
 DATA_DIR = pathlib.Path(__file__).resolve().parent.parent / "data"
 
@@ -557,7 +565,11 @@ class UserManager:
                 r = _safe_get(session, "https://nitroflare.com/member")
                 return "logout" in r.text.lower()
             if site == "dddownload":
-                r = _safe_get(session, "https://dddownload.com/?op=my_reports&ajax=1")
+                r = _safe_get(
+                    session,
+                    "http://ww3.dddownload.com/?op=my_reports&ajax=1",
+                    headers={"X-Requested-With": "XMLHttpRequest"},
+                )
                 ct = r.headers.get("Content-Type", "").lower()
                 return ct.startswith("application/json")
             if site == "katfile":
@@ -601,6 +613,36 @@ class UserManager:
                 logging.info("✅ JSON cookies injected for %s", site)
             except Exception as exc:
                 logging.error("❌ Failed to inject cookies for %s: %s", site, exc)
+
+    def _login_dddownload(self, sess: requests.Session, user: str, password: str) -> bool:
+        """Perform a form login to DDDownload."""
+        try:
+            resp = _safe_get(sess, "https://dddownload.com/login.html")
+            m = re.search(r'name="token" value="([^"]+)' , resp.text)
+            token = m.group(1) if m else ""
+            payload = {
+                "op": "login",
+                "token": token,
+                "rand": "",
+                "redirect": "https://dddownload.com/",
+                "login": user,
+                "password": password,
+            }
+            _safe_post(
+                sess,
+                "https://dddownload.com/",
+                data=payload,
+                headers={
+                    "Origin": "https://dddownload.com",
+                    "Referer": "https://dddownload.com/login.html",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "User-Agent": "Mozilla/5.0",
+                },
+            )
+            return self._is_logged_in("dddownload", sess)
+        except Exception as exc:
+            logging.debug("dddownload login failed: %s", exc)
+            return False
     # ------------------------------------------------------------------
     # Sessions via shared JSON cookies
     # ------------------------------------------------------------------
@@ -624,6 +666,13 @@ class UserManager:
             return sess
 
         logging.error("❌ JSON cookies invalid or expired for %s", site)
+        creds = self.get_main_account(site)
+        if creds and site == "dddownload":
+            if self._login_dddownload(sess, creds.get("username", "rareclubsmovies@gmail.com"), creds.get("password", "Spiderman_123")):
+                self._site_sessions[site] = sess
+                logging.info("✅ Logged in to %s using credentials", site)
+                return sess
+
         return None
 
     def clear_session(self):
