@@ -155,7 +155,7 @@ class _StatsWorker(QRunnable):
                 if not _stats["dl_rev"] and not _stats["sales_rev"]:
                     _stats["dl_rev"] = _stats["sales_rev"] = _money(cells[7].text)
 
-                return _stats
+                stats = _stats
 
             # ------- Nitroflare -------------------------------------------------
             elif self.site == "nitroflare":
