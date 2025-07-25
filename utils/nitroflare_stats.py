@@ -18,6 +18,8 @@ def get_nitroflare_stats(session: requests.Session, date_from: str, date_to: str
             "X-Requested-With": "XMLHttpRequest",
             "Referer": "https://nitroflare.com/member?s=affiliates",
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
         }
 
         # Pre-flight request to set CSRF randHash
@@ -27,18 +29,24 @@ def get_nitroflare_stats(session: requests.Session, date_from: str, date_to: str
             headers=headers,
         )
 
-        url = "https://nitroflare.com/member/ajax/affiliate.php"
+        url = "https://nitroflare.com/ajax/affiliate/reports.php"
         payload = {
-            "type": "fetchPPS",
+            "method": "fetchPPS",
             "from": date_from,
             "to": date_to,
+            "page": 1,
         }
 
         resp = session.post(url, data=payload, headers=headers)
-        if resp.status_code == 404 or not resp.text.strip():
+        if resp.status_code != 200:
             return stats
 
-        soup = BeautifulSoup("<table>%s</table>" % resp.text, "html.parser")
+        data = resp.json()
+        html = data.get("html") if isinstance(data, dict) else resp.text
+        if not html:
+            return stats
+
+        soup = BeautifulSoup("<table>%s</table>" % html, "html.parser")
         row = soup.select_one("tr")
         if not row:
             return stats
