@@ -617,24 +617,24 @@ class UserManager:
     def _login_dddownload(self, sess: requests.Session, user: str, password: str) -> bool:
         """Perform a form login to DDDownload."""
         try:
-            resp = _safe_get(sess, "https://dddownload.com/login.html")
+            resp = _safe_get(sess, "http://ww3.dddownload.com/login.html")
             m = re.search(r'name="token" value="([^"]+)' , resp.text)
             token = m.group(1) if m else ""
             payload = {
                 "op": "login",
                 "token": token,
                 "rand": "",
-                "redirect": "https://dddownload.com/",
+                "redirect": "http://ww3.dddownload.com/",
                 "login": user,
                 "password": password,
             }
             _safe_post(
                 sess,
-                "https://dddownload.com/",
+                "http://ww3.dddownload.com/",
                 data=payload,
                 headers={
-                    "Origin": "https://dddownload.com",
-                    "Referer": "https://dddownload.com/login.html",
+                    "Origin": "http://ww3.dddownload.com",
+                    "Referer": "http://ww3.dddownload.com/login.html",
                     "Content-Type": "application/x-www-form-urlencoded",
                     "User-Agent": "Mozilla/5.0",
                 },
@@ -668,7 +668,7 @@ class UserManager:
         logging.error("❌ JSON cookies invalid or expired for %s", site)
         creds = self.get_main_account(site)
         if creds and site == "dddownload":
-            if self._login_dddownload(sess, creds.get("username", "rareclubsmovies@gmail.com"), creds.get("password", "Spiderman_123")):
+            if self._login_dddownload(sess, creds.get("username", ""), creds.get("password", "")):
                 self._site_sessions[site] = sess
                 logging.info("✅ Logged in to %s using credentials", site)
                 return sess
