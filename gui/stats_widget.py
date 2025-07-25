@@ -13,7 +13,8 @@ import warnings
 from datetime import date
 from decimal import Decimal
 from typing import Any, Dict, List
-
+from bs4 import BeautifulSoup
+import re
 import requests
 from PyQt5.QtCore import QDate, QRunnable, QThreadPool, QObject, pyqtSignal
 from PyQt5.QtGui import QStandardItem, QStandardItemModel
@@ -115,36 +116,47 @@ class _StatsWorker(QRunnable):
         try:
             # ------- Rapidgator -------------------------------------------------
             if self.site == "rapidgator":
-                payload = {
-                    "from": self.date_from,
-                    "to": self.date_to,
-                    "draw": "1",
-                    "start": "0",
-                    "length": "1000",
-                    "search[value]": "",
-                    "order[0][column]": "0",
-                    "order[0][dir]": "asc",
-                }
-                resp = self._safe_post(
-                    "https://rapidgator.net/stat/statfiles",
-                    data=payload,
-                    headers={"X-Requested-With": "XMLHttpRequest"},
+                # Build URL e.g. /stat/statfiles?start_date=2025-07-24&end_date=2025-07-24
+                url = (
+                    "https://rapidgator.net/stat/statfiles"
+                    f"?start_date={self.date_from}&end_date={self.date_to}"
                 )
-                try:
-                    data = resp.json()
-                except Exception:
-                    _LOG.debug("%s raw: %s", self.site, resp.text[:300])
-                    data = {}
-                if isinstance(data, dict):
-                    for row in data.get("data", []):
-                        if isinstance(row, list) and row and row[0] == self.date_from:
-                            stats = {
-                                "dl": int(row[1]),
-                                "dl_rev": float(_as_decimal(str(row[2]))),
-                                "sales": int(row[3]),
-                                "sales_rev": float(_as_decimal(str(row[4]))),
-                            }
-                            break
+                resp = self._safe_get(
+                    url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0",
+                        "Accept-Language": "en-US,en;q=0.9",
+                    },
+                )
+
+                soup = BeautifulSoup(resp.text, "html.parser")
+                first_row = soup.select_one("table.items tbody tr.odd")
+                if not first_row:
+                    raise RuntimeError("Rapidgator: stats row not found")
+
+                cells = first_row.find_all("td")
+                # cells layout:
+                # 0=date  1=downloads  2=sales  7=earned
+                def _num(txt):
+                    m = re.search(r"\d+", txt)
+                    return int(m.group()) if m else 0
+
+                def _money(txt):
+                    m = re.search(r"[\d.]+", txt)
+                    return float(m.group()) if m else 0.0
+
+                _stats = {
+                    "dl": _num(cells[1].text),
+                    "dl_rev": _money(cells[1].text.split("(")[-1]),
+                    "sales": _num(cells[2].text),
+                    "sales_rev": _money(cells[2].text.split("(")[-1]),
+                }
+
+                # Fallback: if both rev fields are 0 take value from total earned
+                if not _stats["dl_rev"] and not _stats["sales_rev"]:
+                    _stats["dl_rev"] = _stats["sales_rev"] = _money(cells[7].text)
+
+                return _stats
 
             # ------- Nitroflare -------------------------------------------------
             elif self.site == "nitroflare":
