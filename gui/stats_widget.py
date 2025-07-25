@@ -14,7 +14,6 @@ from datetime import date
 from decimal import Decimal
 from typing import Any, Dict, List
 from bs4 import BeautifulSoup
-import re
 import requests
 from PyQt5.QtCore import QDate, QRunnable, QThreadPool, QObject, pyqtSignal
 from PyQt5.QtGui import QStandardItem, QStandardItemModel
