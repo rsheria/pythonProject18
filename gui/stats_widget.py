@@ -159,6 +159,11 @@ class _StatsWorker(QRunnable):
                     if len(cells) < 8:
                         continue
 
+                    # skip total row to avoid double-counting
+                    date_text = cells[0].get_text(strip=True).lower()
+                    if not re.match(r"\d{4}-\d{2}-\d{2}", date_text):
+                        continue
+
                     dl = _num(cells[1].text)
                     dl_rev = _money(cells[1].text.split("(")[-1])
                     sales = _num(cells[2].text)
