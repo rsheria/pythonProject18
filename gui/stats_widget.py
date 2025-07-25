@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """StatsWidget – fetches & displays per-site earnings/downloads in the background.
-   v3.1 – fixes Rapidgator None, Kat/DDDownload empty list, SSL fallback, and
+   v3.1 – fixes Rapidgator None, Kat/DDownload empty list, SSL fallback, and
    merges KeepLinks revenue into total revenue column.
 """
 
@@ -96,7 +96,7 @@ class _StatsWorker(QRunnable):
         try:
             return self.session.get(url, timeout=20, **kw)
         except (SSLError, ConnectionError):
-            if "dddownload.com" in url:
+            if "ddownload.com" in url:
                 raise
             _LOG.warning("HTTPS failed for %s – retrying over HTTP", url)
             insecure_url = url.replace("https://", "http://", 1)
@@ -108,7 +108,7 @@ class _StatsWorker(QRunnable):
         try:
             return self.session.post(url, timeout=20, **kw)
         except (SSLError, ConnectionError):
-            if "dddownload.com" in url:
+            if "ddownload.com" in url:
                 raise
             _LOG.warning("HTTPS failed for %s – retrying over HTTP", url)
             insecure_url = url.replace("https://", "http://", 1)
@@ -169,11 +169,11 @@ class _StatsWorker(QRunnable):
                 nf_stats = get_nitroflare_stats(self.session, self.date_from, self.date_to)
                 stats.update(nf_stats)
 
-            # ------- DDDownload & KatFile ---------------------------------------
-            elif self.site == "dddownload":
+            # ------- DDownload & KatFile ---------------------------------------
+            elif self.site == "ddownload":
 
                 base_url = (
-                    "https://dddownload.com/"
+                    "https://ddownload.com/"
                     f"?op=my_reports&date1={self.date_from}&date2={self.date_to}&show=Show"
                 )
                 resp = self._safe_get(
@@ -181,7 +181,7 @@ class _StatsWorker(QRunnable):
                     headers={
                         "User-Agent": "Mozilla/5.0",
                         "Accept-Language": "en-US,en;q=0.9",
-                        "Referer": "https://dddownload.com/",
+                        "Referer": "https://ddownload.com/",
                     },
                 )
                 m = re.search(r"var\s+data\s*=\s*(\[[^\]]+\])", resp.text)

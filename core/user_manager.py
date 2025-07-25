@@ -29,7 +29,7 @@ def _safe_get(session: requests.Session, url: str, **kw) -> requests.Response:
     try:
         return session.get(url, timeout=15, **kw)
     except (SSLError, ConnectionError):
-        if "dddownload.com" in url:
+        if "ddownload.com" in url:
             raise
         logging.warning("HTTPS failed for %s – retrying over HTTP", url)
         insecure_url = url.replace("https://", "http://", 1)
@@ -41,7 +41,7 @@ def _safe_post(session: requests.Session, url: str, **kw) -> requests.Response:
     try:
         return session.post(url, timeout=15, **kw)
     except requests.exceptions.SSLError:
-        if "dddownload.com" in url:
+        if "ddownload.com" in url:
             raise
         logging.warning("SSL handshake failed for %s – retrying over HTTP", url)
         insecure_url = url.replace("https://", "http://", 1)
@@ -424,7 +424,7 @@ class UserManager:
                         'username': os.getenv('NITROFLARE_LOGIN', ''),
                         'password': os.getenv('NITROFLARE_PASSWORD', ''),
                     },
-                    'dddownload': {
+                    'ddownload': {
                         'username': os.getenv('DDOWNLOAD_LOGIN', ''),
                         'password': os.getenv('DDOWNLOAD_PASSWORD', ''),
                     },
@@ -532,7 +532,7 @@ class UserManager:
                 os.getenv("NITROFLARE_LOGIN", ""),
                 os.getenv("NITROFLARE_PASSWORD", ""),
             ),
-            "dddownload": (
+            "ddownload": (
                 os.getenv("DDOWNLOAD_LOGIN", ""),
                 os.getenv("DDOWNLOAD_PASSWORD", ""),
             ),
@@ -564,10 +564,10 @@ class UserManager:
             if site == "nitroflare":
                 r = _safe_get(session, "https://nitroflare.com/member")
                 return "logout" in r.text.lower()
-            if site == "dddownload":
+            if site == "ddownload":
                 r = _safe_get(
                     session,
-                    "https://dddownload.com/?op=my_reports&date1=1970-01-01&date2=1970-01-01&show=Show",
+                    "https://ddownload.com/?op=my_reports&date1=1970-01-01&date2=1970-01-01&show=Show",
                 )
                 return "var data" in r.text.lower()
             if site == "katfile":
@@ -588,7 +588,7 @@ class UserManager:
             file_map = {
                 "rapidgator": "cookies_rapidgator.json",
                 "nitroflare": "cookies_nitroflare.json",
-                "dddownload": "cookies_dddownload.json",
+                "ddownload": "cookies_ddownload.json",
                 "katfile": "cookies_katfile.json",
                 "keeplinks": "cookies_keeplinks.json",
             }
@@ -614,10 +614,10 @@ class UserManager:
             except Exception as exc:
                 logging.error("❌ Failed to inject cookies for %s: %s", site, exc)
 
-    def _login_dddownload(self, sess: requests.Session, user: str, password: str) -> bool:
-        """Perform a form login to DDDownload using a flow similar to Katfile."""
+    def _login_ddownload(self, sess: requests.Session, user: str, password: str) -> bool:
+        """Perform a form login to DDownload using a flow similar to Katfile."""
         try:
-            base = "https://dddownload.com"
+            base = "https://ddownload.com"
             resp = _safe_get(sess, f"{base}/login.html")
             resp.raise_for_status()
 
@@ -653,9 +653,9 @@ class UserManager:
                 },
             )
 
-            return self._is_logged_in("dddownload", sess)
+            return self._is_logged_in("ddownload", sess)
         except Exception as exc:
-            logging.debug("dddownload login failed: %s", exc)
+            logging.debug("ddownload login failed: %s", exc)
             return False
     # ------------------------------------------------------------------
     # Sessions via shared JSON cookies
@@ -673,9 +673,9 @@ class UserManager:
 
         # 2) نحتاج جلسة جديدة
         sess = requests.Session()
-        if site == "dddownload":
-            sess.mount("https://dddownload.com", DDownloadAdapter())
-            sess.mount("https://www.dddownload.com", DDownloadAdapter())
+        if site == "ddownload":
+            sess.mount("https://ddownload.com", DDownloadAdapter())
+            sess.mount("https://www.ddownload.com", DDownloadAdapter())
         self._inject_json_cookies(sess, site)
         if self._is_logged_in(site, sess):
             self._site_sessions[site] = sess
@@ -684,8 +684,8 @@ class UserManager:
 
         logging.error("❌ JSON cookies invalid or expired for %s", site)
         creds = self.get_main_account(site)
-        if creds and site == "dddownload":
-            if self._login_dddownload(sess, creds.get("username", ""), creds.get("password", "")):
+        if creds and site == "ddownload":
+            if self._login_ddownload(sess, creds.get("username", ""), creds.get("password", "")):
                 self._site_sessions[site] = sess
                 logging.info("✅ Logged in to %s using credentials", site)
                 return sess
