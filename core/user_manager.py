@@ -21,6 +21,8 @@ from utils.paths import get_data_folder
 import requests
 from requests.exceptions import SSLError, ConnectionError
 import re
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 def _safe_get(session: requests.Session, url: str, **kw) -> requests.Response:
     """GET with automatic fallback to HTTP on TLS/connection errors."""
     try:
@@ -612,25 +614,37 @@ class UserManager:
                 logging.error("❌ Failed to inject cookies for %s: %s", site, exc)
 
     def _login_dddownload(self, sess: requests.Session, user: str, password: str) -> bool:
-        """Perform a form login to DDDownload."""
+        """Perform a form login to DDDownload using a flow similar to Katfile."""
         try:
-            base = "http://dddownload.com"
+            base = "https://dddownload.com"
             resp = _safe_get(sess, f"{base}/login.html")
-            token = re.search(r'name="token"\s+value="([^"]+)"', resp.text).group(1)
+            resp.raise_for_status()
 
-            payload = {
-                "op": "login",
+            login_data = {
                 "login": user,
                 "password": password,
-                "token": token,
-                "rand": "",
-                "redirect": f"{base}/",
+                "op": "login",
+                "redirect": "",
             }
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+            form = soup.find("form", {"id": "loginform"}) or soup.find("form")
+            if form:
+                for inp in form.find_all("input"):
+                    name = inp.get("name")
+                    if not name or inp.get("type") == "submit":
+                        continue
+                    if name not in login_data:
+                        login_data[name] = inp.get("value", "")
+                action = form.get("action")
+                login_url = urljoin(f"{base}/login.html", action) if action else base + "/"
+            else:
+                login_url = base + "/"
 
             _safe_post(
                 sess,
-                f"{base}/",
-                data=payload,
+                login_url,
+                data=login_data,
                 headers={
                     "Origin": base,
                     "Referer": f"{base}/login.html",
