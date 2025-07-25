@@ -154,27 +154,27 @@ class _StatsWorker(QRunnable):
                     m = re.search(r"[\d.]+", txt)
                     return float(m.group()) if m else 0.0
 
-                _stats = {
                 for row in rows:
                     cells = row.find_all("td")
-                if len(cells) < 8:
-                    continue
+                    if len(cells) < 8:
+                        continue
 
-                dl = _num(cells[1].text)
-                dl_rev = _money(cells[1].text.split("(")[-1])
-                sales = _num(cells[2].text)
-                sales_rev = _money(cells[2].text.split("(")[-1])
+                    dl = _num(cells[1].text)
+                    dl_rev = _money(cells[1].text.split("(")[-1])
+                    sales = _num(cells[2].text)
+                    sales_rev = _money(cells[2].text.split("(")[-1])
 
-                # Fallback: if both rev fields are 0 take value from total earned
-                # Fallback: if both rev fields are 0 take value from total earned
-                if not dl_rev and not sales_rev:
-                    fallback = _money(cells[7].text)
-                    dl_rev = sales_rev = fallback
 
-                stats["dl"] += dl
-                stats["dl_rev"] += dl_rev
-                stats["sales"] += sales
-                stats["sales_rev"] += sales_rev
+                    # Fallback: if both rev fields are 0 take value from total earned
+                    if not dl_rev and not sales_rev:
+                        fallback = _money(cells[7].text)
+                        dl_rev = sales_rev = fallback
+
+                    stats["dl"] += dl
+                    stats["dl_rev"] += dl_rev
+                    stats["sales"] += sales
+                    stats["sales_rev"] += sales_rev
+
 
             # ------- Nitroflare -------------------------------------------------
             elif self.site == "nitroflare":

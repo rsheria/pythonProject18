@@ -49,17 +49,11 @@ def get_nitroflare_stats(session: requests.Session, date_from: str, date_to: str
         #   "ppdCount":"6","ppdAmount":0.018,"dlsCount":8}}}
 
         if isinstance(data, dict) and isinstance(data.get("data"), dict):
-            day_data = next(iter(data["data"].values()), {})
-            sales_cnt = int(day_data.get("profCount", 0))
-            sales_rev = float(day_data.get("profAmount", 0))
-            unique_dl_cnt = int(day_data.get("ppdCount", 0))
-            unique_dl_rev = float(day_data.get("ppdAmount", 0))
-            stats.update(
-                dl=unique_dl_cnt,
-                dl_rev=unique_dl_rev,
-                sales=sales_cnt,
-                sales_rev=sales_rev,
-            )
+            for day_data in data["data"].values():
+                stats["sales"] += int(day_data.get("profCount", 0))
+                stats["sales_rev"] += float(day_data.get("profAmount", 0))
+                stats["dl"] += int(day_data.get("ppdCount", 0))
+                stats["dl_rev"] += float(day_data.get("ppdAmount", 0))
             return stats
 
         html = data.get("html") if isinstance(data, dict) else resp.text
@@ -67,11 +61,9 @@ def get_nitroflare_stats(session: requests.Session, date_from: str, date_to: str
             return stats
 
         soup = BeautifulSoup("<table>%s</table>" % html, "html.parser")
-        row = soup.select_one("tr")
-        if not row:
+        rows = soup.select("tr")
+        if not rows:
             return stats
-
-        cells = row.find_all("td")
 
         def _num(s: str) -> int:
             m = re.search(r"\d+", s)
@@ -81,23 +73,23 @@ def get_nitroflare_stats(session: requests.Session, date_from: str, date_to: str
             m = re.search(r"([\d.]+)\$?", s)
             return float(m.group(1)) if m else 0.0
 
-        sales_str = cells[1].text
-        ppd_dl_str = cells[2].text
-        total_dl_str = cells[3].text
-        total_rev_str = cells[6].text
+        for row in rows:
+            cells = row.find_all("td")
+            if len(cells) < 7:
+                continue
 
-        sales_cnt = _num(sales_str.split("/")[0])
-        sales_rev = _money(sales_str)
+            sales_str = cells[1].text
+            ppd_dl_str = cells[2].text
+            sales_cnt = _num(sales_str.split("/")[0])
+            sales_rev = _money(sales_str)
+            unique_dl_cnt = _num(ppd_dl_str.split("/")[0])
+            unique_dl_rev = _money(ppd_dl_str)
 
-        unique_dl_cnt = _num(ppd_dl_str.split("/")[0])
-        unique_dl_rev = _money(ppd_dl_str)
+            stats["dl"] += unique_dl_cnt
+            stats["dl_rev"] += unique_dl_rev
+            stats["sales"] += sales_cnt
+            stats["sales_rev"] += sales_rev
 
-        stats.update(
-            dl=unique_dl_cnt,
-            dl_rev=unique_dl_rev,
-            sales=sales_cnt,
-            sales_rev=sales_rev,
-        )
     except Exception:
         pass
     return stats
