@@ -142,33 +142,39 @@ class _StatsWorker(QRunnable):
                 )
 
                 soup = BeautifulSoup(resp.text, "html.parser")
-                first_row = soup.select_one("table.items tbody tr.odd")
-                if not first_row:
-                    raise RuntimeError("Rapidgator: stats row not found")
+                rows = soup.select("table.items tbody tr")
+                if not rows:
+                    raise RuntimeError("Rapidgator: stats rows not found")
 
-                cells = first_row.find_all("td")
-                # cells layout:
-                # 0=date  1=downloads  2=sales  7=earned
-                def _num(txt):
+                def _num(txt: str) -> int:
                     m = re.search(r"\d+", txt)
                     return int(m.group()) if m else 0
 
-                def _money(txt):
+                def _money(txt: str) -> float:
                     m = re.search(r"[\d.]+", txt)
                     return float(m.group()) if m else 0.0
 
                 _stats = {
-                    "dl": _num(cells[1].text),
-                    "dl_rev": _money(cells[1].text.split("(")[-1]),
-                    "sales": _num(cells[2].text),
-                    "sales_rev": _money(cells[2].text.split("(")[-1]),
-                }
+                for row in rows:
+                    cells = row.find_all("td")
+                if len(cells) < 8:
+                    continue
+
+                dl = _num(cells[1].text)
+                dl_rev = _money(cells[1].text.split("(")[-1])
+                sales = _num(cells[2].text)
+                sales_rev = _money(cells[2].text.split("(")[-1])
 
                 # Fallback: if both rev fields are 0 take value from total earned
-                if not _stats["dl_rev"] and not _stats["sales_rev"]:
-                    _stats["dl_rev"] = _stats["sales_rev"] = _money(cells[7].text)
+                # Fallback: if both rev fields are 0 take value from total earned
+                if not dl_rev and not sales_rev:
+                    fallback = _money(cells[7].text)
+                    dl_rev = sales_rev = fallback
 
-                stats = _stats
+                stats["dl"] += dl
+                stats["dl_rev"] += dl_rev
+                stats["sales"] += sales
+                stats["sales_rev"] += sales_rev
 
             # ------- Nitroflare -------------------------------------------------
             elif self.site == "nitroflare":
@@ -196,14 +202,11 @@ class _StatsWorker(QRunnable):
                     raise RuntimeError("DDownload: data array not found")
 
                 rows = json.loads(m.group(1))
-                row = rows[0] if rows else {}
-
-                dl_cnt = int(row.get("downloads", 0))
-                dl_rev = float(row.get("profit_dl", 0))
-                sales = int(row.get("sales", 0))
-                sales_rev = float(row.get("profit_sales", 0))
-
-                stats.update(dl=dl_cnt, dl_rev=dl_rev, sales=sales, sales_rev=sales_rev)
+                for row in rows:
+                    stats["dl"] += int(row.get("downloads", 0))
+                    stats["dl_rev"] += float(row.get("profit_dl", 0))
+                    stats["sales"] += int(row.get("sales", 0))
+                    stats["sales_rev"] += float(row.get("profit_sales", 0))
 
             elif self.site == "katfile":
                 base_url = (
@@ -225,14 +228,11 @@ class _StatsWorker(QRunnable):
                     raise RuntimeError("KatFile: data array not found")
 
                 rows = json.loads(m.group(1))
-                row = rows[0] if rows else {}
-
-                dl_cnt = int(row.get("downloads", 0))
-                dl_rev = float(row.get("profit_dl", 0))
-                sales = int(row.get("sales", 0))
-                sales_rev = float(row.get("profit_sales", 0))
-
-                stats.update(dl=dl_cnt, dl_rev=dl_rev, sales=sales, sales_rev=sales_rev)
+                for row in rows:
+                    stats["dl"] += int(row.get("downloads", 0))
+                    stats["dl_rev"] += float(row.get("profit_dl", 0))
+                    stats["sales"] += int(row.get("sales", 0))
+                    stats["sales_rev"] += float(row.get("profit_sales", 0))
 
             # ------- KeepLinks ---------------------------------------------------
             elif self.site == "keeplinks":
