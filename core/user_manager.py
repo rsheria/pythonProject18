@@ -29,13 +29,11 @@ def _safe_get(session: requests.Session, url: str, **kw) -> requests.Response:
     try:
         return session.get(url, timeout=15, **kw)
     except (SSLError, ConnectionError):
-        logging.warning("HTTPS failed for %s – retrying with verify=False", url)
-        try:
-            return session.get(url, timeout=15, verify=False, **kw)
-        except (SSLError, ConnectionError):
-            logging.warning("HTTPS still failing for %s – falling back to HTTP", url)
-            insecure_url = url.replace("https://", "http://", 1)
-            return session.get(insecure_url, timeout=15, verify=False, **kw)
+        if "dddownload.com" in url:
+            raise
+        logging.warning("HTTPS failed for %s – retrying over HTTP", url)
+        insecure_url = url.replace("https://", "http://", 1)
+        return session.get(insecure_url, timeout=15, verify=False, **kw)
 
 
 def _safe_post(session: requests.Session, url: str, **kw) -> requests.Response:
@@ -43,13 +41,11 @@ def _safe_post(session: requests.Session, url: str, **kw) -> requests.Response:
     try:
         return session.post(url, timeout=15, **kw)
     except requests.exceptions.SSLError:
-        logging.warning("SSL handshake failed for %s – retrying with verify=False", url)
-        try:
-            return session.post(url, timeout=15, verify=False, **kw)
-        except requests.exceptions.SSLError:
-            logging.warning("SSL handshake still failing for %s – falling back to HTTP", url)
-            insecure_url = url.replace("https://", "http://", 1)
-            return session.post(insecure_url, timeout=15, verify=False, **kw)
+        if "dddownload.com" in url:
+            raise
+        logging.warning("SSL handshake failed for %s – retrying over HTTP", url)
+        insecure_url = url.replace("https://", "http://", 1)
+        return session.post(insecure_url, timeout=15, verify=False, **kw)
 
 DATA_DIR = pathlib.Path(__file__).resolve().parent.parent / "data"
 
