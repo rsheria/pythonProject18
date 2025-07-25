@@ -19,6 +19,10 @@ from typing import Dict, Any, Optional, Set
 from utils import sanitize_filename
 from utils.paths import get_data_folder
 from utils.legacy_tls import DDownloadAdapter
+# Mapping of alternate site identifiers to canonical names
+SITE_ALIASES = {
+    "dddownload": "ddownload",
+}
 import requests
 from requests.exceptions import SSLError, ConnectionError
 import re
@@ -30,7 +34,8 @@ def _safe_get(session: requests.Session, url: str, **kw) -> requests.Response:
         return session.get(url, timeout=15, **kw)
     except (SSLError, ConnectionError):
         if "ddownload.com" in url:
-            raise
+            logging.warning("TLS error for %s – retrying with verify=False", url)
+            return session.get(url, timeout=15, verify=False, **kw)
         logging.warning("HTTPS failed for %s – retrying over HTTP", url)
         insecure_url = url.replace("https://", "http://", 1)
         return session.get(insecure_url, timeout=15, verify=False, **kw)
@@ -42,7 +47,10 @@ def _safe_post(session: requests.Session, url: str, **kw) -> requests.Response:
         return session.post(url, timeout=15, **kw)
     except requests.exceptions.SSLError:
         if "ddownload.com" in url:
-            raise
+            logging.warning(
+                "SSL handshake failed for %s – retrying with verify=False", url
+            )
+            return session.post(url, timeout=15, verify=False, **kw)
         logging.warning("SSL handshake failed for %s – retrying over HTTP", url)
         insecure_url = url.replace("https://", "http://", 1)
         return session.post(insecure_url, timeout=15, verify=False, **kw)
@@ -71,7 +79,13 @@ class UserManager:
         
         # Load last logged-in user if exists
         self._load_last_session()
-    
+
+    # ------------------------------------------------------------------
+    # Helper utilities
+    # ------------------------------------------------------------------
+    def _normalize_site(self, site: str) -> str:
+        """Return canonical site key accounting for known aliases."""
+        return SITE_ALIASES.get(site.lower(), site.lower())
     def set_current_user(self, username: str) -> bool:
         """
         Set the current active user and initialize their data directory.
@@ -512,6 +526,7 @@ class UserManager:
         For Rapidgator multiple accounts may exist; the one with
         ``is_main`` set to ``True`` is returned.
         """
+        site = self._normalize_site(site)
         sites = self.user_settings.get("sites", {})
         creds = sites.get(site)
         if site == "rapidgator" and isinstance(creds, list):
@@ -553,6 +568,7 @@ class UserManager:
 
     def _is_logged_in(self, site: str, session: requests.Session) -> bool:
         """Check whether *session* is currently authenticated for *site*."""
+        site = self._normalize_site(site)
         try:
             if site == "rapidgator":
                 r = _safe_get(session, "https://rapidgator.net/profile")
@@ -585,6 +601,7 @@ class UserManager:
 
     def _inject_json_cookies(self, sess: requests.Session, site: str):
             """Load shared JSON cookie file from /data/ and add to *sess*."""
+            site = self._normalize_site(site)
             file_map = {
                 "rapidgator": "cookies_rapidgator.json",
                 "nitroflare": "cookies_nitroflare.json",
@@ -666,6 +683,8 @@ class UserManager:
         يحاول أولاً إعادة جلسة مُخزَّنة؛
         وإلا يحمِّل كوكى JSON المشترَكة لهذا الدومين.
         """
+
+        site = self._normalize_site(site)
         # 1) Session مخزَّنة بالفعل؟
         sess = self._site_sessions.get(site)
         if sess and self._is_logged_in(site, sess):
