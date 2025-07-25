@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional, Set
 from utils import sanitize_filename
 from utils.paths import get_data_folder
+from utils.legacy_tls import DDownloadAdapter
 import requests
 from requests.exceptions import SSLError, ConnectionError
 import re
@@ -676,6 +677,9 @@ class UserManager:
 
         # 2) نحتاج جلسة جديدة
         sess = requests.Session()
+        if site == "dddownload":
+            sess.mount("https://dddownload.com", DDownloadAdapter())
+            sess.mount("https://www.dddownload.com", DDownloadAdapter())
         self._inject_json_cookies(sess, site)
         if self._is_logged_in(site, sess):
             self._site_sessions[site] = sess
