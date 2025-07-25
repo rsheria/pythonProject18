@@ -30,7 +30,10 @@ from PyQt5.QtWidgets import (
 )
 
 from core.user_manager import get_user_manager
-
+# Mapping of alternate site identifiers to canonical names
+SITE_ALIASES = {
+    "dddownload": "ddownload",
+}
 
 _LOG = logging.getLogger(__name__)
 _PAIR_RE = re.compile(r"(\d+)\s*/\s*[\$€]?\s*([\d.,]+)")
@@ -71,7 +74,7 @@ class _StatsWorker(QRunnable):
         signals: _WorkerSignals,
     ) -> None:
         super().__init__()
-        self.site = site
+        self.site = SITE_ALIASES.get(site.lower(), site.lower())
         self.session = session
         self.date_from = date_from
         self.date_to = date_to
@@ -97,7 +100,8 @@ class _StatsWorker(QRunnable):
             return self.session.get(url, timeout=20, **kw)
         except (SSLError, ConnectionError):
             if "ddownload.com" in url:
-                raise
+                _LOG.warning("TLS error for %s – retrying with verify=False", url)
+                return self.session.get(url, timeout=20, verify=False, **kw)
             _LOG.warning("HTTPS failed for %s – retrying over HTTP", url)
             insecure_url = url.replace("https://", "http://", 1)
             return self.session.get(insecure_url, timeout=20, verify=False, **kw)
@@ -109,7 +113,10 @@ class _StatsWorker(QRunnable):
             return self.session.post(url, timeout=20, **kw)
         except (SSLError, ConnectionError):
             if "ddownload.com" in url:
-                raise
+                _LOG.warning(
+                    "SSL handshake failed for %s – retrying with verify=False", url
+                )
+                return self.session.post(url, timeout=20, verify=False, **kw)
             _LOG.warning("HTTPS failed for %s – retrying over HTTP", url)
             insecure_url = url.replace("https://", "http://", 1)
             return self.session.post(insecure_url, timeout=20, verify=False, **kw)
