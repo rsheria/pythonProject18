@@ -162,12 +162,16 @@ class _StatsWorker(QRunnable):
                 # -----------------------------------------------------------------
                 # New HTML/AJAX workflow – call the backend used by affiliate.js
                 # -----------------------------------------------------------------
+                # Warm-up: ensure cookies/csrf tokens are set
+                self.session.get(
+                    "https://nitroflare.com/member?s=affiliates",
+                    timeout=15,
+                )
                 url = "https://nitroflare.com/ajax/affiliate.php"
                 payload = {
                     "type": "fetchPPS",
-                    "from": self.date_from,
-                    "from": self.date_from,  # YYYY-MM-DD
-                    "to": self.date_to,  # YYYY-MM-DD
+                    "from": self.date_from,   # YYYY-MM-DD
+                    "to":   self.date_to,     # YYYY-MM-DD
                 }
 
 
@@ -214,12 +218,6 @@ class _StatsWorker(QRunnable):
 
                     dl_rev = max(total_rev - sales_rev, 0.0)
 
-                stats = {
-                    "dl": total_dl,
-                    "dl_rev": dl_rev,
-                    "sales": sales_cnt,
-                    "sales_rev": sales_rev,
-                }
 
             # ------- DDDownload & KatFile ---------------------------------------
             elif self.site in {"dddownload", "katfile"}:
