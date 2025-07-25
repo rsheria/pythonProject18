@@ -91,22 +91,30 @@ class _StatsWorker(QRunnable):
         return (int(m.group(1)), float(_as_decimal(m.group(2)))) if m else (0, 0.0)
 
     def _safe_get(self, url: str, **kw) -> requests.Response:
-        """GET with retry over HTTP+verify=False if SSL handshake fails."""
+        """GET with retry disabling SSL verification, then downgrading to HTTP."""
         try:
             return self.session.get(url, timeout=20, **kw)
         except requests.exceptions.SSLError:
-            _LOG.warning("SSL handshake failed for %s – retrying insecure", url)
-            insecure_url = url.replace("https://", "http://", 1)
-            return self.session.get(insecure_url, timeout=20, verify=False, **kw)
+            _LOG.warning("SSL handshake failed for %s – retrying with verify=False", url)
+            try:
+                return self.session.get(url, timeout=20, verify=False, **kw)
+            except requests.exceptions.SSLError:
+                _LOG.warning("SSL handshake still failing for %s – falling back to HTTP", url)
+                insecure_url = url.replace("https://", "http://", 1)
+                return self.session.get(insecure_url, timeout=20, verify=False, **kw)
 
     def _safe_post(self, url: str, **kw) -> requests.Response:
-        """POST with retry over HTTP+verify=False if SSL handshake fails."""
+        """POST with retry disabling SSL verification, then downgrading to HTTP."""
         try:
             return self.session.post(url, timeout=20, **kw)
         except requests.exceptions.SSLError:
-            _LOG.warning("SSL handshake failed for %s – retrying insecure", url)
-            insecure_url = url.replace("https://", "http://", 1)
-            return self.session.post(insecure_url, timeout=20, verify=False, **kw)
+            _LOG.warning("SSL handshake failed for %s – retrying with verify=False", url)
+            try:
+                return self.session.post(url, timeout=20, verify=False, **kw)
+            except requests.exceptions.SSLError:
+                _LOG.warning("SSL handshake still failing for %s – falling back to HTTP", url)
+                insecure_url = url.replace("https://", "http://", 1)
+                return self.session.post(insecure_url, timeout=20, verify=False, **kw)
 
 
     # ------------------------- main run ---------------------------------- #
