@@ -137,11 +137,11 @@ class _StatsWorker(QRunnable):
                 # cells layout:
                 # 0=date  1=downloads  2=sales  7=earned
                 def _num(txt):
-                    m = re.search(r"\\d+", txt)
+                    m = re.search(r"\d+", txt)
                     return int(m.group()) if m else 0
 
                 def _money(txt):
-                    m = re.search(r"[\\d.]+", txt)
+                    m = re.search(r"[\d.]+", txt)
                     return float(m.group()) if m else 0.0
 
                 _stats = {
@@ -159,76 +159,10 @@ class _StatsWorker(QRunnable):
 
             # ------- Nitroflare -------------------------------------------------
             elif self.site == "nitroflare":
-                # -----------------------------------------------------------------
-                # New HTML/AJAX workflow – call the backend used by affiliate.js
-                # -----------------------------------------------------------------
-                # Warm-up: ensure cookies/csrf tokens are set
-                self.session.get(
-                    "https://nitroflare.com/member?s=affiliates",
-                    timeout=15,
-                )
-                headers = {
-                    "User-Agent": "Mozilla/5.0",
-                    "X-Requested-With": "XMLHttpRequest",
-                    "Referer": "https://nitroflare.com/member?s=affiliates",
-                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                }
+                from utils.nitroflare_stats import get_nitroflare_stats
+                nf_stats = get_nitroflare_stats(self.session, self.date_from, self.date_to)
+                stats.update(nf_stats)
 
-                # Pre-flight request to set CSRF randHash
-                self._safe_post(
-                    "https://nitroflare.com/ajax/randHash.php",
-                    data={"randHash": "0"},
-                    headers=headers,
-                )
-
-                url = "https://nitroflare.com/member/ajax/affiliate.php"
-                payload = {
-                    "type": "fetchPPS",
-                    "from": self.date_from,   # YYYY-MM-DD
-                    "to":   self.date_to,     # YYYY-MM-DD
-                }
-
-                resp = self._safe_post(url, data=payload, headers=headers)
-
-                if resp.status_code == 404 or not resp.text.strip():
-                    _LOG.warning("NitroFlare: stats row not found")
-                else:
-                    # The endpoint returns plain <tr> rows, NOT full HTML
-                    soup = BeautifulSoup("<table>%s</table>" % resp.text, "html.parser")
-                    row = soup.select_one("tr")
-                    if not row:
-                        raise RuntimeError("NitroFlare: stats row not found")
-
-                    cells = row.find_all("td")
-
-                    def _num(s):
-                        m = re.search(r"\\d+", s)
-                        return int(m.group()) if m else 0
-
-                    def _money(s):
-                        m = re.search(r"([\\d.]+)\\$?", s)
-                        return float(m.group(1)) if m else 0.0
-
-                    sales_str = cells[1].text
-                    ppd_dl_str = cells[2].text
-                    total_dl_str = cells[3].text
-                    total_rev_str = cells[6].text
-
-                    sales_cnt = _num(sales_str.split("/")[0])
-                    sales_rev = _money(sales_str)
-
-                    unique_dl_cnt = _num(ppd_dl_str.split("/")[0])
-                    unique_dl_rev = _money(ppd_dl_str)
-
-                    total_dl = _num(total_dl_str)
-                    total_rev = _money(total_rev_str)
-
-                    stats.update(
-                        dl=unique_dl_cnt, # Assuming 'total unique downloads' refers to PPD Unique DLs
-                        dl_rev=unique_dl_rev, # Assuming 'revenue from downloads' refers to PPD Unique DLs revenue
-                        sales=sales_cnt,
-                        sales_rev=sales_rev,
-                    )
             # ------- DDDownload & KatFile ---------------------------------------
             elif self.site in {"dddownload", "katfile"}:
                 base = "dddownload.com" if self.site == "dddownload" else "katfile.com"
@@ -239,7 +173,7 @@ class _StatsWorker(QRunnable):
                 rows = self._safe_json(self._safe_get(url))
                 row: Dict[str, Any] = {}
                 if isinstance(rows, list) and rows:
-                    row = next((r for r r in rows if r.get("day") == self.date_from), rows[-1])
+                    row = next((r for r in rows if r.get("day") == self.date_from), rows[-1])
                 elif isinstance(rows, dict):
                     row = rows
                 stats.update(
@@ -252,7 +186,7 @@ class _StatsWorker(QRunnable):
             # ------- KeepLinks ---------------------------------------------------
             elif self.site == "keeplinks":
                 html = self._safe_get("https://www.keeplinks.org/earnings").text
-                m = re.search(r"Today's Earnings</th>.*?<td[^>]*>([\\d.]+)", html, re.S)
+                m = re.search(r"Today's Earnings</th>.*?<td[^>]*>([\d.]+)", html, re.S)
                 today_rev = float(m.group(1)) if m else 0.0
                 stats = {"dl": 0, "dl_rev": today_rev, "sales": 0, "sales_rev": 0.0}
 
@@ -418,82 +352,3 @@ class StatsWidget(QWidget):
                 json.dump(history, fh, ensure_ascii=False, indent=2)
         except Exception as exc:
             _LOG.error("Failed to save stats history: %s", exc, exc_info=False)
-
-
-# New function for Nitroflare scraping
-def scrape_nitroflare_stats(session: requests.Session, date_from: str, date_to: str):
-    stats = {"dl": 0, "dl_rev": 0.0, "sales": 0, "sales_rev": 0.0}
-    try:
-        # Warm-up: ensure cookies/csrf tokens are set
-        session.get(
-            "https://nitroflare.com/member?s=affiliates",
-            timeout=15,
-        )
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": "https://nitroflare.com/member?s=affiliates",
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        }
-
-        # Pre-flight request to set CSRF randHash
-        session.post(
-            "https://nitroflare.com/ajax/randHash.php",
-            data={"randHash": "0"},
-            headers=headers,
-        )
-
-        url = "https://nitroflare.com/member/ajax/affiliate.php"
-        payload = {
-            "type": "fetchPPS",
-            "from": date_from,   # YYYY-MM-DD
-            "to":   date_to,     # YYYY-MM-DD
-        }
-
-        resp = session.post(url, data=payload, headers=headers)
-
-        if resp.status_code == 404 or not resp.text.strip():
-            print("NitroFlare: stats row not found")
-        else:
-            # The endpoint returns plain <tr> rows, NOT full HTML
-            soup = BeautifulSoup("<table>%s</table>" % resp.text, "html.parser")
-            row = soup.select_one("tr")
-            if not row:
-                raise RuntimeError("NitroFlare: stats row not found")
-
-            cells = row.find_all("td")
-
-            def _num(s):
-                m = re.search(r"\\d+", s)
-                return int(m.group()) if m else 0
-
-            def _money(s):
-                m = re.search(r"([\\d.]+)\\$?", s)
-                return float(m.group(1)) if m else 0.0
-
-            sales_str = cells[1].text
-            ppd_dl_str = cells[2].text
-            total_dl_str = cells[3].text
-            total_rev_str = cells[6].text
-
-            sales_cnt = _num(sales_str.split("/")[0])
-            sales_rev = _money(sales_str)
-
-            unique_dl_cnt = _num(ppd_dl_str.split("/")[0])
-            unique_dl_rev = _money(ppd_dl_str)
-
-            total_dl = _num(total_dl_str)
-            total_rev = _money(total_rev_str)
-
-            stats.update(
-                dl=unique_dl_cnt, # Assuming 'total unique downloads' refers to PPD Unique DLs
-                dl_rev=unique_dl_rev, # Assuming 'revenue from downloads' refers to PPD Unique DLs revenue
-                sales=sales_cnt,
-                sales_rev=sales_rev,
-            )
-    except Exception as exc:
-        print(f"Stats fetch failed for Nitroflare: {exc}")
-    return stats
-
-
-
