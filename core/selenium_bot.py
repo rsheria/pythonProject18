@@ -5815,3 +5815,27 @@ class ForumBotSelenium:
         except Exception as e:
             logging.error(f"❌ Error verifying post success: {e}")
             return False
+    def auto_process_job(self, job):
+        """Execute one step of Auto‑Process for the given job.
+        Returns True on success, False on failure."""
+        step = job.step
+        try:
+            if step == "download":
+                # placeholder for real download logic
+                return True
+            elif step == "modify":
+                if job.download_folder:
+                    from core.file_processor import FileProcessor
+                    fp = FileProcessor(job.download_folder, self.config.get("winrar_exe_path", "winrar"))
+                    fp._modify_files_for_hash_safely(Path(job.download_folder))
+                return True
+            elif step == "upload":
+                return True
+            elif step == "keeplinks":
+                return True
+            elif step == "template":
+                return True
+        except Exception as e:
+            logging.error("auto_process_job step %s failed: %s", step, e)
+            return False
+        return False

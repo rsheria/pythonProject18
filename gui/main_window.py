@@ -4,7 +4,7 @@ from workers.upload_worker   import UploadWorker
 from workers.worker_thread   import WorkerThread
 from workers.megathreads_worker import MegaThreadsWorkerThread
 from workers.mega_download_worker import MegaDownloadWorker
-from .settings_widget import SettingsWidget
+from workers.auto_process_worker import AutoProcessWorker
 from downloaders.katfile import KatfileDownloader as KatfileDownloaderAPI
 from PyQt5.QtWidgets import QApplication, QAction
 from config.config import save_configuration
@@ -37,7 +37,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QAbstractItemView, QShortcut, QMenu, QProgressDialog, QDialogButtonBox,
                              QErrorMessage, QDialog, QStyle, QStyledItemDelegate, QStyleOptionViewItem)
 from PyQt5.QtGui import QGuiApplication, QScreen
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread, QObject, QSize, QMutex, QMutexLocker, QDateTime, Q_ARG, QMetaObject
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread, QObject, QSize, QMutex, QMutexLocker, QDateTime, Q_ARG, QMetaObject, QThreadPool
 from PyQt5.QtGui import QIcon, QFont, QPixmap, QStandardItemModel, QStandardItem, QKeySequence, QTextCursor, QBrush, QColor, QPalette
 from .stats_widget import StatsWidget
 # Import modern UI components
@@ -54,6 +54,8 @@ from utils.paths import get_data_folder
 from core.user_manager import get_user_manager
 from core.category_manager import CategoryManager
 from gui.advanced_bbcode_editor import AdvancedBBCodeEditor
+from core.job_manager import JobManager
+from models.job_model import AutoProcessJob
 import os
 import sys
 import json
@@ -207,7 +209,11 @@ class ForumBotGUI(QMainWindow):
             user_manager=self.user_manager
         )
         self.bot.use_backup_rg = self.use_backup_rg
-        
+
+        # Auto-Process infrastructure
+        self.job_manager = JobManager()
+        self.auto_thread_pool = QThreadPool()
+
         # Initialize Rapidgator token from config
         self.bot.rapidgator_token = self.config.get('rapidgator_api_token', '')
         print(f"🤖 DEBUG: Bot initialized successfully: {self.bot is not None}")
@@ -2852,6 +2858,11 @@ class ForumBotGUI(QMainWindow):
         self.proceed_template_button.clicked.connect(self.generate_template_for_selected_thread)
         actions_layout.addWidget(self.proceed_template_button)
 
+        self.auto_process_button = QPushButton("Auto-Process Selected")
+        self.auto_process_button.setIcon(QIcon.fromTheme("system-run"))
+        self.auto_process_button.clicked.connect(self.start_auto_process_selected)
+        actions_layout.addWidget(self.auto_process_button)
+
         threads_management_layout.addWidget(actions_bar)
 
         # --- Threads Table ----------------------------------------------------
@@ -3921,6 +3932,34 @@ class ForumBotGUI(QMainWindow):
             logging.error(f"Error in handle_upload_complete: {e}", exc_info=True)
             QMessageBox.critical(self, "Upload Error", str(e))
 
+    def start_auto_process_selected(self):
+        """Start Auto‑Process pipeline for selected threads."""
+        selected_rows = sorted(set(index.row() for index in self.process_threads_table.selectedIndexes()))
+        if not selected_rows:
+            QMessageBox.warning(self, "Warning", "Please select at least one thread.")
+            return
+
+        for row in selected_rows:
+            title = self.process_threads_table.item(row, 0).text()
+            thread_id = self.process_threads_table.item(row, 2).text()
+            url = self.process_threads_table.item(row, 0).data(Qt.UserRole + 2)
+            job_id = f"{thread_id}-{int(time.time())}"
+            job = AutoProcessJob(job_id=job_id, thread_id=thread_id, title=title, url=url)
+            self.job_manager.add_job(job)
+            worker = AutoProcessWorker(job, self.bot, self.job_manager)
+            self.auto_thread_pool.start(worker)
+
+    def start_auto_process(self, thread_ids):
+        """Public API to start Auto‑Process by thread ids."""
+        rows = []
+        for row in range(self.process_threads_table.rowCount()):
+            tid = self.process_threads_table.item(row, 2).text()
+            if tid in {str(t) for t in thread_ids}:
+                rows.append(row)
+        self.process_threads_table.clearSelection()
+        for r in rows:
+            self.process_threads_table.selectRow(r)
+        self.start_auto_process_selected()
     def setup_upload_progress_bars(self, row):
         """Set up progress bars for each host with proper organization."""
         try:
@@ -4943,6 +4982,7 @@ class ForumBotGUI(QMainWindow):
         
         # Keep existing actions
         view_links_action = menu.addAction("View Links")
+        auto_process_action = menu.addAction("Auto-Process Selected")
         retry_failed_action = menu.addAction("Retry Failed Uploads")
         remove_action = menu.addAction("Remove Selected Thread(s)")
         
@@ -4977,6 +5017,10 @@ class ForumBotGUI(QMainWindow):
             clipboard = QApplication.clipboard()
             clipboard.setText(thread_title)
             self.statusBar().showMessage("Thread title copied to clipboard", 3000)
+
+        elif action == auto_process_action:
+            self.start_auto_process_selected()
+
             
         elif action == view_links_action:
             for row in selected_rows:
