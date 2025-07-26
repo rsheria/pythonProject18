@@ -4032,6 +4032,7 @@ class ForumBotGUI(QMainWindow):
         for r in rows:
             self.process_threads_table.selectRow(r)
         self.start_auto_process_selected()
+
     def setup_upload_progress_bars(self, row):
         """Set up progress bars for each host with proper organization."""
         try:

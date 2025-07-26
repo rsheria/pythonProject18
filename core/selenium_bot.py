@@ -5821,8 +5821,9 @@ class ForumBotSelenium:
         step = job.step
         try:
             if step == "download":
-                download_path = Path(self.download_dir) / "AutoProcess" / str(job.thread_id)
+                download_path = Path(self.download_dir) / sanitize_filename(job.category) / str(job.thread_id)
                 download_path.mkdir(parents=True, exist_ok=True)
+                self.protected_category = job.category
                 self.download_thread(job.title, job.url)
                 job.download_folder = str(download_path)
                 return True

@@ -24,6 +24,9 @@ class AutoProcessWorker(QRunnable):
         self.gui = gui
         self.signals = AutoProcessWorkerSignals()
 
+        # allow easy access to FileProcessor when running outside the GUI thread
+        self.file_processor = getattr(gui, "file_processor", None)
+
     def _update(self, step: str, status: str) -> None:
         self.job.step = step
         self.job.status = status
@@ -46,9 +49,35 @@ class AutoProcessWorker(QRunnable):
 
     def run(self) -> None:
         logging.info("AutoProcessWorker starting job %s", self.job.job_id)
+
+        # prepare bot thread mappings so existing helpers work
+        try:
+            if self.gui:
+                info = (
+                    self.gui.process_threads
+                    .get(self.job.category, {})
+                    .get(self.job.title)
+                )
+                if info:
+                    links = info.get("links", {})
+                    self.bot.thread_links[self.job.title] = links
+                    self.bot.extracted_threads[self.job.title] = (
+                        self.job.url,
+                        info.get("thread_date", ""),
+                        self.job.thread_id,
+                        list(links.keys()),
+                    )
+        except Exception as e:
+            logging.debug("prepare thread data failed: %s", e)
+
+        self.bot.protected_category = self.job.category
+
         while self.job.step != "done" and self.job.status != "error":
             step = self.job.step
-            success = self.bot.auto_process_job(self.job)
+            if step == "template" and self.gui:
+                success = self._generate_template()
+            else:
+                success = self.bot.auto_process_job(self.job)
             if success:
                 if step == "download":
                     self._update("modify", "running")
@@ -71,3 +100,41 @@ class AutoProcessWorker(QRunnable):
         self.manager.update_job(self.job)
         self.signals.finished.emit(self.job.job_id)
         logging.info("AutoProcessWorker finished job %s", self.job.job_id)
+
+    def _generate_template(self) -> bool:
+        """Generate BBCode template using existing GUI helpers."""
+        try:
+            if not self.gui:
+                return False
+            info = (
+                self.gui.process_threads
+                .get(self.job.category, {})
+                .get(self.job.title)
+            )
+            if not info:
+                return False
+
+            keeplinks_url = self.job.keeplinks_url
+            original_bbcode = info.get("bbcode_content", "")
+            if not (keeplinks_url and original_bbcode):
+                return False
+
+            formatted = self.gui.send_bbcode_to_gpt_api(
+                original_bbcode, keeplinks_url, self.job.category
+            )
+            if not formatted:
+                return False
+
+            try:
+                formatted = self.bot.process_images_in_content(formatted)
+            except Exception:
+                pass
+
+            links_block = self.gui.build_links_block(self.job.category, self.job.title)
+            final_bbcode = formatted.strip() + "\n\n" + links_block
+            info["bbcode_content"] = final_bbcode
+            self.gui.save_process_threads_data()
+            return True
+        except Exception as e:
+            logging.error("template generation failed: %s", e)
+            return False
