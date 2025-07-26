@@ -279,7 +279,7 @@ class _StatsWorker(QRunnable):
                     stats["dl_rev"] += daily
                     cur += timedelta(days=1)
 
-                return stats
+
 
         except Exception as exc:  # pragma: no cover
             _LOG.error("Stats fetch failed for %s: %s", self.site, exc, exc_info=False)
