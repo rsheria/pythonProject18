@@ -3912,6 +3912,8 @@ class ForumBotGUI(QMainWindow):
                     self.backup_threads[thread_title] = backup_info
                     self.save_backup_threads_data()
                     self.populate_backup_threads_table()
+                # 9) Trigger UI update so status color is refreshed immediately
+                self.mark_upload_complete(category_name, thread_title)
 
             else:
                 logging.warning(f"Thread '{thread_title}' not found in category '{category_name}' after upload.")
