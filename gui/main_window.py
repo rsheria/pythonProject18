@@ -3932,6 +3932,76 @@ class ForumBotGUI(QMainWindow):
             logging.error(f"Error in handle_upload_complete: {e}", exc_info=True)
             QMessageBox.critical(self, "Upload Error", str(e))
 
+    def apply_auto_process_result(self, job):
+        """Apply links from Auto‑Process job back to process_threads data."""
+        try:
+            category_name = job.category
+            thread_title = job.title
+            thread_id = job.thread_id
+            urls_dict = job.uploaded_links
+            urls_dict['keeplinks'] = job.keeplinks_url
+
+            if category_name in self.process_threads and thread_title in self.process_threads[category_name]:
+                thread_info = self.process_threads[category_name][thread_title]
+
+                rapidgator_links = urls_dict.get('rapidgator', [])
+                backup_rg_urls = urls_dict.get('rapidgator-backup', [])
+                if isinstance(backup_rg_urls, str):
+                    backup_rg_urls = [backup_rg_urls]
+                nitroflare_links = urls_dict.get('nitroflare', [])
+                ddownload_links = urls_dict.get('ddownload', [])
+                katfile_links = urls_dict.get('katfile', [])
+                new_keeplinks = urls_dict.get('keeplinks', '')
+
+                merged_links = {
+                    'rapidgator.net': rapidgator_links,
+                    'nitroflare.com': nitroflare_links,
+                    'ddownload.com': ddownload_links,
+                    'katfile.com': katfile_links,
+                    'rapidgator-backup': backup_rg_urls,
+                    'keeplinks': new_keeplinks,
+                }
+                thread_info['links'] = merged_links
+                versions_list = thread_info.setdefault('versions', [])
+                if versions_list:
+                    versions_list[-1]['links'] = merged_links
+                else:
+                    versions_list.append({
+                        'links': merged_links,
+                        'thread_id': thread_id,
+                        'bbcode_content': thread_info.get('bbcode_content', ''),
+                        'thread_url': thread_info.get('thread_url', ''),
+                    })
+                thread_info['upload_status'] = True
+                versions_list[-1]['upload_status'] = True
+
+                # find row index
+                row_index = None
+                for row in range(self.process_threads_table.rowCount()):
+                    if self.process_threads_table.item(row, 2).text() == thread_id:
+                        row_index = row
+                        break
+                if row_index is not None:
+                    display_links = rapidgator_links or katfile_links
+                    self.process_threads_table.item(row_index, 3).setText("\n".join(display_links))
+                    self.process_threads_table.item(row_index, 4).setText("\n".join(backup_rg_urls))
+                    self.process_threads_table.item(row_index, 5).setText(new_keeplinks)
+
+                self.save_process_threads_data()
+                if backup_rg_urls:
+                    backup_info = self.backup_threads.get(thread_title, {})
+                    backup_info['thread_id'] = thread_id
+                    backup_info['rapidgator_links'] = rapidgator_links
+                    backup_info['rapidgator_backup_links'] = backup_rg_urls
+                    backup_info['keeplinks_link'] = new_keeplinks
+                    backup_info['katfile_links'] = katfile_links
+                    self.backup_threads[thread_title] = backup_info
+                    self.save_backup_threads_data()
+                    self.populate_backup_threads_table()
+                self.mark_upload_complete(category_name, thread_title)
+        except Exception as e:
+            logging.error("apply_auto_process_result failed: %s", e, exc_info=True)
+
     def start_auto_process_selected(self):
         """Start Auto‑Process pipeline for selected threads."""
         selected_rows = sorted(set(index.row() for index in self.process_threads_table.selectedIndexes()))
@@ -3941,12 +4011,14 @@ class ForumBotGUI(QMainWindow):
 
         for row in selected_rows:
             title = self.process_threads_table.item(row, 0).text()
+            category = self.process_threads_table.item(row, 1).text()
             thread_id = self.process_threads_table.item(row, 2).text()
             url = self.process_threads_table.item(row, 0).data(Qt.UserRole + 2)
             job_id = f"{thread_id}-{int(time.time())}"
-            job = AutoProcessJob(job_id=job_id, thread_id=thread_id, title=title, url=url)
+            job = AutoProcessJob(job_id=job_id, thread_id=thread_id, category=category,
+                                title=title, url=url)
             self.job_manager.add_job(job)
-            worker = AutoProcessWorker(job, self.bot, self.job_manager)
+            worker = AutoProcessWorker(job, self.bot, self.job_manager, self)
             self.auto_thread_pool.start(worker)
 
     def start_auto_process(self, thread_ids):

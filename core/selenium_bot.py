@@ -5821,7 +5821,10 @@ class ForumBotSelenium:
         step = job.step
         try:
             if step == "download":
-                # placeholder for real download logic
+                download_path = Path(self.download_dir) / "AutoProcess" / str(job.thread_id)
+                download_path.mkdir(parents=True, exist_ok=True)
+                self.download_thread(job.title, job.url)
+                job.download_folder = str(download_path)
                 return True
             elif step == "modify":
                 if job.download_folder:
@@ -5830,9 +5833,36 @@ class ForumBotSelenium:
                     fp._modify_files_for_hash_safely(Path(job.download_folder))
                 return True
             elif step == "upload":
-                return True
+                from urllib.parse import urlparse
+                uploaded = {}
+                folder = Path(job.download_folder)
+                for f in folder.glob("*"):
+                    if not f.is_file():
+                        continue
+                    result = self.initiate_upload_session(str(f))
+                    if not result:
+                        continue
+                    for url in result.get('uploaded_urls', []):
+                        host = urlparse(url).netloc
+                        uploaded.setdefault(host, []).append(url)
+                    if result.get('backup_rg_url'):
+                        uploaded.setdefault('rapidgator-backup', []).append(result['backup_rg_url'])
+                if uploaded:
+                    job.uploaded_links = uploaded
+                    return True
+                return False
             elif step == "keeplinks":
-                return True
+                urls = []
+                for host, links in job.uploaded_links.items():
+                    if host != 'rapidgator-backup':
+                        urls.extend(links)
+                if not urls:
+                    return False
+                kl = self.send_to_keeplinks(urls)
+                if kl:
+                    job.keeplinks_url = kl
+                    return True
+                return False
             elif step == "template":
                 return True
         except Exception as e:

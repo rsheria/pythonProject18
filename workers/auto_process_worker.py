@@ -16,11 +16,12 @@ class AutoProcessWorkerSignals(QObject):
 class AutoProcessWorker(QRunnable):
     """Background worker to run Auto‑Process pipeline for one job."""
 
-    def __init__(self, job: AutoProcessJob, bot: ForumBotSelenium, manager: JobManager):
+    def __init__(self, job: AutoProcessJob, bot: ForumBotSelenium, manager: JobManager, gui=None):
         super().__init__()
         self.job = job
         self.bot = bot
         self.manager = manager
+        self.gui = gui
         self.signals = AutoProcessWorkerSignals()
 
     def _update(self, step: str, status: str) -> None:
@@ -59,6 +60,11 @@ class AutoProcessWorker(QRunnable):
                     self._update("template", "running")
                 elif step == "template":
                     self._update("done", "posted")
+                    if self.gui:
+                        try:
+                            self.gui.apply_auto_process_result(self.job)
+                        except Exception as e:
+                            logging.error("Failed to apply auto process result: %s", e)
             else:
                 if not self._handle_failure(f"failed_{step}"):
                     return

@@ -7,6 +7,7 @@ class AutoProcessJob:
     """Persistent job state for Auto‑Process pipeline."""
     job_id: str
     thread_id: str
+    category: str
     title: str
     url: str
     step: str = "download"
