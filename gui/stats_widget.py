@@ -10,7 +10,8 @@ import logging
 import os
 import re
 import warnings
-from datetime import date
+from datetime import date, timedelta
+from collections import defaultdict
 from decimal import Decimal
 from typing import Any, Dict, List
 from bs4 import BeautifulSoup
@@ -121,7 +122,16 @@ class _StatsWorker(QRunnable):
             insecure_url = url.replace("https://", "http://", 1)
             return self.session.post(insecure_url, timeout=20, verify=False, **kw)
 
+    def _parse_keeplinks_daily(self, html: str) -> dict[int, float]:
+        """Extract {day: revenue} mapping from KeepLinks graph HTML."""
+        cats = re.search(r"categories\s*:\s*\[([^\]]+)\]", html)
+        data = re.search(r"data\s*:\s*\[([^\]]+)\]", html)
+        if not (cats and data):
+            return {}
 
+        days = [int(d.strip().strip("'")) for d in cats.group(1).split(",")]
+        values = [float(v) for v in data.group(1).split(",")]
+        return dict(zip(days, values))
     # ------------------------- main run ---------------------------------- #
     def run(self) -> None:  # noqa: D401
         stats: Dict[str, Any] = {"dl": 0, "dl_rev": 0.0, "sales": 0, "sales_rev": 0.0}
@@ -241,10 +251,35 @@ class _StatsWorker(QRunnable):
 
             # ------- KeepLinks ---------------------------------------------------
             elif self.site == "keeplinks":
-                html = self._safe_get("https://www.keeplinks.org/earnings").text
-                m = re.search(r"Today's Earnings</th>.*?<td[^>]*>([\d.]+)", html, re.S)
-                today_rev = float(m.group(1)) if m else 0.0
-                stats = {"dl": 0, "dl_rev": today_rev, "sales": 0, "sales_rev": 0.0}
+                stats = {"dl": 0, "dl_rev": 0.0, "sales": 0, "sales_rev": 0.0}
+
+                start = date.fromisoformat(self.date_from)
+                end = date.fromisoformat(self.date_to)
+
+                fetched: dict[tuple[int, int], dict[int, float]] = {}
+
+                cur = start
+                while cur <= end:
+                    ym = (cur.year, cur.month)
+                    if ym not in fetched:
+                        url = (
+                            "https://www.keeplinks.org/newgraph.php"
+                            f"?act=dailyearnings&month={ym[1]:02d}&year={ym[0]}"
+                        )
+                        resp = self._safe_get(
+                            url,
+                            headers={
+                                "User-Agent": "Mozilla/5.0",
+                                "Accept-Language": "en-US,en;q=0.9",
+                            },
+                        )
+                        fetched[ym] = self._parse_keeplinks_daily(resp.text)
+
+                    daily = fetched[ym].get(cur.day, 0.0)
+                    stats["dl_rev"] += daily
+                    cur += timedelta(days=1)
+
+                return stats
 
         except Exception as exc:  # pragma: no cover
             _LOG.error("Stats fetch failed for %s: %s", self.site, exc, exc_info=False)
