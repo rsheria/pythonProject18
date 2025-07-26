@@ -72,11 +72,11 @@ from utils.paths import get_data_folder
 # import the DownloadWorker AGAIN if needed
 
 class StatusColorDelegate(QStyledItemDelegate):
-    """Paints thread status cells with appropriate colors based on status."""
+    """Color only the thread title cell based on status."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.status_colors = {}  # Will be updated in init_theme_colors
+        self.status_colors = {}
         self.init_theme_colors()
 
     def init_theme_colors(self):
@@ -97,61 +97,38 @@ class StatusColorDelegate(QStyledItemDelegate):
         self.init_theme_colors()
 
     def paint(self, painter, option, index):
-        """Paint the item with the appropriate background and text colors."""
-        # Get status from item data
+        """Custom painting used only for the title column."""
+        if index.column() != 0:
+            super().paint(painter, option, index)
+            return
         status = index.data(Qt.UserRole) or 'status-pending'
 
         if status in self.status_colors:
-            # Initialize style options
-            opt = QStyleOptionViewItem(option)
-            self.initStyleOption(opt, index)  # Pass index, not option
-            
-            # Get colors for this status
+
             bg_color = QColor(self.status_colors[status])
-            is_highlighted = option.state & QStyle.State_Selected
-            is_hovered = option.state & QStyle.State_MouseOver
 
-            # Set background color
-            if is_highlighted:
-                # Use theme's selection color when selected
-                bg_color = QColor(theme_manager.get_current_theme().PRIMARY)
-            elif is_hovered:
-                # Lighten the color on hover
-                bg_color = bg_color.lighter(110)
 
-            # Set text color based on background brightness
-            bg_brightness = (bg_color.red() * 299 +
-                           bg_color.green() * 587 +
-                           bg_color.blue() * 114) / 1000
+            if option.state & QStyle.State_Selected:
+                bg_color = bg_color.darker(110)
 
-            text_color = (QColor(theme_manager.get_current_theme().TEXT_ON_PRIMARY)
-                        if bg_brightness < 128 or is_highlighted
-                        else QColor(theme_manager.get_current_theme().TEXT_PRIMARY))
-
-            # Apply colors
-            opt.backgroundBrush = QBrush(bg_color)
-            opt.palette.setColor(QPalette.Text, text_color)
-            opt.palette.setColor(QPalette.HighlightedText, text_color)
+            text_color = QColor(theme_manager.get_current_theme().TEXT_ON_PRIMARY)
 
             # Fill background
             painter.save()
             painter.fillRect(option.rect, bg_color)
 
             # Draw the text
-            text_rect = option.rect.adjusted(4, 0, -4, 0)  # Add some padding
-            text = opt.text
+            text_rect = option.rect.adjusted(4, 0, -4, 0)
+            text = index.data(Qt.DisplayRole)
             text_flags = Qt.AlignVCenter | Qt.AlignLeft | Qt.TextSingleLine
 
-            # Calculate text width for elision
-            text_width = opt.fontMetrics.horizontalAdvance(text)
-            if text_width > text_rect.width():
-                text = opt.fontMetrics.elidedText(text, Qt.ElideRight, text_rect.width())
+            if option.fontMetrics.horizontalAdvance(text) > text_rect.width():
+                text = option.fontMetrics.elidedText(text, Qt.ElideRight, text_rect.width())
 
             painter.setPen(text_color)
             painter.drawText(text_rect, text_flags, text)
             painter.restore()
         else:
-            # Fallback to default painting
             super().paint(painter, option, index)
 class LinkStatusDelegate(QStyledItemDelegate):
     """Paint Rapidgator link cells green or red based on alive/dead status."""
@@ -5553,29 +5530,22 @@ class ForumBotGUI(QMainWindow):
             thread_id_item.setData(Qt.UserRole + 1, status_str)
             self.process_threads_table.setItem(row_position, 2, thread_id_item)
 
-            # Apply background color for status-based styling using DIRECT STYLESHEET (more powerful than CSS)
+            # Apply background color for status-based styling
             if status_class:
-                # Define color mapping for different statuses - STRONGER COLORS for dark theme
                 status_colors = {
-                    'status-pending': "#404040",          # Dark gray - pending
-                    'status-downloaded': "#0066CC",      # Strong blue - downloaded
-                    'status-uploaded': "#FF8C00",        # Dark orange - uploaded
-                    'status-posted': "#32CD32"           # Lime green - posted/completed
+                    'status-pending': "#404040",
+                    'status-downloaded': "#0066CC",
+                    'status-uploaded': "#FF8C00",
+                    'status-posted': "#32CD32"
                 }
 
-                # Get the background color for this status
                 bg_color = status_colors.get(status_class, "#FFFFFF")
                 text_color = "#FFFFFF" if status_class != 'status-pending' else "#CCCCCC"
 
-                # Apply DIRECT STYLESHEET to each item (overrides ALL CSS)
                 item_stylesheet = f"background-color: {bg_color} !important; color: {text_color} !important;"
 
-                # Apply to all items in this row with DIRECT stylesheet
-                title_item.setData(Qt.UserRole + 1, item_stylesheet)  # Store for potential future use
-                category_item.setData(Qt.UserRole + 1, item_stylesheet)
-                thread_id_item.setData(Qt.UserRole + 1, item_stylesheet)
+                title_item.setData(Qt.UserRole + 1, item_stylesheet)
 
-                # ALSO apply setBackground as backup
                 bg_qcolor = QColor(bg_color)
                 text_qcolor = QColor(text_color)
                 background_brush = QBrush(bg_qcolor)
@@ -5583,10 +5553,7 @@ class ForumBotGUI(QMainWindow):
 
                 title_item.setBackground(background_brush)
                 title_item.setForeground(text_brush)
-                category_item.setBackground(background_brush)
-                category_item.setForeground(text_brush)
-                thread_id_item.setBackground(background_brush)
-                thread_id_item.setForeground(text_brush)
+
 
                 print(f"🎨 FORCE APPLIED: {status_class} -> BG: {bg_color}, Text: {text_color} on row {row_position}")
                 logging.info(f"🎨 FORCE STYLING: {thread_title} -> {status_class} -> BG: {bg_color}")
@@ -5607,10 +5574,8 @@ class ForumBotGUI(QMainWindow):
 
             rapidgator_text = "\n".join(rapidgator_links)
             rapidgator_item = QTableWidgetItem(rapidgator_text)
-            rapidgator_item.setData(Qt.UserRole, status_str)  # Store status string for filtering
-            rapidgator_item.setData(Qt.UserRole + 1, status_class)  # Store status class for styling
-            if status_class:
-                rapidgator_item.setBackground(background_brush)
+            rapidgator_item.setData(Qt.UserRole, status_str)
+            rapidgator_item.setData(Qt.UserRole + 1, status_class)
             self.process_threads_table.setItem(row_position, 3, rapidgator_item)
 
             # Rapidgator Backup Link
@@ -5625,8 +5590,7 @@ class ForumBotGUI(QMainWindow):
             rg_backup_item = QTableWidgetItem(rg_backup_text)
             rg_backup_item.setData(Qt.UserRole, status_str)
             rg_backup_item.setData(Qt.UserRole + 1, status_class)
-            if status_class:
-                rg_backup_item.setBackground(background_brush)
+
             self.process_threads_table.setItem(row_position, 4, rg_backup_item)
 
             # Keeplinks Link
@@ -5634,10 +5598,8 @@ class ForumBotGUI(QMainWindow):
             if isinstance(keeplinks_link, list):
                 keeplinks_link = "\n".join(keeplinks_link)
             keeplinks_item = QTableWidgetItem(keeplinks_link)
-            keeplinks_item.setData(Qt.UserRole, status_str)  # Store status string for filtering
-            keeplinks_item.setData(Qt.UserRole + 1, status_class)  # Store status class for styling
-            if status_class:
-                keeplinks_item.setBackground(background_brush)
+            keeplinks_item.setData(Qt.UserRole, status_str)
+            keeplinks_item.setData(Qt.UserRole + 1, status_class)
             self.process_threads_table.setItem(row_position, 5, keeplinks_item)
 
 
