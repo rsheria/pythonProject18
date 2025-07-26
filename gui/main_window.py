@@ -103,33 +103,40 @@ class StatusColorDelegate(QStyledItemDelegate):
             return
         status = index.data(Qt.UserRole) or 'status-pending'
 
-        if status in self.status_colors:
+        theme = theme_manager.get_current_theme()
 
-            bg_color = QColor(self.status_colors[status])
+        bg_color = QColor(self.status_colors.get(status, theme.SURFACE_VARIANT))
 
-
-            if option.state & QStyle.State_Selected:
-                bg_color = bg_color.darker(110)
-
-            text_color = QColor(theme_manager.get_current_theme().TEXT_ON_PRIMARY)
-
-            # Fill background
-            painter.save()
-            painter.fillRect(option.rect, bg_color)
-
-            # Draw the text
-            text_rect = option.rect.adjusted(4, 0, -4, 0)
-            text = index.data(Qt.DisplayRole)
-            text_flags = Qt.AlignVCenter | Qt.AlignLeft | Qt.TextSingleLine
-
-            if option.fontMetrics.horizontalAdvance(text) > text_rect.width():
-                text = option.fontMetrics.elidedText(text, Qt.ElideRight, text_rect.width())
-
-            painter.setPen(text_color)
-            painter.drawText(text_rect, text_flags, text)
-            painter.restore()
+        # --- Selection & Hover Handling -------------------------------------
+        if option.state & QStyle.State_Selected:
+            # Use the theme primary color for selected rows
+            bg_color = QColor(theme.PRIMARY)
+            text_color = QColor(theme.TEXT_ON_PRIMARY)
         else:
-            super().paint(painter, option, index)
+            # Hover state uses sidebar hover color
+            if option.state & QStyle.State_MouseOver:
+                bg_color = QColor(theme.SIDEBAR_ITEM_HOVER)
+
+            # Text color should respect theme mode
+            if theme_manager.theme_mode == 'light':
+                text_color = QColor(theme.TEXT_PRIMARY)
+            else:
+                text_color = QColor(theme.TEXT_ON_PRIMARY)
+
+        # --------------------------------------------------------------------
+        painter.save()
+        painter.fillRect(option.rect, bg_color)
+
+        text_rect = option.rect.adjusted(4, 0, -4, 0)
+        text = index.data(Qt.DisplayRole)
+        text_flags = Qt.AlignVCenter | Qt.AlignLeft | Qt.TextSingleLine
+
+        if option.fontMetrics.horizontalAdvance(text) > text_rect.width():
+            text = option.fontMetrics.elidedText(text, Qt.ElideRight, text_rect.width())
+
+        painter.setPen(text_color)
+        painter.drawText(text_rect, text_flags, text)
+        painter.restore()
 class LinkStatusDelegate(QStyledItemDelegate):
     """Paint Rapidgator link cells green or red based on alive/dead status."""
 
@@ -2217,6 +2224,8 @@ class ForumBotGUI(QMainWindow):
         # **New Shortcuts for Process Threads**
         QShortcut(QKeySequence("Ctrl+D"), self, self.start_download_operation)
         QShortcut(QKeySequence("Ctrl+U"), self, self.upload_selected_process_threads)
+        # Allow selecting all process threads using Ctrl+A when focus is on the table
+        QShortcut(QKeySequence("Ctrl+A"), self.process_threads_table, self.process_threads_table.selectAll)
 
     def show_category_context_menu(self, position):
         """Show context menu for category tree."""
@@ -5516,7 +5525,8 @@ class ForumBotGUI(QMainWindow):
             title_item.setData(Qt.UserRole, status_class)  # ← store CSS class here
             title_item.setData(Qt.UserRole + 1, status_str)  # ← if you still need string for filtering
             title_item.setData(Qt.UserRole + 2, thread['thread_url'])  # Store URL in different role
-            title_item.setForeground(QColor(100, 149, 237))  # Cornflower blue - more visible in dark mode
+            title_color = QColor(theme_manager.get_current_theme().PRIMARY)
+            title_item.setForeground(title_color)
             title_item.setToolTip(f"Click to open thread in browser\n{status_tooltip}")
             self.process_threads_table.setItem(row_position, 0, title_item)
 
