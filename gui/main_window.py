@@ -2942,7 +2942,7 @@ class ForumBotGUI(QMainWindow):
         # --- Threads Table ----------------------------------------------------
         self.process_threads_table = QTableWidget()
         self.process_threads_table.setAlternatingRowColors(True)
-        self.process_threads_table.setColumnCount(7)
+        self.process_threads_table.setColumnCount(8)
         self.process_threads_table.setHorizontalHeaderLabels([
             "Thread Title",
             "Category",
@@ -2951,6 +2951,7 @@ class ForumBotGUI(QMainWindow):
             "RG Backup Link",
             "Keeplinks Link",
             "Password",
+            "Author",
         ])
 
         # Table appearance & behavior
@@ -2967,11 +2968,11 @@ class ForumBotGUI(QMainWindow):
         header.setFixedHeight(30)
 
         # Column widths and resize modes
-        widths = {0: 300, 1: 150, 2: 100, 3: 200, 4: 200, 5: 200, 6: 120}
+        widths = {0: 300, 1: 150, 2: 100, 3: 200, 4: 200, 5: 200, 6: 120, 7: 150}
         for col, w in widths.items():
             self.process_threads_table.setColumnWidth(col, w)
         header.setSectionResizeMode(0, QHeaderView.Stretch)
-        for col in (1, 2, 3, 4, 5, 6):
+        for col in (1, 2, 3, 4, 5, 6, 7):
             header.setSectionResizeMode(col, QHeaderView.Interactive)
 
         # Sorting & delegate & context menu
@@ -4237,7 +4238,7 @@ class ForumBotGUI(QMainWindow):
         try:
             # First ensure we have the correct base columns
             current_cols = self.process_threads_table.columnCount()
-            base_cols = 7  # Thread Title, Category, Thread ID, Rapidgator Links, RG Backup Link, Keeplinks Link, Password
+            base_cols = 8  # Thread Title, Category, Thread ID, Rapidgator Links, RG Backup Link, Keeplinks Link, Password, Author
 
             # Add upload progress columns if they don't exist
             progress_cols = [
@@ -4308,7 +4309,7 @@ class ForumBotGUI(QMainWindow):
             table = self.process_threads_table
 
             # Remove progress columns from right to left
-            while table.columnCount() > 7:  # Keep the original columns
+            while table.columnCount() > 8:  # Keep the original columns
                 table.removeColumn(table.columnCount() - 1)
 
             # Adjust column sizes
@@ -5600,6 +5601,7 @@ class ForumBotGUI(QMainWindow):
                 links_dict = thread_info.get('links', {})
                 has_known_hosts = thread_info.get('has_known_hosts', False)
                 html_content = thread_info.get('html_content', '')
+                author = thread_info.get('author', '')
 
                 # Skip if any crucial info is missing
                 if not all([thread_url, thread_title, thread_id]):
@@ -5647,7 +5649,8 @@ class ForumBotGUI(QMainWindow):
                     'thread_id': thread_id,
                     'file_hosts': file_hosts,
                     'links': normalized_links,
-                    'bbcode_content': bbcode_content
+                    'bbcode_content': bbcode_content,
+                    'author': author
                 }
 
                 # Store in process_threads: versions + top-level
@@ -5655,7 +5658,8 @@ class ForumBotGUI(QMainWindow):
                     'versions': [version_data],
                     'bbcode_content': bbcode_content,
                     'links': normalized_links,
-                    'thread_url': thread_url
+                    'thread_url': thread_url,
+                    'author': author
                 }
 
                 # Mark thread_id as processed (so we don't re-fetch in the same session)
@@ -5739,8 +5743,12 @@ class ForumBotGUI(QMainWindow):
                     html_content = self.bot.get_page_source(thread_url)
                     if html_content:
                         bbcode_content = self.html_to_bbcode(html_content)
+                        soup = BeautifulSoup(html_content, 'html.parser')
+                        author_el = soup.select_one('td.alt2 a.bigusername span')
+                        author = author_el.get_text(strip=True) if author_el else ''
                     else:
                         bbcode_content = "Could not fetch content."
+                        author = ''
 
                     # Add to Process Threads with Links and BBCode right away
                     self.process_threads[category_name][thread_title] = {
@@ -5749,7 +5757,8 @@ class ForumBotGUI(QMainWindow):
                         'thread_id': thread_id,
                         'file_hosts': file_hosts,
                         'links': normalized_links,
-                        'bbcode_content': bbcode_content  # Ensure BBCode is saved immediately
+                        'bbcode_content': bbcode_content,  # Ensure BBCode is saved immediately
+                        'author': author
                     }
 
                     # Mark thread as processed
@@ -5824,17 +5833,18 @@ class ForumBotGUI(QMainWindow):
                     'download_status': download_status,
                     'upload_status': upload_status,
                     'post_status': post_status,
-                    'password': thread_info.get('password', '')
+                    'password': thread_info.get('password', ''),
+                    'author': thread_info.get('author', '')
                 })
 
         # Sort threads by date if available (descending)
         flat_threads.sort(key=lambda x: x['thread_date'], reverse=True)
 
-        self.process_threads_table.setColumnCount(7)
+        self.process_threads_table.setColumnCount(8)
         self.process_threads_table.setHorizontalHeaderLabels([
             "Thread Title", "Category", "Thread ID",
             "Rapidgator Links", "RG Backup Link", "Keeplinks Link",
-            "Password"
+            "Password", "Author"
         ])
 
         for thread in flat_threads:
@@ -5990,6 +6000,13 @@ class ForumBotGUI(QMainWindow):
             password_item.setData(Qt.UserRole, status_str)
             password_item.setData(Qt.UserRole + 1, status_class)
             self.process_threads_table.setItem(row_position, 6, password_item)
+
+            # Author column
+            author_text = thread.get('author', '')
+            author_item = QTableWidgetItem(author_text)
+            author_item.setData(Qt.UserRole, status_str)
+            author_item.setData(Qt.UserRole + 1, status_class)
+            self.process_threads_table.setItem(row_position, 7, author_item)
 
         self.process_threads_table.resizeColumnsToContents()
         self.process_threads_table.resizeRowsToContents()

@@ -4701,7 +4701,7 @@ class ForumBotSelenium:
                     # IMMEDIATE PROCESSING - Extract file hosts and links RIGHT NOW
                     try:
                         logging.debug(f"🔍 Processing thread URL: {thread_url}")
-                        file_hosts, links_dict, html_content = self.extract_file_hosts(thread_url)
+                        file_hosts, links_dict, html_content, author = self.extract_file_hosts(thread_url)
                         
                         # Create thread data structure with HTML content to avoid double visits
                         thread_data = {
@@ -4711,7 +4711,8 @@ class ForumBotSelenium:
                             'file_hosts': file_hosts,
                             'links': links_dict,
                             'has_known_hosts': bool(file_hosts),
-                            'html_content': html_content  # Include HTML to avoid double visit
+                            'html_content': html_content,  # Include HTML to avoid double visit
+                            'author': author
                         }
                         
                         # Store in extracted_threads
@@ -4784,7 +4785,7 @@ class ForumBotSelenium:
                 logging.info(f"🔍 Processing thread: '{thread_title}'...")
                 
                 # Extract file hosts and links from this thread
-                file_hosts, links_dict = self.extract_file_hosts(thread_url)
+                file_hosts, links_dict, _, author = self.extract_file_hosts(thread_url)
                 
                 # Create thread data structure - include ALL threads that matched date filter
                 thread_data = {
@@ -4793,7 +4794,8 @@ class ForumBotSelenium:
                     'thread_url': thread_url,
                     'file_hosts': file_hosts,
                     'links': links_dict,
-                    'has_known_hosts': bool(file_hosts)  # Flag to indicate if known hosts were found
+                    'has_known_hosts': bool(file_hosts),  # Flag to indicate if known hosts were found
+                    'author': author
                 }
                 # Store in dictionary with thread_id as key (original structure)
                 self.extracted_threads[thread_id] = thread_data
@@ -4968,9 +4970,15 @@ class ForumBotSelenium:
 
     def extract_file_hosts(self, thread_url):
         """
-        Navigates into the thread URL and extracts file hosts and associated links used within the thread.
-        Extracts links from the main post first, and processes replies only if no known links are found.
-        Also returns HTML content to avoid double visits.
+        Navigate to the given thread URL and extract file hosts and links.
+        The method also grabs the raw HTML content and the author's name so
+        that callers can store them without re-visiting the page.
+
+        Returns:
+            tuple[list[str], dict, str, str]:
+                A tuple containing the list of file hosts found, a dictionary of
+                links grouped by host, the raw HTML content of the page, and the
+                thread author's name.
         """
         try:
             logging.info(f"Navigating to thread URL: {thread_url}")
@@ -4980,6 +4988,10 @@ class ForumBotSelenium:
             # Store HTML content to avoid double visits
             html_content = self.driver.page_source
             soup = BeautifulSoup(html_content, 'html.parser')
+
+            # Extract thread author from the first post
+            author_elem = soup.select_one('td.alt2 a.bigusername span')
+            author = author_elem.get_text(strip=True) if author_elem else ''
 
             # Initialize containers
             file_hosts_found = set()
@@ -4999,7 +5011,7 @@ class ForumBotSelenium:
             # If known links are found in the main post, stop further processing
             if file_hosts_found:
                 logging.info(f"Known links found in main post. Skipping reply and keeplinks.org processing.")
-                return list(file_hosts_found), links_dict, html_content
+                return list(file_hosts_found), links_dict, html_content, author
 
             # If no known links found in main post, proceed to process replies
             for i in range(1, len(all_posts)):
@@ -5012,7 +5024,7 @@ class ForumBotSelenium:
                     if file_hosts_found:
                         logging.info(
                             f"Known links found in replies. Skipping remaining replies and keeplinks.org processing.")
-                        return list(file_hosts_found), links_dict, html_content
+                        return list(file_hosts_found), links_dict, html_content, author
 
             # Add keeplinks as a normal host if no other hosts found
             if not file_hosts_found and keeplinks_urls:
@@ -5023,11 +5035,11 @@ class ForumBotSelenium:
             for host in links_dict:
                 links_dict[host] = list(set(links_dict[host]))
 
-            return list(file_hosts_found), links_dict, html_content
+            return list(file_hosts_found), links_dict, html_content, author
 
         except Exception as e:
             self.handle_exception(f"extracting file hosts and links from thread '{thread_url}'", e)
-            return [], {}, ""
+            return [], {}, "", ""
 
     def extract_links_from_post(self, post, file_hosts_found, links_dict, keeplinks_urls):
         """
