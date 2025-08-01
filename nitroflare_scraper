@@ -1,0 +1,133 @@
+import requests
+from bs4 import BeautifulSoup
+import re
+from datetime import date
+
+def scrape_nitroflare_stats(session: requests.Session, date_from: str, date_to: str):
+    stats = {"dl": 0, "dl_rev": 0.0, "sales": 0, "sales_rev": 0.0}
+    try:
+        # Warm-up: ensure cookies/csrf tokens are set
+        session.get(
+            "https://nitroflare.com/member?s=affiliates",
+            timeout=15,
+        )
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": "https://nitroflare.com/member?s=affiliates",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        }
+
+        # Pre-flight request to set CSRF randHash
+        session.post(
+            "https://nitroflare.com/ajax/randHash.php",
+            data={"randHash": "0"},
+            headers=headers,
+        )
+
+        url = "https://nitroflare.com/member/ajax/affiliate.php"
+        payload = {
+            "type": "fetchPPS",
+            "from": date_from,   # YYYY-MM-DD
+            "to":   date_to,     # YYYY-MM-DD
+        }
+
+        resp = session.post(url, data=payload, headers=headers)
+
+        if resp.status_code == 404 or not resp.text.strip():
+            print("NitroFlare: stats row not found")
+        else:
+            # The endpoint returns plain <tr> rows, NOT full HTML
+            soup = BeautifulSoup("<table>%s</table>" % resp.text, "html.parser")
+            row = soup.select_one("tr")
+            if not row:
+                raise RuntimeError("NitroFlare: stats row not found")
+
+            cells = row.find_all("td")
+
+            def _num(s):
+                m = re.search(r"\\d+", s)
+                return int(m.group()) if m else 0
+
+            def _money(s):
+                m = re.search(r"([\\d.]+)\\$?", s)
+                return float(m.group(1)) if m else 0.0
+
+            # Based on the screenshot and analysis:
+            # cells[1] is 'Sales / Rebills' (e.g., '0 / $0.000 USD')
+            # cells[2] is 'PPD Unique DLs' (e.g., '5 / $0.015 USD')
+            # cells[3] is 'Total DLs' (e.g., '7')
+            # cells[6] is 'Total' (e.g., '$0.015 USD')
+
+            sales_str = cells[1].text
+            ppd_dl_str = cells[2].text
+            total_dl_str = cells[3].text
+            total_rev_str = cells[6].text
+
+            sales_cnt = _num(sales_str.split("/")[0])
+            sales_rev = _money(sales_str)
+
+            unique_dl_cnt = _num(ppd_dl_str.split("/")[0])
+            unique_dl_rev = _money(ppd_dl_str)
+
+            total_dl = _num(total_dl_str)
+            total_rev = _money(total_rev_str)
+
+            # The user wants 'total unique downloads' and 'revenue from downloads'
+            # 'total unique downloads' seems to be 'PPD Unique DLs'
+            # 'revenue from downloads' is not explicitly given, but can be derived.
+            # The original code calculated dl_rev as max(total_rev - sales_rev, 0.0)
+            # This seems reasonable if sales_rev is purely from sales and total_rev is overall.
+            # However, the PPD Unique DLs also has a revenue component.
+            # Let's assume 'revenue from downloads' refers to the PPD Unique DLs revenue.
+
+            stats.update(
+                dl=unique_dl_cnt, # Assuming 'total unique downloads' refers to PPD Unique DLs
+                dl_rev=unique_dl_rev, # Assuming 'revenue from downloads' refers to PPD Unique DLs revenue
+                sales=sales_cnt,
+                sales_rev=sales_rev,
+            )
+    except Exception as exc:
+        print(f"Stats fetch failed for Nitroflare: {exc}")
+    return stats
+
+# Example usage (for testing purposes):
+if __name__ == "__main__":
+    # This part would typically be handled by the main application (stats_widget.py)
+    # For testing, you would need a valid session with Nitroflare.
+    # This is a placeholder and will not work without a real session.
+    class MockSession:
+        def get(self, url, **kwargs):
+            print(f"MockSession GET: {url}")
+            return requests.Response()
+
+        def post(self, url, data, **kwargs):
+            print(f"MockSession POST: {url} with data {data}")
+            # Simulate a response with some data for testing
+            if "affiliate.php" in url:
+                # Example HTML response for a single row
+                mock_html = """
+                <tr>
+                    <td>2025-07-25</td>
+                    <td>0 / $0.000 USD</td>
+                    <td>5 / $0.015 USD</td>
+                    <td>7</td>
+                    <td>0 / $0.000 USD</td>
+                    <td>0 / $0.000 USD</td>
+                    <td>$0.015 USD</td>
+                </tr>
+                """
+                resp = requests.Response()
+                resp.status_code = 200
+                resp._content = mock_html.encode("utf-8")
+                return resp
+            resp = requests.Response()
+            resp.status_code = 200
+            return resp
+
+    mock_session = MockSession()
+    today = date.today().isoformat()
+    stats = scrape_nitroflare_stats(mock_session, today, today)
+    print(f"Scraped Stats: {stats}")
+
+
