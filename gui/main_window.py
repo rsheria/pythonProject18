@@ -5708,9 +5708,23 @@ class ForumBotGUI(QMainWindow):
                 # Use stored HTML content to avoid double visit
                 if html_content:
                     bbcode_content = self.html_to_bbcode(html_content)
-                    logging.info(f"✅ Using stored HTML content for thread '{thread_title}' - NO DOUBLE VISIT!")
+                    logging.info(
+                        f"✅ Using stored HTML content for thread '{thread_title}' - NO DOUBLE VISIT!"
+                    )
                 else:
                     bbcode_content = "Could not fetch content."
+
+                original_bbcode = bbcode_content
+
+                converted = templab_manager.convert(
+                    {
+                        "category": category_name,
+                        "author": author,
+                        "bbcode_original": original_bbcode,
+                    }
+                )
+                if converted:
+                    bbcode_content = converted
 
                 # Normalize links if any
                 links = links_dict  # Use the links from the new thread structure
@@ -5724,16 +5738,24 @@ class ForumBotGUI(QMainWindow):
                     'file_hosts': file_hosts,
                     'links': normalized_links,
                     'bbcode_content': bbcode_content,
-                    'author': author
+                    'bbcode_original': original_bbcode,
+                    'author': author,
+                    'title': thread_title,
+                    'category': category_name,
                 }
+                try:
+                    templab_manager.store_post(author, category_name, version_data)
+                except Exception as exc:
+                    logging.error(f"Failed to store post for templab: {exc}")
 
                 # Store in process_threads: versions + top-level
                 self.process_threads[category_name][thread_title] = {
                     'versions': [version_data],
                     'bbcode_content': bbcode_content,
+                    'bbcode_original': original_bbcode,
                     'links': normalized_links,
                     'thread_url': thread_url,
-                    'author': author
+                    'author': author,
                 }
 
                 # Mark thread_id as processed (so we don't re-fetch in the same session)
