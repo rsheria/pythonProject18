@@ -6,7 +6,7 @@ from workers.megathreads_worker import MegaThreadsWorkerThread
 from workers.mega_download_worker import MegaDownloadWorker
 from workers.auto_process_worker import AutoProcessWorker
 from downloaders.katfile import KatfileDownloader as KatfileDownloaderAPI
-from PyQt5.QtWidgets import QApplication, QAction
+from PyQt5.QtWidgets import QApplication, QAction, QPlainTextEdit
 from config.config import save_configuration
 from .themes import theme_manager, style_manager
 from pathlib import Path
@@ -95,7 +95,7 @@ from urllib.parse import urlparse, urlunparse
 from PyQt5.QtWidgets import QProgressBar
 from PyQt5.QtWidgets import QMessageBox as QtMessageBox
 from utils.paths import get_data_folder
-
+import templab_manager
 # import the DownloadWorker AGAIN if needed
 class StatusBarMessageBox:
     """Replacement for QMessageBox that writes messages to the status bar."""
@@ -845,6 +845,7 @@ class ForumBotGUI(QMainWindow):
         self.sidebar.add_item("Backup", "💾")
         self.sidebar.add_item("Process Threads", "⚡")
         self.sidebar.add_item("Megathreads", "🗂️")
+        self.sidebar.add_item("Template Lab", "🧪")
         self.sidebar.add_item("Settings", "⚙️")
         
         # Connect sidebar signals
@@ -865,6 +866,7 @@ class ForumBotGUI(QMainWindow):
         self.init_backup_view()
         self.init_process_threads_view()
         self.init_megathreads_view()  # Initialize the new Megathreads view
+        self.init_template_lab_view()
         self.init_settings_view()  # Initialize the new Settings view
 
         # Right Sidebar for Login with modern styling
@@ -1195,6 +1197,72 @@ class ForumBotGUI(QMainWindow):
         # Expand all to show the versions clearly
         self.megathreads_tree.expandAll()
 
+    def init_template_lab_view(self):
+        """Initialize the Template Lab editor tab."""
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(5, 5, 5, 5)
+
+        # Tree on the left
+        self.templab_tree = QTreeWidget()
+        self.templab_tree.setHeaderHidden(True)
+        self.templab_tree.itemClicked.connect(self.on_templab_tree_item_clicked)
+        layout.addWidget(self.templab_tree)
+
+        # Right side splitter
+        right_splitter = QSplitter(Qt.Vertical)
+        layout.addWidget(right_splitter)
+
+        top_splitter = QSplitter(Qt.Horizontal)
+        right_splitter.addWidget(top_splitter)
+
+        # Unified template editor
+        template_widget = QWidget()
+        tpl_layout = QVBoxLayout(template_widget)
+        self.template_edit = QPlainTextEdit()
+        tpl_layout.addWidget(self.template_edit)
+        tpl_btns = QHBoxLayout()
+        self.save_template_btn = QPushButton("Save Template")
+        self.save_template_btn.clicked.connect(self.on_save_template)
+        tpl_btns.addWidget(self.save_template_btn)
+        self.test_regex_btn = QPushButton("Test")
+        self.test_regex_btn.clicked.connect(self.on_test_regex)
+        tpl_btns.addWidget(self.test_regex_btn)
+        tpl_layout.addLayout(tpl_btns)
+        top_splitter.addWidget(template_widget)
+
+        # Regex designer
+        regex_widget = QWidget()
+        form = QVBoxLayout(regex_widget)
+
+        def _field(name):
+            edit = QLineEdit()
+            label = QLabel()
+            row = QHBoxLayout()
+            row.addWidget(edit)
+            row.addWidget(label)
+            form.addWidget(QLabel(name))
+            form.addLayout(row)
+            return edit, label
+
+        self.header_regex_edit, self.header_status = _field("Header")
+        self.desc_regex_edit, self.desc_status = _field("Description")
+        self.links_regex_edit, self.links_status = _field("Links")
+        self.body_regex_edit, self.body_status = _field("Body")
+
+        self.save_regex_btn = QPushButton("Save Regex")
+        self.save_regex_btn.clicked.connect(self.on_save_regex)
+        form.addWidget(self.save_regex_btn)
+        top_splitter.addWidget(regex_widget)
+
+        # Preview
+        self.preview_edit = QPlainTextEdit()
+        right_splitter.addWidget(self.preview_edit)
+
+        self.content_area.addWidget(widget)
+
+        # Populate tree on startup
+        self.reload_templab_tree()
     def on_megathreads_version_selected(self, item, column):
         """Handle selection of a version node in the Megathreads tree."""
         version_info = item.data(0, Qt.UserRole)
@@ -1391,7 +1459,8 @@ class ForumBotGUI(QMainWindow):
             "Backup": 1,
             "Process Threads": 2,
             "Megathreads": 3,
-            "Settings": 4
+            "Template Lab": 4,
+            "Settings": 5
         }
         
         if item_text in item_mapping:
@@ -2924,6 +2993,11 @@ class ForumBotGUI(QMainWindow):
         self.proceed_template_button.setIcon(QIcon.fromTheme("edit"))
         self.proceed_template_button.clicked.connect(self.generate_template_for_selected_thread)
         actions_layout.addWidget(self.proceed_template_button)
+
+        self.apply_templab_button = QPushButton("Apply Template")
+        self.apply_templab_button.setIcon(QIcon.fromTheme("document-save"))
+        self.apply_templab_button.clicked.connect(self.apply_template_lab)
+        actions_layout.addWidget(self.apply_templab_button)
 
         self.auto_process_button = QPushButton("Auto-Process Selected")
         self.auto_process_button.setIcon(QIcon.fromTheme("system-run"))
@@ -7809,3 +7883,124 @@ class ForumBotGUI(QMainWindow):
             logging.info(f"Reset all status flags for thread: {category_name}/{thread_title}")
         except Exception as e:
             logging.error(f"Error resetting thread status: {e}", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Template Lab slots
+    # ------------------------------------------------------------------
+
+    def reload_templab_tree(self):
+        self.templab_tree.clear()
+        base = templab_manager.USERS_DIR
+        if not base.exists():
+            return
+        for cat_dir in sorted(base.iterdir()):
+            if not cat_dir.is_dir():
+                continue
+            cat_item = QTreeWidgetItem([cat_dir.name])
+            cat_item.setData(0, Qt.UserRole, ("category", cat_dir.name))
+            self.templab_tree.addTopLevelItem(cat_item)
+            for file in sorted(cat_dir.glob("*.json")):
+                author = file.stem
+                author_item = QTreeWidgetItem([author])
+                author_item.setData(0, Qt.UserRole, ("author", cat_dir.name, author))
+                cat_item.addChild(author_item)
+                try:
+                    posts = json.load(open(file, "r", encoding="utf-8"))
+                except Exception:
+                    posts = []
+                if isinstance(posts, dict):
+                    posts = posts.get("posts", [])
+                for idx, post in enumerate(posts):
+                    title = post.get("title") or post.get("thread_title") or post.get("version_title") or f"Post {idx+1}"
+                    p_item = QTreeWidgetItem([title])
+                    p_item.setData(0, Qt.UserRole, ("post", cat_dir.name, author, post))
+                    author_item.addChild(p_item)
+
+    def on_templab_tree_item_clicked(self, item, _column):
+        info = item.data(0, Qt.UserRole)
+        if not info:
+            return
+        if info[0] == "category":
+            self.on_category_selected(info[1])
+        elif info[0] == "author":
+            self.on_author_selected(info[1], info[2])
+        elif info[0] == "post":
+            self.on_post_selected(info[3])
+
+    def on_category_selected(self, category):
+        self.current_templab_category = category
+        tpl = templab_manager.get_unified_template(category)
+        self.template_edit.setPlainText(tpl)
+
+    def on_author_selected(self, category, author):
+        self.current_templab_category = category
+        self.current_templab_author = author
+        data = templab_manager.load_regex(author, category)
+        self.header_regex_edit.setText(data.get("header_regex", ""))
+        self.desc_regex_edit.setText(data.get("desc_regex", ""))
+        self.links_regex_edit.setText(data.get("links_regex", ""))
+        self.body_regex_edit.setText(data.get("body_regex", ""))
+
+    def on_post_selected(self, post):
+        self.current_post_data = post
+        raw = post.get("bbcode_original") or post.get("bbcode_content", "")
+        self.preview_edit.setPlainText(raw)
+
+    def on_save_template(self):
+        if not getattr(self, "current_templab_category", None):
+            return
+        templab_manager.save_unified_template(self.current_templab_category, self.template_edit.toPlainText())
+        self.reload_templab_tree()
+
+    def on_save_regex(self):
+        if not (getattr(self, "current_templab_category", None) and getattr(self, "current_templab_author", None)):
+            return
+        data = {
+            "header_regex": self.header_regex_edit.text(),
+            "desc_regex": self.desc_regex_edit.text(),
+            "links_regex": self.links_regex_edit.text(),
+            "body_regex": self.body_regex_edit.text(),
+        }
+        templab_manager.save_regex(self.current_templab_author, self.current_templab_category, data)
+        self.reload_templab_tree()
+
+    def on_test_regex(self):
+        if not getattr(self, "current_post_data", None):
+            return
+        raw = self.current_post_data.get("bbcode_original") or self.current_post_data.get("bbcode_content", "")
+        tpl = self.template_edit.toPlainText()
+        data = {
+            "header_regex": self.header_regex_edit.text(),
+            "desc_regex": self.desc_regex_edit.text(),
+            "links_regex": self.links_regex_edit.text(),
+            "body_regex": self.body_regex_edit.text(),
+        }
+        result = templab_manager.apply_template(raw, tpl, data)
+        self.preview_edit.setPlainText(result)
+
+        for edit, status_label, key in [
+            (self.header_regex_edit, self.header_status, "header_regex"),
+            (self.desc_regex_edit, self.desc_status, "desc_regex"),
+            (self.links_regex_edit, self.links_status, "links_regex"),
+            (self.body_regex_edit, self.body_status, "body_regex"),
+        ]:
+            ok = templab_manager._test_regex(data[key], raw)
+            status_label.setText("✓" if ok else "✕")
+
+    def apply_template_lab(self):
+        items = self.process_threads_table.selectedItems()
+        if not items:
+            return
+        row = items[0].row()
+        title = self.process_threads_table.item(row, 0).text()
+        category = self.process_threads_table.item(row, 1).text().lower()
+        info = self.process_threads.get(category, {}).get(title, {})
+        thread = {
+            "category": category,
+            "author": info.get("author", ""),
+            "bbcode_original": info.get("bbcode_content", ""),
+        }
+        result = templab_manager.convert(thread)
+        if result:
+            info["bbcode_content"] = result
+            self.process_bbcode_editor.setPlainText(result)
