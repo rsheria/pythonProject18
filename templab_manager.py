@@ -1,3 +1,4 @@
+# regex now compiled with re.S | re.I flags
 import json
 import re
 from pathlib import Path
@@ -28,6 +29,34 @@ TEMPLAB_DIR = _ensure_dir("templab")
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+def _compile(rx_dict: dict) -> dict:
+    """Compile regex patterns with flags re.S | re.I."""
+    compiled = {}
+    for key, pattern in rx_dict.items():
+        if pattern:
+            try:
+                compiled[key] = re.compile(pattern, re.S | re.I)
+            except re.error:
+                compiled[key] = None
+        else:
+            compiled[key] = None
+    return compiled
+
+
+def _grab(pattern, text: str):
+    """Search text using compiled regex pattern."""
+    if not pattern:
+        return None
+    if hasattr(pattern, "search"):
+        try:
+            return pattern.search(text)
+        except re.error:
+            return None
+    try:
+        pat = re.compile(pattern, re.S | re.I)
+    except re.error:
+        return None
+    return pat.search(text)
 
 def get_unified_template(category: str) -> str:
     path = TEMPLAB_DIR / f"{sanitize_filename(category)}.template"
@@ -46,10 +75,12 @@ def load_regex(author: str, category: str) -> dict:
     path = TEMPLAB_DIR / f"{sanitize_filename(category)}.{sanitize_filename(author)}.json"
     if path.exists():
         try:
-            return json.load(open(path, "r", encoding="utf-8"))
+            data = json.load(open(path, "r", encoding="utf-8"))
+            return _compile(data)
         except Exception:
             pass
-    return {"header_regex": "", "desc_regex": "", "links_regex": "", "body_regex": ""}
+    return _compile({"header_regex": "", "desc_regex": "", "links_regex": "", "body_regex": ""})
+
 
 
 def save_regex(author: str, category: str, data: dict) -> None:
@@ -78,13 +109,8 @@ def store_post(author: str, category: str, thread: dict) -> None:
 
 
 def _test_regex(pattern: str, text: str) -> bool:
-    if not pattern:
-        return False
-    try:
-        m = re.search(pattern, text, re.S | re.I)
-        return bool(m and m.lastindex == 1)
-    except re.error:
-        return False
+    m = _grab(pattern, text) if pattern else None
+    return bool(m and m.lastindex == 1)
 
 
 def apply_template(bbcode: str, template: str, regexes: dict) -> str:
@@ -93,9 +119,8 @@ def apply_template(bbcode: str, template: str, regexes: dict) -> str:
     for key, pattern in regexes.items():
         if not pattern:
             continue
-        try:
-            m = re.search(pattern, bbcode, re.S | re.I)
-        except re.error:
+        m = _grab(pattern, bbcode)
+        if m is None:
             # ignore invalid patterns
             continue
         if not m or m.lastindex != 1:
