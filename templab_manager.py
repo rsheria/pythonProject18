@@ -96,13 +96,16 @@ def apply_template(bbcode: str, template: str, regexes: dict) -> str:
         try:
             m = re.search(pattern, bbcode, re.S | re.I)
         except re.error:
-            return bbcode
+            # ignore invalid patterns
+            continue
         if not m or m.lastindex != 1:
             return bbcode
         groups[key] = m.group(1)
         spans.append(m.span(1))
-    if not template or not spans:
-        return bbcode
+        if not template or not spans:
+        # skip patterns that don't match exactly one group
+            continue
+
     start = min(s for s, _ in spans)
     end = max(e for _, e in spans)
     prefix = bbcode[:start]
