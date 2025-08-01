@@ -1220,6 +1220,7 @@ class ForumBotGUI(QMainWindow):
         template_widget = QWidget()
         tpl_layout = QVBoxLayout(template_widget)
         self.template_edit = QPlainTextEdit()
+        self.template_edit.textChanged.connect(self.on_test_regex)
         tpl_layout.addWidget(self.template_edit)
         tpl_btns = QHBoxLayout()
         self.save_template_btn = QPushButton("Save Template")
@@ -1245,10 +1246,15 @@ class ForumBotGUI(QMainWindow):
             form.addLayout(row)
             return edit, label
 
+
         self.header_regex_edit, self.header_status = _field("Header")
+        self.header_regex_edit.textChanged.connect(self.on_test_regex)
         self.desc_regex_edit, self.desc_status = _field("Description")
+        self.desc_regex_edit.textChanged.connect(self.on_test_regex)
         self.links_regex_edit, self.links_status = _field("Links")
+        self.links_regex_edit.textChanged.connect(self.on_test_regex)
         self.body_regex_edit, self.body_status = _field("Body")
+        self.body_regex_edit.textChanged.connect(self.on_test_regex)
 
         self.save_regex_btn = QPushButton("Save Regex")
         self.save_regex_btn.clicked.connect(self.on_save_regex)
@@ -7973,6 +7979,8 @@ class ForumBotGUI(QMainWindow):
         self.current_post_data = post
         raw = post.get("bbcode_original") or post.get("bbcode_content", "")
         self.preview_edit.setPlainText(raw)
+        # Automatically update preview using current regex settings
+        self.on_test_regex()
 
     def on_save_template(self):
         if not getattr(self, "current_templab_category", None):
