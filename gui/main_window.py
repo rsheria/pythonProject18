@@ -7953,7 +7953,7 @@ class ForumBotGUI(QMainWindow):
         elif info[0] == "author":
             self.on_author_selected(info[1], info[2])
         elif info[0] == "post":
-            self.on_post_selected(info[3])
+            self.on_post_selected(info[1], info[2], info[3])
 
     def on_category_selected(self, category):
         self.current_templab_category = category
@@ -7975,7 +7975,9 @@ class ForumBotGUI(QMainWindow):
         self.links_regex_edit.setText(_pattern(data.get("links_regex")))
         self.body_regex_edit.setText(_pattern(data.get("body_regex")))
 
-    def on_post_selected(self, post):
+    def on_post_selected(self, category, author, post):
+        self.current_templab_category = category
+        self.current_templab_author = author
         self.current_post_data = post
         raw = post.get("bbcode_original") or post.get("bbcode_content", "")
         self.preview_edit.setPlainText(raw)
@@ -7986,7 +7988,8 @@ class ForumBotGUI(QMainWindow):
         if not getattr(self, "current_templab_category", None):
             return
         templab_manager.save_unified_template(self.current_templab_category, self.template_edit.toPlainText())
-        self.reload_templab_tree()
+        # Keep current selections and preview intact
+        self.on_test_regex()
 
     def on_save_regex(self):
         if not (getattr(self, "current_templab_category", None) and getattr(self, "current_templab_author", None)):
@@ -7998,7 +8001,8 @@ class ForumBotGUI(QMainWindow):
             "body_regex": self.body_regex_edit.text(),
         }
         templab_manager.save_regex(self.current_templab_author, self.current_templab_category, data)
-        self.reload_templab_tree()
+        # Keep current selections and preview intact
+        self.on_test_regex()
 
     def on_test_regex(self):
         if not getattr(self, "current_post_data", None):
