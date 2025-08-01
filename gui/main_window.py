@@ -7958,10 +7958,16 @@ class ForumBotGUI(QMainWindow):
         self.current_templab_category = category
         self.current_templab_author = author
         data = templab_manager.load_regex(author, category)
-        self.header_regex_edit.setText(data.get("header_regex", ""))
-        self.desc_regex_edit.setText(data.get("desc_regex", ""))
-        self.links_regex_edit.setText(data.get("links_regex", ""))
-        self.body_regex_edit.setText(data.get("body_regex", ""))
+
+        def _pattern(val):
+            if hasattr(val, "pattern"):
+                return val.pattern
+            return val or ""
+
+        self.header_regex_edit.setText(_pattern(data.get("header_regex")))
+        self.desc_regex_edit.setText(_pattern(data.get("desc_regex")))
+        self.links_regex_edit.setText(_pattern(data.get("links_regex")))
+        self.body_regex_edit.setText(_pattern(data.get("body_regex")))
 
     def on_post_selected(self, post):
         self.current_post_data = post
