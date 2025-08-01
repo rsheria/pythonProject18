@@ -3,7 +3,7 @@
 import logging
 import re
 import unicodedata
-
+import hashlib
 def sanitize_filename(filename):
     """
     Sanitizes a filename by replacing or removing invalid characters.
@@ -15,6 +15,7 @@ def sanitize_filename(filename):
     - str: The sanitized filename.
     """
     # Replace spaces with underscores
+    orig = filename
     filename = filename.replace(' ', '_')
 
     # Replace & with 'and'
@@ -25,6 +26,10 @@ def sanitize_filename(filename):
 
     # Remove any remaining characters that are not allowed in Windows filenames
     filename = re.sub(r'[^a-zA-Z0-9_\-\.]', '', filename)
+
+    # Fallback to a hash value when nothing remains after sanitization
+    if not filename:
+        filename = hashlib.md5(orig.encode('utf-8')).hexdigest()
 
     logging.debug(f"Sanitized filename/category: '{filename}'")
 
