@@ -102,9 +102,10 @@ def apply_template(bbcode: str, template: str, regexes: dict) -> str:
             return bbcode
         groups[key] = m.group(1)
         spans.append(m.span(1))
-        if not template or not spans:
-        # skip patterns that don't match exactly one group
+        if not template:
             continue
+    if not template or not spans:
+        return bbcode
 
     start = min(s for s, _ in spans)
     end = max(e for _, e in spans)

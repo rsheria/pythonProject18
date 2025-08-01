@@ -24,3 +24,10 @@ def test_apply_template_no_match_returns_original():
     template = "{HEADER}{BODY}"
     regexes = {"header_regex": r"nope", "body_regex": r"missing"}
     assert apply_template(text, template, regexes) == text
+
+
+def test_apply_template_empty_regexes():
+    text = "[b]header[/b]"
+    template = "{HEADER}"
+    regexes = {}
+    assert apply_template(text, template, regexes) == text
