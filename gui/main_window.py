@@ -7951,7 +7951,9 @@ class ForumBotGUI(QMainWindow):
             lines = []
             for line in bbcode.splitlines():
                 lower = line.lower()
-                if "[url" in lower or re.search(r"https?://", line, re.I):
+                if "[url" in lower:
+                    continue
+                if re.search(r"https?://", line, re.I) and not re.search(r"\[/?img\]", line, re.I):
                     continue
                 lines.append(line)
             bbcode = "\n".join(lines).rstrip()
