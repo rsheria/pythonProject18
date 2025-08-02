@@ -7,7 +7,7 @@ from templab_manager import apply_template
 
 def test_apply_template_partial_match():
     bbcode = """[b]header[/b]\nSome body text\nLinks: none"""
-    template = "{HEADER}\n{BODY}"
+    template = "{TITLE}\n{BODY}"
     regexes = {
         "header_regex": r"\[b\](.+?)\[/b\]",
         "body_regex": r"Some (.+) text",
@@ -21,13 +21,13 @@ def test_apply_template_partial_match():
 
 def test_apply_template_no_match_returns_original():
     text = "plain text"
-    template = "{HEADER}{BODY}"
+    template = "{TITLE}{BODY}"
     regexes = {"header_regex": r"nope", "body_regex": r"missing"}
     assert apply_template(text, template, regexes) == text
 
 
 def test_apply_template_empty_regexes():
     text = "[b]header[/b]"
-    template = "{HEADER}"
+    template = "{TITLE}"
     regexes = {}
     assert apply_template(text, template, regexes) == text

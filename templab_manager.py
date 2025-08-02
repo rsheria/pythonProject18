@@ -1,4 +1,4 @@
-# ★ build unified DESC from desc_regex groups ★
+# ★ Dual DESC mode: supports 1-group legacy & 2-group modern ★
 import json
 import re
 from pathlib import Path
@@ -150,12 +150,16 @@ def apply_template(bbcode: str, template: str, regexes: dict) -> str:
             # ignore invalid patterns
             continue
         if key == "desc_regex":
-            if not m or m.lastindex < 2:
+            if not m:
                 continue
-            groups["format"] = m.group(1)
-            groups["size"] = m.group(2)
-            spans.append(m.span(0))
-            continue
+            if m.lastindex == 2:  # new style → (1)=format  (2)=size
+                groups["format"] = m.group(1)
+                groups["size"] = m.group(2)
+                spans.append(m.span(0))      # remove whole block
+            elif m.lastindex == 1:  # legacy whole block
+                groups["desc_block"] = m.group(1)
+                spans.append(m.span(0))
+            continue   # skip default one-group handling
         if not m or m.lastindex != 1:
             return bbcode
         groups[key] = m.group(1)  # ما زلنا نحتاج النص الداخلى
@@ -166,9 +170,7 @@ def apply_template(bbcode: str, template: str, regexes: dict) -> str:
             spans.append(m.span(1))  # احذف النصّ الداخلى فقط
         if not template:
             continue
-    desc = ""
-    if "format" in groups and "size" in groups:
-        desc = f"Genre: Sachbuch\nFormat: {groups['format'].lower()}\nGröße: {groups['size']}"
+
     if not template or not spans:
         return bbcode
 
@@ -176,12 +178,19 @@ def apply_template(bbcode: str, template: str, regexes: dict) -> str:
     for s, e in sorted(spans, key=lambda t: t[0], reverse=True):
         bbcode = bbcode[:s] + bbcode[e:]
 
+    if "format" in groups and "size" in groups:
+        desc_text = f"Genre: Sachbuch\nFormat: {groups['format'].lower()}\nGröße: {groups['size']}"
+    elif "desc_block" in groups:
+        desc_text = groups["desc_block"]
+    else:
+        desc_text = ""
+
     # املأ القالب بالبيانات
     filled = (
         template
-        .replace("{HEADER}", groups.get("header_regex", ""))
+        .replace("{TITLE}",  groups.get("header_regex", ""))
         .replace("{COVER}",  groups.get("cover_regex", ""))
-        .replace("{DESC}",   desc)
+        .replace("{DESC}",   desc_text)
         .replace("{BODY}",   groups.get("body_regex", ""))
     )
 
