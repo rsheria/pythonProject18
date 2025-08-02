@@ -125,13 +125,7 @@ class AutoProcessWorker(QRunnable):
             if not formatted:
                 return False
 
-            try:
-                formatted = self.bot.process_images_in_content(formatted)
-            except Exception:
-                pass
-
-            links_block = self.gui.build_links_block(self.job.category, self.job.title)
-            final_bbcode = formatted.strip() + "\n\n" + links_block
+            final_bbcode = formatted.strip()
             info["bbcode_content"] = final_bbcode
             self.gui.save_process_threads_data()
             return True

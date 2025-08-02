@@ -5621,7 +5621,8 @@ class ForumBotGUI(QMainWindow):
                         "category": category_name,
                         "author": author,
                         "bbcode_original": original_bbcode,
-                    }
+                    },
+                    apply_hooks=False,
                 )
                 if converted:
                     bbcode_content = converted
@@ -7988,7 +7989,7 @@ class ForumBotGUI(QMainWindow):
         }
         self._current_thread_category = category
         self._current_thread_title = title
-        bbcode = templab_manager.convert(thread)
+        bbcode = templab_manager.convert(thread, apply_hooks=True)
         self.process_bbcode_editor.set_text(bbcode)
         info["bbcode_content"] = bbcode
         self.save_process_threads_data()

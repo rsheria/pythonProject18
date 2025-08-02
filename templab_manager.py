@@ -157,17 +157,18 @@ def apply_template(bbcode: str, template: str, regexes: dict) -> str:
     return prefix + result + suffix
 
 
-def convert(thread: dict) -> str:
+def convert(thread: dict, apply_hooks: bool = True) -> str:
     category = str(thread.get("category", "")).lower()
     author = thread.get("author", "")
     bbcode = thread.get("bbcode_original", "")
     template = get_unified_template(category)
     regexes = load_regex(author, category)
     bbcode = apply_template(bbcode, template, regexes)
-    img_hook = _HOOKS.get("rewrite_images")
-    if img_hook:
-        bbcode = img_hook(bbcode)
-    link_hook = _HOOKS.get("rewrite_links")
-    if link_hook:
-        bbcode = link_hook(bbcode)
+    if apply_hooks:
+        img_hook = _HOOKS.get("rewrite_images")
+        if img_hook:
+            bbcode = img_hook(bbcode)
+        link_hook = _HOOKS.get("rewrite_links")
+        if link_hook:
+            bbcode = link_hook(bbcode)
     return bbcode
