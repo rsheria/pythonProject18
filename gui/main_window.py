@@ -7974,10 +7974,12 @@ class ForumBotGUI(QMainWindow):
         title = self.process_threads_table.item(row, 0).text()
         category = self.process_threads_table.item(row, 1).text().lower()
         info = self.process_threads.get(category, {}).get(title, {})
+        # Use the original BBCode if available; fall back to current content
+        raw_bbcode = info.get("bbcode_original") or info.get("bbcode_content", "")
         thread = {
             "category": category,
             "author": info.get("author", ""),
-            "bbcode_original": info.get("bbcode_content", ""),
+            "bbcode_original": raw_bbcode,
         }
         self._current_thread_category = category
         self._current_thread_title = title
