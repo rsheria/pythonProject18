@@ -1,3 +1,4 @@
+# ★ Template-Lab persistence, live refresh, regex-compile, image/link rewrite, Proceed-Template upgrade ★
 from config.config import DATA_DIR
 from workers.download_worker import DownloadWorker
 from workers.upload_worker   import UploadWorker
@@ -869,6 +870,12 @@ class ForumBotGUI(QMainWindow):
         self.init_template_lab_view()
         self.init_settings_view()  # Initialize the new Settings view
 
+        templab_manager.set_hooks({
+            "rewrite_images": getattr(self, "_rewrite_images", None),
+            "rewrite_links": getattr(self, "_rewrite_links", None),
+            "reload_tree": lambda: QMetaObject.invokeMethod(self, "reload_templab_tree", Qt.QueuedConnection),
+        })
+
         # Right Sidebar for Login with modern styling
         self.init_login_section(content_splitter)
 
@@ -1276,11 +1283,6 @@ class ForumBotGUI(QMainWindow):
             bbcode_content = version_info.get('bbcode_content', '')
             self.megathreads_bbcode_editor.setPlainText(bbcode_content)
 
-    def on_sidebar_item_clicked(self, item):
-        # Change content area based on sidebar selection
-        index = self.sidebar.row(item)
-        self.content_area.setCurrentIndex(index)
-
     # Similar to posts, we define a separate handler for category clicks in megathreads
     def on_megathreads_category_clicked(self, index):
         if not self.bot.is_logged_in:
@@ -1472,7 +1474,8 @@ class ForumBotGUI(QMainWindow):
         if item_text in item_mapping:
             index = item_mapping[item_text]
             self.content_area.setCurrentIndex(index)
-            
+            if item_text == "Template Lab":
+                self.on_templab_tab_opened()
             # Update status bar
             self.statusBar().showMessage(f'📍 Navigated to {item_text} section')
 
@@ -2997,13 +3000,13 @@ class ForumBotGUI(QMainWindow):
 
         self.proceed_template_button = QPushButton("Proceed Template")
         self.proceed_template_button.setIcon(QIcon.fromTheme("edit"))
-        self.proceed_template_button.clicked.connect(self.generate_template_for_selected_thread)
+        self.proceed_template_button.clicked.connect(self.on_proceed_template_clicked)
         actions_layout.addWidget(self.proceed_template_button)
 
         self.apply_templab_button = QPushButton("Apply Template")
         self.apply_templab_button.setIcon(QIcon.fromTheme("document-save"))
-        self.apply_templab_button.clicked.connect(self.apply_template_lab)
         actions_layout.addWidget(self.apply_templab_button)
+        self.apply_templab_button.hide()
 
         self.auto_process_button = QPushButton("Auto-Process Selected")
         self.auto_process_button.setIcon(QIcon.fromTheme("system-run"))
@@ -3781,115 +3784,6 @@ class ForumBotGUI(QMainWindow):
         # 5) ارجع النص النهائي
         return "\n".join(line for line in result_lines).strip()
 
-    def generate_template_for_selected_thread(self):
-        # IMMEDIATE DEBUG - FIRST LINE TO CONFIRM METHOD IS CALLED AT ALL
-        print("\n" + "#"*120)
-        print("🔥 CRITICAL DEBUG: METHOD ENTRY CONFIRMED! generate_template_for_selected_thread CALLED!")
-        print("🔥 TIMESTAMP:", datetime.now().strftime('%H:%M:%S.%f'))
-        print("#"*120 + "\n")
-        
-        # Also force to file immediately
-        with open('debug_method_calls.txt', 'a', encoding='utf-8') as f:
-            f.write(f"\n{datetime.now()}: generate_template_for_selected_thread CALLED!\n")
-            f.flush()
-        
-        """
-        After user clicks 'Proceed Template':
-        1) Get the selected row's thread_id and category.
-        2) Retrieve Keeplinks short URL, direct host links from process_threads.
-        3) Call send_bbcode_to_gpt_api(...) to transform the original BBCode.
-        4) Build a separate links block with short link + direct links.
-        5) Append that block to the final BBCode, display in the editor, and save.
-        """
-        print("\n" + "="*80)
-        print("🚀 FASTPIC DEBUG: generate_template_for_selected_thread method STARTED!")
-        print("🚀 Time:", datetime.now().strftime('%H:%M:%S'))
-        print("🚀 Button clicked successfully - method is being called!")
-        print("="*80 + "\n")
-        
-        logging.info("\n" + "="*80)
-        logging.info("🚀 FASTPIC DEBUG: generate_template_for_selected_thread method STARTED!")
-        logging.info(f"🚀 Time: {datetime.now().strftime('%H:%M:%S')}")
-        logging.info("🚀 Button clicked successfully - method is being called!")
-        logging.info("="*80 + "\n")
-        
-        selected_items = self.process_threads_table.selectedItems()
-        if not selected_items:
-            QMessageBox.warning(self, "No Thread Selected", "Please select a thread.")
-            return
-
-        thread_id = selected_items[2].text()  # "Thread ID" column
-        category_name = selected_items[1].text()  # "Category" column
-        thread_title = selected_items[0].text()  # "Thread Title" column
-
-        # 1) Get Keeplinks from backup or process_threads, but we already unify them in process_threads:
-        #    If you also store them in backup, you can get from there. We'll assume process_threads is up-to-date.
-        thread_info = self.process_threads.get(category_name, {}).get(thread_title, {})
-        keeplinks_url = ""
-        if "links" in thread_info:
-            keeplinks_url = thread_info["links"].get("keeplinks", "")
-
-        if not keeplinks_url:
-            QMessageBox.warning(self, "Keeplinks URL Not Found",
-                                f"No Keeplinks URL found for Thread-ID {thread_id}.")
-            return
-
-        # 2) Original BBCode from the editor:
-        original_bbcode = self.process_bbcode_editor.get_text()
-        if not original_bbcode.strip():
-            QMessageBox.warning(self, "No BBCode", "No BBCode available for formatting.")
-            return
-
-        # 3) Call OpenAI to get the main "GPT-formatted" version
-        formatted_bbcode = self.send_bbcode_to_gpt_api(original_bbcode, keeplinks_url, category_name)
-
-        if not formatted_bbcode:
-            QMessageBox.warning(self, "Formatting Failed",
-                                "Could not receive a formatted template from the OpenAI API.")
-            return
-
-        # 4) Process images for fastpic.org upload (upload first image to fastpic.org)
-        logging.info("🔄 Starting image processing step...")
-        logging.info(f"📋 Original BBCode content length: {len(formatted_bbcode)}")
-        logging.info(f"🤖 Bot available: {hasattr(self, 'bot') and self.bot is not None}")
-        
-        try:
-            if hasattr(self, 'bot') and self.bot:
-                logging.info("🖼️ Processing images for fastpic.org upload...")
-                logging.info(f"📝 BBCode before processing: {formatted_bbcode[:200]}...")  # Show first 200 chars
-                processed_bbcode = self.bot.process_images_in_content(formatted_bbcode)
-                logging.info(f"📝 BBCode after processing: {processed_bbcode[:200]}...")  # Show first 200 chars
-                logging.info(f"🔄 Content changed: {formatted_bbcode != processed_bbcode}")
-                formatted_bbcode = processed_bbcode
-            else:
-                logging.warning("⚠️ Bot not available for image processing")
-                if not hasattr(self, 'bot'):
-                    logging.error("❌ self.bot attribute doesn't exist")
-                elif self.bot is None:
-                    logging.error("❌ self.bot is None")
-        except Exception as e:
-            logging.error(f"❌ Error processing images for fastpic.org: {e}")
-            import traceback
-            logging.error(f"❌ Traceback: {traceback.format_exc()}")
-            # Continue with original content if image processing fails
-
-        # 5) Build the link block (Keeplinks short link + direct host links):
-        links_block = self.build_links_block(category_name, thread_title)
-
-        # 6) Combine them: place the link block *after* the GPT main body, or you can do it before
-        final_bbcode = formatted_bbcode.strip() + "\n\n" + links_block
-
-        # 7) Show in the editor and save
-        self.process_bbcode_editor.set_text(final_bbcode)
-
-        # Also update self.process_threads so you don't lose it:
-        self.process_threads[category_name][thread_title]['bbcode_content'] = final_bbcode
-        self.save_process_threads_data()
-
-        QMessageBox.information(self, "Template Updated",
-                                "BBCode has been successfully updated with fastpic.org images + Keeplinks + direct links.")
-        logging.info("BBCode updated with fastpic.org image upload and final link block on Proceed Template.")
-
     def get_keeplinks_url_from_backup(self, thread_id):
         """Retrieve the Keeplinks URL from the backup JSON based on the thread ID."""
         for thread_title, thread_data in self.backup_threads.items():
@@ -4286,7 +4180,7 @@ class ForumBotGUI(QMainWindow):
                 pass
         self.process_threads_table.clearSelection()
         self.process_threads_table.selectRow(row)
-        self.generate_template_for_selected_thread()
+        self.on_proceed_template_clicked()
         if self._auto_process_queue:
             self._auto_process_queue.pop(0)
         QTimer.singleShot(100, self._process_next_auto_thread)
@@ -7915,7 +7809,13 @@ class ForumBotGUI(QMainWindow):
     # ------------------------------------------------------------------
     # Template Lab slots
     # ------------------------------------------------------------------
-
+    def on_templab_tab_opened(self):
+        item = self.templab_tree.currentItem()
+        if item:
+            self.on_templab_tree_item_clicked(item, 0)
+        elif getattr(self, "current_templab_category", None):
+            tpl = templab_manager.get_unified_template(self.current_templab_category)
+            self.template_edit.setPlainText(tpl)
     def reload_templab_tree(self):
         self.templab_tree.clear()
         base = templab_manager.USERS_DIR
@@ -7942,7 +7842,11 @@ class ForumBotGUI(QMainWindow):
                     title = post.get("title") or post.get("thread_title") or post.get("version_title") or f"Post {idx+1}"
                     p_item = QTreeWidgetItem([title])
                     p_item.setData(0, Qt.UserRole, ("post", cat_dir.name, author, post))
-                    author_item.addChild(p_item)
+
+                author_item.addChild(p_item)
+
+    def _to_str(self, val):
+        return getattr(val, "pattern", val) or ""
 
     def on_templab_tree_item_clicked(self, item, _column):
         info = item.data(0, Qt.UserRole)
@@ -7963,25 +7867,28 @@ class ForumBotGUI(QMainWindow):
     def on_author_selected(self, category, author):
         self.current_templab_category = category
         self.current_templab_author = author
+        tpl = templab_manager.get_unified_template(category)
+        self.template_edit.setPlainText(tpl)
         data = templab_manager.load_regex(author, category)
 
-        def _pattern(val):
-            if hasattr(val, "pattern"):
-                return val.pattern
-            return val or ""
-
-        self.header_regex_edit.setText(_pattern(data.get("header_regex")))
-        self.desc_regex_edit.setText(_pattern(data.get("desc_regex")))
-        self.links_regex_edit.setText(_pattern(data.get("links_regex")))
-        self.body_regex_edit.setText(_pattern(data.get("body_regex")))
+        self.header_regex_edit.setText(self._to_str(data.get("header_regex")))
+        self.desc_regex_edit.setText(self._to_str(data.get("desc_regex")))
+        self.links_regex_edit.setText(self._to_str(data.get("links_regex")))
+        self.body_regex_edit.setText(self._to_str(data.get("body_regex")))
 
     def on_post_selected(self, category, author, post):
         self.current_templab_category = category
         self.current_templab_author = author
         self.current_post_data = post
+        tpl = templab_manager.get_unified_template(category)
+        self.template_edit.setPlainText(tpl)
+        data = templab_manager.load_regex(author, category)
+        self.header_regex_edit.setText(self._to_str(data.get("header_regex")))
+        self.desc_regex_edit.setText(self._to_str(data.get("desc_regex")))
+        self.links_regex_edit.setText(self._to_str(data.get("links_regex")))
+        self.body_regex_edit.setText(self._to_str(data.get("body_regex")))
         raw = post.get("bbcode_original") or post.get("bbcode_content", "")
         self.preview_edit.setPlainText(raw)
-        # Automatically update preview using current regex settings
         self.on_test_regex()
 
     def on_save_template(self):
@@ -8027,7 +7934,39 @@ class ForumBotGUI(QMainWindow):
             ok = templab_manager._test_regex(data[key], raw)
             status_label.setText("✓" if ok else "✕")
 
-    def apply_template_lab(self):
+    def _rewrite_images(self, bbcode: str) -> str:
+        """Rewrite image tags using the existing bot helper."""
+        try:
+            if getattr(self, "bot", None):
+                return self.bot.process_images_in_content(bbcode)
+        except Exception:
+            logging.exception("image rewrite failed")
+        return bbcode
+
+    def _rewrite_links(self, bbcode: str) -> str:
+        """Apply user's link template to the detected links."""
+        try:
+            category = getattr(self, "_current_thread_category", "")
+            title = getattr(self, "_current_thread_title", "")
+            block = self.build_links_block(category, title).strip()
+            if not block:
+                return bbcode
+            lines = []
+            for line in bbcode.splitlines():
+                if re.search(r"\[url|https?://", line, re.I):
+                    continue
+                lines.append(line)
+            bbcode = "\n".join(lines).rstrip()
+            if bbcode:
+                bbcode += "\n\n" + block
+            else:
+                bbcode = block
+            return bbcode
+        except Exception:
+            logging.exception("link rewrite failed")
+            return bbcode
+
+    def on_proceed_template_clicked(self):
         items = self.process_threads_table.selectedItems()
         if not items:
             return
@@ -8040,7 +7979,11 @@ class ForumBotGUI(QMainWindow):
             "author": info.get("author", ""),
             "bbcode_original": info.get("bbcode_content", ""),
         }
-        result = templab_manager.convert(thread)
-        if result:
-            info["bbcode_content"] = result
-            self.process_bbcode_editor.setPlainText(result)
+        self._current_thread_category = category
+        self._current_thread_title = title
+        bbcode = templab_manager.convert(thread)
+        self.process_bbcode_editor.set_text(bbcode)
+        info["bbcode_content"] = bbcode
+        self.save_process_threads_data()
+        self._current_thread_category = None
+        self._current_thread_title = None

@@ -1,4 +1,4 @@
-# regex now compiled with re.S | re.I flags
+# ★ Template-Lab persistence, live refresh, regex-compile, image/link rewrite, Proceed-Template upgrade ★
 import json
 import re
 from pathlib import Path
@@ -26,6 +26,14 @@ def _ensure_dir(sub: str) -> Path:
 USERS_DIR = _ensure_dir("users")
 TEMPLAB_DIR = _ensure_dir("templab")
 
+_HOOKS = {"rewrite_images": None, "rewrite_links": None, "reload_tree": None}
+
+
+def set_hooks(hooks: dict) -> None:
+    """Set optional hooks for rewriting and GUI updates."""
+    if not isinstance(hooks, dict):
+        return
+    _HOOKS.update(hooks)
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
@@ -106,7 +114,12 @@ def store_post(author: str, category: str, thread: dict) -> None:
     posts.append(thread)
     with open(file, "w", encoding="utf-8") as f:
         json.dump(posts, f, ensure_ascii=False, indent=2)
-
+    cb = _HOOKS.get("reload_tree")
+    if cb:
+        try:
+            cb()
+        except Exception:
+            pass
 
 def _test_regex(pattern: str, text: str) -> bool:
     m = _grab(pattern, text) if pattern else None
@@ -150,4 +163,11 @@ def convert(thread: dict) -> str:
     bbcode = thread.get("bbcode_original", "")
     template = get_unified_template(category)
     regexes = load_regex(author, category)
-    return apply_template(bbcode, template, regexes)
+    bbcode = apply_template(bbcode, template, regexes)
+    img_hook = _HOOKS.get("rewrite_images")
+    if img_hook:
+        bbcode = img_hook(bbcode)
+    link_hook = _HOOKS.get("rewrite_links")
+    if link_hook:
+        bbcode = link_hook(bbcode)
+    return bbcode
