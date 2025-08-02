@@ -1,4 +1,4 @@
-# ★ fastpic upload now runs after template insertion (cover_regex) ★
+# ★ Inserts Keeplinks + host links at {LINKS} placeholder ★
 from config.config import DATA_DIR
 from workers.download_worker import DownloadWorker
 from workers.upload_worker   import UploadWorker
@@ -7943,32 +7943,6 @@ class ForumBotGUI(QMainWindow):
         # Earlier fastpic processing is disabled to prevent double uploads
         return bbcode
 
-    def _rewrite_links(self, bbcode: str) -> str:
-        """Apply user's link template to the detected links."""
-        try:
-            category = getattr(self, "_current_thread_category", "")
-            title = getattr(self, "_current_thread_title", "")
-            block = self.build_links_block(category, title).strip()
-            if not block:
-                return bbcode
-            lines = []
-            for line in bbcode.splitlines():
-                lower = line.lower()
-                if "[url" in lower:
-                    continue
-                if re.search(r"https?://", line, re.I) and not re.search(r"\[/?img\]", line, re.I):
-                    continue
-                lines.append(line)
-            bbcode = "\n".join(lines).rstrip()
-            if bbcode:
-                bbcode += "\n\n" + block
-            else:
-                bbcode = block
-            return bbcode
-        except Exception:
-            logging.exception("link rewrite failed")
-            return bbcode
-
     def on_proceed_template_clicked(self):
         row = self.process_threads_table.currentRow()
         if row < 0:
@@ -8008,6 +7982,11 @@ class ForumBotGUI(QMainWindow):
                 logging.exception("image rewrite failed")
         else:
             logging.warning("⚠️ bot is not available.")
+
+        links_block = self.build_links_block(category, title)
+        if "{LINKS}" in bbcode_filled:
+            bbcode_filled = bbcode_filled.replace("{LINKS}", links_block)
+            logging.info(f"🔗 Link-block inserted (length = {len(links_block)} chars)")
 
         self.process_bbcode_editor.set_text(bbcode_filled)
         thread["bbcode_content"] = bbcode_filled
