@@ -1,10 +1,10 @@
-# ★ Template-Lab persistence, live refresh, regex-compile, image/link rewrite, Proceed-Template upgrade ★
+# ★ Proceed Template fixed: now converts + logs ★
 import json
 import re
 from pathlib import Path
 from config.config import DATA_DIR
 from utils.utils import sanitize_filename
-
+import logging
 # ------------------------------------------------------------------
 # Directories
 # ------------------------------------------------------------------
@@ -159,9 +159,14 @@ def apply_template(bbcode: str, template: str, regexes: dict) -> str:
 
 def convert(thread: dict, apply_hooks: bool = True) -> str:
     category = str(thread.get("category", "")).lower()
+    title = thread.get("title", "")
+    logging.debug(f"templab_manager.convert: {category}/{title}")
     author = thread.get("author", "")
-    bbcode = thread.get("bbcode_original", "")
+    bbcode = thread.get("bbcode_original") or ""
     template = get_unified_template(category)
+    if not template:
+        logging.warning(f"Unified template missing for category '{category}'")
+        return bbcode
     regexes = load_regex(author, category)
     bbcode = apply_template(bbcode, template, regexes)
     if apply_hooks:

@@ -1,4 +1,4 @@
-# ★ Template-Lab persistence, live refresh, regex-compile, image/link rewrite, Proceed-Template upgrade ★
+# ★ Proceed Template fixed: now converts + logs ★
 from config.config import DATA_DIR
 from workers.download_worker import DownloadWorker
 from workers.upload_worker   import UploadWorker
@@ -13,6 +13,8 @@ from .themes import theme_manager, style_manager
 from pathlib import Path
 import hashlib
 import logging
+logging.basicConfig(level=logging.INFO, filename="forum_bot.log",
+                    filemode="a", format="%(asctime)s %(levelname)s %(message)s")
 import random
 import re
 import time
@@ -2998,15 +3000,15 @@ class ForumBotGUI(QMainWindow):
         self.remove_process_thread_button.clicked.connect(self.remove_selected_process_threads)
         actions_layout.addWidget(self.remove_process_thread_button)
 
-        self.proceed_template_button = QPushButton("Proceed Template")
-        self.proceed_template_button.setIcon(QIcon.fromTheme("edit"))
-        self.proceed_template_button.clicked.connect(self.on_proceed_template_clicked)
-        actions_layout.addWidget(self.proceed_template_button)
+        self.proceed_template_btn = QPushButton("Proceed Template")
+        self.proceed_template_btn.setIcon(QIcon.fromTheme("edit"))
+        self.proceed_template_btn.clicked.connect(self.on_proceed_template_clicked)
+        actions_layout.addWidget(self.proceed_template_btn)
 
-        self.apply_templab_button = QPushButton("Apply Template")
-        self.apply_templab_button.setIcon(QIcon.fromTheme("document-save"))
-        actions_layout.addWidget(self.apply_templab_button)
-        self.apply_templab_button.hide()
+        self.apply_template_btn = QPushButton("Apply Template")
+        self.apply_template_btn.setIcon(QIcon.fromTheme("document-save"))
+        actions_layout.addWidget(self.apply_template_btn)
+        self.apply_template_btn.hide()
 
         self.auto_process_button = QPushButton("Auto-Process Selected")
         self.auto_process_button.setIcon(QIcon.fromTheme("system-run"))
@@ -7963,32 +7965,41 @@ class ForumBotGUI(QMainWindow):
             return bbcode
 
     def on_proceed_template_clicked(self):
-        items = self.process_threads_table.selectedItems()
-        if not items:
+        row = self.process_threads_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Proceed Template", "Please select a thread.")
             return
-        row = items[0].row()
-        title = self.process_threads_table.item(row, 0).text()
-        category = self.process_threads_table.item(row, 1).text().lower()
-        info = self.process_threads.get(category, {}).get(title, {})
-        # Use the original BBCode if available; fall back to current content
-        raw_bbcode = info.get("bbcode_original") or info.get("bbcode_content", "")
-        if not raw_bbcode:
+        title_item = self.process_threads_table.item(row, 0)
+        category_item = self.process_threads_table.item(row, 1)
+        if not title_item or not category_item:
+            QMessageBox.information(self, "Proceed Template", "Invalid selection.")
             return
-        # Use the original BBCode if available; fall back to current content
-        raw_bbcode = info.get("bbcode_original") or info.get("bbcode_content", "")
-        thread = {
+        title = title_item.text()
+        category = category_item.text().lower()
+        thread = self.process_threads.get(category, {}).get(title)
+        if not thread:
+            logging.error(f"Proceed Template: thread not found for {category}/{title}")
+            return
+        thread_dict = {
+            "title": title,
             "category": category,
-            "author": info.get("author", ""),
-            "bbcode_original": raw_bbcode,
+            "author": thread.get("author", ""),
+            "bbcode_original": thread.get("bbcode_original") or thread.get("bbcode_content", ""),
         }
-        self._current_thread_category = category
-        self._current_thread_title = title
-        bbcode = templab_manager.convert(thread, apply_hooks=True)
-        self.process_bbcode_editor.set_text(bbcode)
-        info["bbcode_content"] = bbcode
-        # Keep version history in sync with the modified BBCode
-        if info.get("versions"):
-            info["versions"][0]["bbcode_content"] = bbcode
+        if not thread_dict["bbcode_original"]:
+            QMessageBox.information(self, "Proceed Template", "No BBCode available.")
+            return
+        try:
+            bbcode = templab_manager.convert(thread_dict)
+        except Exception:
+            logging.exception("Proceed Template conversion failed")
+            QMessageBox.information(self, "Proceed Template", "Conversion failed.")
+            return
+        self.process_bbcode_editor.setText(bbcode)
+        self.process_threads.setdefault(category, {}).setdefault(title, {})["bbcode_content"] = bbcode
         self.save_process_threads_data()
-        self._current_thread_category = None
-        self._current_thread_title = None
+        logging.info(f"Proceed Template updated: {category}/{title}, len={len(bbcode)}")
+        status_item = self.process_threads_table.item(row, 0)
+        if status_item:
+            status_item.setData(Qt.UserRole + 1, "Converted")
+        self.process_threads_table.viewport().update()
