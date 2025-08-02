@@ -1,4 +1,4 @@
-# ★ cover_regex + {COVER} support added ★
+# ★ build unified DESC from desc_regex groups ★
 import json
 import re
 from pathlib import Path
@@ -149,16 +149,26 @@ def apply_template(bbcode: str, template: str, regexes: dict) -> str:
         if m is None:
             # ignore invalid patterns
             continue
+        if key == "desc_regex":
+            if not m or m.lastindex < 2:
+                continue
+            groups["format"] = m.group(1)
+            groups["size"] = m.group(2)
+            spans.append(m.span(0))
+            continue
         if not m or m.lastindex != 1:
             return bbcode
         groups[key] = m.group(1)  # ما زلنا نحتاج النص الداخلى
         # لو كان المفتاح body_regex أو cover_regex احذف المقطع كله (span(0))
-        if key in ("body_regex", "cover_regex", "links_regex"):
+        if key in ("body_regex", "cover_regex"):
             spans.append(m.span(0))  # احذف المقطع كله (السطر وما بعده)
         else:
             spans.append(m.span(1))  # احذف النصّ الداخلى فقط
         if not template:
             continue
+    desc = ""
+    if "format" in groups and "size" in groups:
+        desc = f"Genre: Sachbuch\nFormat: {groups['format'].lower()}\nGröße: {groups['size']}"
     if not template or not spans:
         return bbcode
 
@@ -171,8 +181,7 @@ def apply_template(bbcode: str, template: str, regexes: dict) -> str:
         template
         .replace("{HEADER}", groups.get("header_regex", ""))
         .replace("{COVER}",  groups.get("cover_regex", ""))
-        .replace("{DESC}",   groups.get("desc_regex", ""))
-        .replace("{LINKS}",  groups.get("links_regex", ""))
+        .replace("{DESC}",   desc)
         .replace("{BODY}",   groups.get("body_regex", ""))
     )
 
