@@ -7975,8 +7975,13 @@ class ForumBotGUI(QMainWindow):
             QMessageBox.information(self, "Proceed Template", "Invalid selection.")
             return
         title = title_item.text()
-        category = category_item.text().lower()
+        category = category_item.text()
         thread = self.process_threads.get(category, {}).get(title)
+        if not thread:
+            category_lower = category.lower()
+            thread = self.process_threads.get(category_lower, {}).get(title)
+            if thread:
+                category = category_lower
         if not thread:
             logging.error(f"Proceed Template: thread not found for {category}/{title}")
             return
@@ -7995,7 +8000,7 @@ class ForumBotGUI(QMainWindow):
             logging.exception("Proceed Template conversion failed")
             QMessageBox.information(self, "Proceed Template", "Conversion failed.")
             return
-        self.process_bbcode_editor.setText(bbcode)
+        self.process_bbcode_editor.set_text(bbcode)
         self.process_threads.setdefault(category, {}).setdefault(title, {})["bbcode_content"] = bbcode
         self.save_process_threads_data()
         logging.info(f"Proceed Template updated: {category}/{title}, len={len(bbcode)}")
