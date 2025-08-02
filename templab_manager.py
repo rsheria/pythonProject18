@@ -1,4 +1,4 @@
-# ★ Proceed Template fixed: now converts + logs ★
+# ★ cover_regex + {COVER} support added ★
 import json
 import re
 from pathlib import Path
@@ -84,10 +84,23 @@ def load_regex(author: str, category: str) -> dict:
     if path.exists():
         try:
             data = json.load(open(path, "r", encoding="utf-8"))
+            data = {
+                "header_regex": data.get("header_regex", ""),
+                "cover_regex": data.get("cover_regex", ""),
+                "desc_regex": data.get("desc_regex", ""),
+                "links_regex": data.get("links_regex", ""),
+                "body_regex": data.get("body_regex", ""),
+            }
             return _compile(data)
         except Exception:
             pass
-    return _compile({"header_regex": "", "desc_regex": "", "links_regex": "", "body_regex": ""})
+    return _compile({
+        "header_regex": "",
+        "cover_regex": "",
+        "desc_regex": "",
+        "links_regex": "",
+        "body_regex": "",
+    })
 
 
 
@@ -138,23 +151,36 @@ def apply_template(bbcode: str, template: str, regexes: dict) -> str:
             continue
         if not m or m.lastindex != 1:
             return bbcode
-        groups[key] = m.group(1)
-        spans.append(m.span(1))
+        groups[key] = m.group(1)  # ما زلنا نحتاج النص الداخلى
+        # لو كان المفتاح body_regex أو cover_regex احذف المقطع كله (span(0))
+        if key in ("body_regex", "cover_regex", "links_regex"):
+            spans.append(m.span(0))  # احذف المقطع كله (السطر وما بعده)
+        else:
+            spans.append(m.span(1))  # احذف النصّ الداخلى فقط
         if not template:
             continue
     if not template or not spans:
         return bbcode
 
-    start = min(s for s, _ in spans)
-    end = max(e for _, e in spans)
-    prefix = bbcode[:start]
-    suffix = bbcode[end:]
-    result = template
-    result = result.replace("{HEADER}", groups.get("header_regex", ""))
-    result = result.replace("{DESC}", groups.get("desc_regex", ""))
-    result = result.replace("{LINKS}", groups.get("links_regex", ""))
-    result = result.replace("{BODY}", groups.get("body_regex", ""))
-    return prefix + result + suffix
+    # احذف كل المقاطع التي التقطتها الـ regex
+    for s, e in sorted(spans, key=lambda t: t[0], reverse=True):
+        bbcode = bbcode[:s] + bbcode[e:]
+
+    # املأ القالب بالبيانات
+    filled = (
+        template
+        .replace("{HEADER}", groups.get("header_regex", ""))
+        .replace("{COVER}",  groups.get("cover_regex", ""))
+        .replace("{DESC}",   groups.get("desc_regex", ""))
+        .replace("{LINKS}",  groups.get("links_regex", ""))
+        .replace("{BODY}",   groups.get("body_regex", ""))
+    )
+
+    # أدخِل القالب في أول موضع حُذِف
+    insert_at = min(s for s, _ in spans) if spans else len(bbcode)
+    return bbcode[:insert_at] + filled + bbcode[insert_at:]
+
+
 
 
 def convert(thread: dict, apply_hooks: bool = True) -> str:
@@ -168,6 +194,7 @@ def convert(thread: dict, apply_hooks: bool = True) -> str:
         logging.warning(f"Unified template missing for category '{category}'")
         return bbcode
     regexes = load_regex(author, category)
+    cover_found = bool(regexes.get("cover_regex") and _grab(regexes.get("cover_regex"), bbcode))
     bbcode = apply_template(bbcode, template, regexes)
 
     # ------------------------------------------------------------------
@@ -177,14 +204,8 @@ def convert(thread: dict, apply_hooks: bool = True) -> str:
         bbcode = bbcode.replace("{TITLE}", title)
 
     if "{COVER}" in bbcode:
-        # Extract the first image from the original BBCode and insert it
-        m = re.search(
-            r"\[img\](https?://[^\]]+)\[/img\]",
-            thread.get("bbcode_original", ""),
-            re.I,
-        )
-        cover_tag = f"[IMG]{m.group(1)}[/IMG]" if m else ""
-        bbcode = bbcode.replace("{COVER}", cover_tag)
+        if cover_found:
+            logging.info("Cover regex matched")
 
     if apply_hooks:
         img_hook = _HOOKS.get("rewrite_images")

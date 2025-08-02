@@ -1,4 +1,4 @@
-# ★ Proceed Template fixed: now converts + logs ★
+# ★ cover_regex + {COVER} support added ★
 from config.config import DATA_DIR
 from workers.download_worker import DownloadWorker
 from workers.upload_worker   import UploadWorker
@@ -1258,6 +1258,8 @@ class ForumBotGUI(QMainWindow):
 
         self.header_regex_edit, self.header_status = _field("Header")
         self.header_regex_edit.textChanged.connect(self.on_test_regex)
+        self.cover_regex_edit, self.cover_status = _field("Cover")
+        self.cover_regex_edit.textChanged.connect(self.on_test_regex)
         self.desc_regex_edit, self.desc_status = _field("Description")
         self.desc_regex_edit.textChanged.connect(self.on_test_regex)
         self.links_regex_edit, self.links_status = _field("Links")
@@ -7869,6 +7871,7 @@ class ForumBotGUI(QMainWindow):
         data = templab_manager.load_regex(author, category)
 
         self.header_regex_edit.setText(self._to_str(data.get("header_regex")))
+        self.cover_regex_edit.setText(self._to_str(data.get("cover_regex")))
         self.desc_regex_edit.setText(self._to_str(data.get("desc_regex")))
         self.links_regex_edit.setText(self._to_str(data.get("links_regex")))
         self.body_regex_edit.setText(self._to_str(data.get("body_regex")))
@@ -7881,6 +7884,7 @@ class ForumBotGUI(QMainWindow):
         self.template_edit.setPlainText(tpl)
         data = templab_manager.load_regex(author, category)
         self.header_regex_edit.setText(self._to_str(data.get("header_regex")))
+        self.cover_regex_edit.setText(self._to_str(data.get("cover_regex")))
         self.desc_regex_edit.setText(self._to_str(data.get("desc_regex")))
         self.links_regex_edit.setText(self._to_str(data.get("links_regex")))
         self.body_regex_edit.setText(self._to_str(data.get("body_regex")))
@@ -7900,6 +7904,7 @@ class ForumBotGUI(QMainWindow):
             return
         data = {
             "header_regex": self.header_regex_edit.text(),
+            "cover_regex": self.cover_regex_edit.text(),
             "desc_regex": self.desc_regex_edit.text(),
             "links_regex": self.links_regex_edit.text(),
             "body_regex": self.body_regex_edit.text(),
@@ -7915,6 +7920,7 @@ class ForumBotGUI(QMainWindow):
         tpl = self.template_edit.toPlainText()
         data = {
             "header_regex": self.header_regex_edit.text(),
+            "cover_regex": self.cover_regex_edit.text(),
             "desc_regex": self.desc_regex_edit.text(),
             "links_regex": self.links_regex_edit.text(),
             "body_regex": self.body_regex_edit.text(),
@@ -7924,6 +7930,7 @@ class ForumBotGUI(QMainWindow):
 
         for edit, status_label, key in [
             (self.header_regex_edit, self.header_status, "header_regex"),
+            (self.cover_regex_edit, self.cover_status, "cover_regex"),
             (self.desc_regex_edit, self.desc_status, "desc_regex"),
             (self.links_regex_edit, self.links_status, "links_regex"),
             (self.body_regex_edit, self.body_status, "body_regex"),
