@@ -1,4 +1,4 @@
-# ★ cover_regex + {COVER} support added ★
+# ★ fastpic upload now runs after template insertion (cover_regex) ★
 from config.config import DATA_DIR
 from workers.download_worker import DownloadWorker
 from workers.upload_worker   import UploadWorker
@@ -873,7 +873,7 @@ class ForumBotGUI(QMainWindow):
         self.init_settings_view()  # Initialize the new Settings view
 
         templab_manager.set_hooks({
-            "rewrite_images": getattr(self, "_rewrite_images", None),
+            "rewrite_images": None,
             "rewrite_links": getattr(self, "_rewrite_links", None),
             "reload_tree": lambda: QMetaObject.invokeMethod(self, "reload_templab_tree", Qt.QueuedConnection),
         })
@@ -7939,12 +7939,8 @@ class ForumBotGUI(QMainWindow):
             status_label.setText("✓" if ok else "✕")
 
     def _rewrite_images(self, bbcode: str) -> str:
-        """Rewrite image tags using the existing bot helper."""
-        try:
-            if getattr(self, "bot", None):
-                return self.bot.process_images_in_content(bbcode)
-        except Exception:
-            logging.exception("image rewrite failed")
+        """Image rewriting moved to proceed step; avoid pre-processing here."""
+        # Earlier fastpic processing is disabled to prevent double uploads
         return bbcode
 
     def _rewrite_links(self, bbcode: str) -> str:
@@ -7994,31 +7990,33 @@ class ForumBotGUI(QMainWindow):
         if not thread:
             logging.error(f"Proceed Template: thread not found for {category}/{title}")
             return
-        thread_dict = {
-            "title": title,
-            "category": category,
-            "author": thread.get("author", ""),
-            "bbcode_original": thread.get("bbcode_original") or thread.get("bbcode_content", ""),
-        }
-        if not thread_dict["bbcode_original"]:
+        raw_bbcode = thread.get("bbcode_original") or thread.get("bbcode_content", "")
+        if not raw_bbcode:
             QMessageBox.information(self, "Proceed Template", "No BBCode available.")
             return
-        self._current_thread_category = category
-        self._current_thread_title = title
-        try:
-            bbcode = templab_manager.convert(thread_dict)
-        except Exception:
-            logging.exception("Proceed Template conversion failed")
-            QMessageBox.information(self, "Proceed Template", "Conversion failed.")
-            return
-        finally:
-            # Ensure attributes don't leak to subsequent operations
-            self._current_thread_category = ""
-            self._current_thread_title = ""
-        self.process_bbcode_editor.set_text(bbcode)
-        self.process_threads.setdefault(category, {}).setdefault(title, {})["bbcode_content"] = bbcode
+        unified_template = templab_manager.get_unified_template(category)
+        regex_dict = templab_manager.load_regex(thread.get("author", ""), category)
+        bbcode_filled = templab_manager.apply_template(raw_bbcode, unified_template, regex_dict)
+
+        if getattr(self, "bot", None):
+            try:
+                logging.info("🖼️  Processing images via bot …")
+                processed = self.bot.process_images_in_content(bbcode_filled)
+                logging.info(f"🔄 Content changed: {processed != bbcode_filled}")
+                bbcode_filled = processed
+            except Exception:
+                logging.exception("image rewrite failed")
+        else:
+            logging.warning("⚠️ bot is not available.")
+
+        self.process_bbcode_editor.set_text(bbcode_filled)
+        thread["bbcode_content"] = bbcode_filled
+        self.current_post_data = thread
+        self.current_post_data["bbcode_content"] = bbcode_filled
         self.save_process_threads_data()
-        logging.info(f"Proceed Template updated: {category}/{title}, len={len(bbcode)}")
+        QMessageBox.information(self, "Proceed Template", "Template applied & image uploaded")
+
+        logging.info(f"Proceed Template updated: {category}/{title}, len={len(bbcode_filled)}")
         status_item = self.process_threads_table.item(row, 0)
         if status_item:
             status_item.setData(Qt.UserRole + 1, "Converted")
