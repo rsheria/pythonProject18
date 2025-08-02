@@ -7994,12 +7994,18 @@ class ForumBotGUI(QMainWindow):
         if not thread_dict["bbcode_original"]:
             QMessageBox.information(self, "Proceed Template", "No BBCode available.")
             return
+        self._current_thread_category = category
+        self._current_thread_title = title
         try:
             bbcode = templab_manager.convert(thread_dict)
         except Exception:
             logging.exception("Proceed Template conversion failed")
             QMessageBox.information(self, "Proceed Template", "Conversion failed.")
             return
+        finally:
+            # Ensure attributes don't leak to subsequent operations
+            self._current_thread_category = ""
+            self._current_thread_title = ""
         self.process_bbcode_editor.set_text(bbcode)
         self.process_threads.setdefault(category, {}).setdefault(title, {})["bbcode_content"] = bbcode
         self.save_process_threads_data()
