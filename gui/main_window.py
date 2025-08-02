@@ -7953,7 +7953,8 @@ class ForumBotGUI(QMainWindow):
                 return bbcode
             lines = []
             for line in bbcode.splitlines():
-                if re.search(r"\[url|https?://", line, re.I):
+                lower = line.lower()
+                if "[url" in lower or re.search(r"https?://", line, re.I):
                     continue
                 lines.append(line)
             bbcode = "\n".join(lines).rstrip()
@@ -7974,6 +7975,10 @@ class ForumBotGUI(QMainWindow):
         title = self.process_threads_table.item(row, 0).text()
         category = self.process_threads_table.item(row, 1).text().lower()
         info = self.process_threads.get(category, {}).get(title, {})
+        # Use the original BBCode if available; fall back to current content
+        raw_bbcode = info.get("bbcode_original") or info.get("bbcode_content", "")
+        if not raw_bbcode:
+            return
         # Use the original BBCode if available; fall back to current content
         raw_bbcode = info.get("bbcode_original") or info.get("bbcode_content", "")
         thread = {
