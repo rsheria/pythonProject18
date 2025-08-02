@@ -5616,16 +5616,10 @@ class ForumBotGUI(QMainWindow):
 
                 original_bbcode = bbcode_content
 
-                converted = templab_manager.convert(
-                    {
-                        "category": category_name,
-                        "author": author,
-                        "bbcode_original": original_bbcode,
-                    },
-                    apply_hooks=False,
-                )
-                if converted:
-                    bbcode_content = converted
+                # Leave BBCode unmodified during tracking. Template conversion
+                # and image/link rewriting will be handled later when the user
+                # invokes the "Proceed Template" action.
+                bbcode_content = original_bbcode
 
                 # Normalize links if any
                 links = links_dict  # Use the links from the new thread structure
@@ -7992,6 +7986,9 @@ class ForumBotGUI(QMainWindow):
         bbcode = templab_manager.convert(thread, apply_hooks=True)
         self.process_bbcode_editor.set_text(bbcode)
         info["bbcode_content"] = bbcode
+        # Keep version history in sync with the modified BBCode
+        if info.get("versions"):
+            info["versions"][0]["bbcode_content"] = bbcode
         self.save_process_threads_data()
         self._current_thread_category = None
         self._current_thread_title = None
