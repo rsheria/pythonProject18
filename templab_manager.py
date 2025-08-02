@@ -171,16 +171,11 @@ def convert(thread: dict, apply_hooks: bool = True) -> str:
     bbcode = apply_template(bbcode, template, regexes)
 
     # ------------------------------------------------------------------
-    # Replace common placeholders before applying hooks
+    # Replace common placeholders and apply hooks
     # ------------------------------------------------------------------
     if "{TITLE}" in bbcode:
         bbcode = bbcode.replace("{TITLE}", title)
 
-    if "{COVER}" in bbcode:
-        # Extract the first image from the original BBCode and insert it
-        m = re.search(r"\[img\](https?://[^\]]+)\[/img\]", thread.get("bbcode_original", ""), re.I)
-        cover_tag = f"[IMG]{m.group(1)}[/IMG]" if m else ""
-        bbcode = bbcode.replace("{COVER}", cover_tag)
     if apply_hooks:
         img_hook = _HOOKS.get("rewrite_images")
         if img_hook:
@@ -188,4 +183,9 @@ def convert(thread: dict, apply_hooks: bool = True) -> str:
         link_hook = _HOOKS.get("rewrite_links")
         if link_hook:
             bbcode = link_hook(bbcode)
+    if "{COVER}" in bbcode:
+        # Extract the first image from the processed BBCode and insert it
+        m = re.search(r"\[img\](https?://[^\]]+)\[/img\]", bbcode, re.I)
+        cover_tag = f"[IMG]{m.group(1)}[/IMG]" if m else ""
+        bbcode = bbcode.replace("{COVER}", cover_tag)
     return bbcode
