@@ -14,7 +14,7 @@ def test_apply_template_partial_match():
         "links_regex": r"Link:\\s+(.*)"  # will not match
     }
     result = apply_template(bbcode, template, regexes)
-    assert result.startswith("[b]header")
+    assert result.startswith("header")
     assert "body" in result
     assert "Links: none" in result
 

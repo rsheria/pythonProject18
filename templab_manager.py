@@ -163,8 +163,9 @@ def apply_template(bbcode: str, template: str, regexes: dict) -> str:
         if not m or m.lastindex != 1:
             return bbcode
         groups[key] = m.group(1)  # ما زلنا نحتاج النص الداخلى
-        # لو كان المفتاح body_regex أو cover_regex احذف المقطع كله (span(0))
-        if key in ("body_regex", "cover_regex"):
+        # لو كان المفتاح body_regex أو cover_regex أو links_regex أو header_regex احذف المقطع كله (span(0))
+        if key in ("body_regex", "cover_regex", "links_regex", "header_regex"):
+            # ★ header_regex now deleted with span(0) to avoid double [CENTER] ★
             spans.append(m.span(0))  # احذف المقطع كله (السطر وما بعده)
         else:
             spans.append(m.span(1))  # احذف النصّ الداخلى فقط
