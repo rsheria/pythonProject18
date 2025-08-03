@@ -1,4 +1,4 @@
-# ★ Dual DESC mode: supports 1-group legacy & 2-group modern ★
+# ★ header merged (author-title) & desc flexible (size/format order) ★
 import json
 import re
 from pathlib import Path
@@ -140,81 +140,85 @@ def _test_regex(pattern: str, text: str) -> bool:
 
 
 def apply_template(bbcode: str, template: str, regexes: dict) -> str:
-       groups = {}
-       spans = []
-       for key, pattern in regexes.items():
-           if not pattern:
-               continue
-           m = _grab(pattern, bbcode)
-           if m is None:
-               # ignore invalid patterns
-               continue
+    """Return bbcode with `template` applied using `regexes`."""
+    groups: dict[str, str] = {}
+    spans: list[tuple[int, int]] = []
 
-           # -------- specialised handling --------
-           if key == "desc_regex":
-               if not m:
-                   continue
-               if m.lastindex == 2:                # (1)=format  (2)=size
-                   groups["format"] = m.group(1)
-                   groups["size"]   = m.group(2)
-                   spans.append(m.span(0))         # remove whole block
-               elif m.lastindex == 1:              # legacy one-group block
-                   groups["desc_block"] = m.group(1)
-                   spans.append(m.span(0))
-               continue
+    # ---------- 1. اجمع القيم واحذف المقاطع الأصلية ----------
+    for key, pattern in regexes.items():
+        if not pattern:
+            continue
 
-           if key == "header_regex":
-               if not m:
-                   continue
-               if m.lastindex == 2:                # author + subtitle
-                   groups["header_regex"] = f"{m.group(1).strip()} - {m.group(2).strip()}"
-               else:
-                   groups["header_regex"] = m.group(1).strip()
-               spans.append(m.span(0))             # remove entire header line(s)
-               continue
-           # --------------------------------------
+        m = _grab(pattern, bbcode)
+        if m is None:
+            # نمط غير صالح
+            continue
 
-           if not m or m.lastindex != 1:
-               return bbcode
-           groups[key] = m.group(1)
+        # ---- header: مؤلِّف + عنوان (مجموعتـان) ---------------
+        if key == "header_regex":
+            if m.lastindex == 2:
+                groups["header_regex"] = f"{m.group(1).strip()} - {m.group(2).strip()}"
+            else:
+                groups["header_regex"] = m.group(1).strip()
+            spans.append(m.span(0))        # احذف السطرين الأصليَّين
+            continue
+        # ابحث عن Format و Größe منفصلين – يعمل مهما كان ترتيبهما أو وجود |
+        fmt = re.search(r"(?i)Format:\s*([^\r\n|]+)", bbcode)
+        siz = re.search(r"(?i)Gr(?:ö|o)ße:\s*([\d\.,]+\s*[kmg]?b)", bbcode)
+        if fmt:
+            groups["format"] = fmt.group(1).strip()
+        if siz:
+            groups["size"] = siz.group(1).strip()
+        # ---- description: Format / Size (أى ترتيب) ------------
+        if key == "desc_regex":
+            # النمط يعيد أربع مجموعات؛ اثنتان منهما None حسب الترتيب
+            groups["format"] = m.group(1) or m.group(4)
+            groups["size"] = m.group(2) or m.group(3)
+            spans.append(m.span(0))        # احذف الكتلة الأصلية
+            continue
 
-           # remove block or inner capture
-           if key in ("body_regex", "cover_regex", "links_regex"):
-               spans.append(m.span(0))              # kill whole block
-           else:
-               spans.append(m.span(1))              # kill inner text only
+        # ---- الأنماط الأخرى (مطلوب مجموعة واحدة) -------------
+        if not m or m.lastindex != 1:
+            return bbcode                   # نرجع النص الأصلى لو فشل
+        groups[key] = m.group(1)
 
-       if not template or not spans:
-           return bbcode
+        # احذف الكتلة كلها لبعض المفاتيح
+        if key in ("body_regex", "cover_regex", "links_regex"):
+            spans.append(m.span(0))
+        else:
+            spans.append(m.span(1))
 
-       # delete captured spans (reverse order)
-       for s, e in sorted(spans, key=lambda t: t[0], reverse=True):
-           bbcode = bbcode[:s] + bbcode[e:]
+    if not template or not spans:
+        return bbcode
 
-       # -------- build description --------
-       if "format" in groups and "size" in groups:
-           desc_text = (
-               "Genre: Sachbuch\n"
-               f"Format: {groups['format'].lower()}\n"
-               f"Größe: {groups['size'].upper()}"
-           )
-       elif "desc_block" in groups:
-           desc_text = groups["desc_block"]
-       else:
-           desc_text = ""
-       # -----------------------------------
+    # ---------- 2. احذف المقاطع فى ترتيب عكسى ----------
+    for s, e in sorted(spans, key=lambda t: t[0], reverse=True):
+        bbcode = bbcode[:s] + bbcode[e:]
 
-       filled = (
-           template
-           .replace("{TITLE}", groups.get("header_regex", ""))
-           .replace("{COVER}", groups.get("cover_regex", ""))
-           .replace("{DESC}",  desc_text)
-           .replace("{BODY}",  groups.get("body_regex", ""))
-       )
+    # ---------- 3. بِنِى الوصف ----------
+    if "format" in groups and "size" in groups:
+        desc_text = (
+            "Genre: Sachbuch\n"
+            f"Format: {groups['format'].strip().lower()}\n"
+            f"Größe: {groups['size'].upper()}"
+        )
+    elif "desc_block" in groups:
+        desc_text = groups["desc_block"]
+    else:
+        desc_text = ""
 
-       insert_at = min(s for s, _ in spans) if spans else len(bbcode)
-       return bbcode[:insert_at] + filled + bbcode[insert_at:]
+    # ---------- 4. املأ القالب ----------
+    filled = (
+        template
+        .replace("{TITLE}", groups.get("header_regex", ""))
+        .replace("{COVER}", groups.get("cover_regex", ""))
+        .replace("{DESC}",  desc_text)
+        .replace("{BODY}",  groups.get("body_regex", ""))
+    )
 
+    # أدخِل القالب فى أول موضعٍ حُذِف
+    insert_at = min(s for s, _ in spans) if spans else len(bbcode)
+    return bbcode[:insert_at] + filled + bbcode[insert_at:]
 def convert(thread: dict, apply_hooks: bool = True) -> str:
     category = str(thread.get("category", "")).lower()
     title = thread.get("title", "")
