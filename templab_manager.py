@@ -5,6 +5,10 @@ from pathlib import Path
 from config.config import DATA_DIR
 from utils.utils import sanitize_filename
 import logging
+from dotenv import load_dotenv, find_dotenv
+
+# Ensure environment variables from .env are loaded before accessing them
+load_dotenv(find_dotenv())
 # ------------------------------------------------------------------
 # Directories
 # ------------------------------------------------------------------
