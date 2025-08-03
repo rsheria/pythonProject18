@@ -1236,7 +1236,7 @@ class ForumBotGUI(QMainWindow):
         self.save_template_btn.clicked.connect(self.on_save_template)
         tpl_btns.addWidget(self.save_template_btn)
         self.test_regex_btn = QPushButton("Test")
-        self.test_regex_btn.clicked.connect(self.on_test_regex)
+        self.test_regex_btn.setEnabled(False)
         tpl_btns.addWidget(self.test_regex_btn)
         tpl_layout.addLayout(tpl_btns)
         top_splitter.addWidget(template_widget)
@@ -1257,18 +1257,18 @@ class ForumBotGUI(QMainWindow):
 
 
         self.header_regex_edit, self.header_status = _field("Header")
-        self.header_regex_edit.textChanged.connect(self.on_test_regex)
+        self.header_regex_edit.setReadOnly(True)
         self.cover_regex_edit, self.cover_status = _field("Cover")
-        self.cover_regex_edit.textChanged.connect(self.on_test_regex)
+        self.cover_regex_edit.setReadOnly(True)
         self.desc_regex_edit, self.desc_status = _field("Description")
-        self.desc_regex_edit.textChanged.connect(self.on_test_regex)
+        self.desc_regex_edit.setReadOnly(True)
         self.links_regex_edit, self.links_status = _field("Links")
-        self.links_regex_edit.textChanged.connect(self.on_test_regex)
+        self.links_regex_edit.setReadOnly(True)
         self.body_regex_edit, self.body_status = _field("Body")
-        self.body_regex_edit.textChanged.connect(self.on_test_regex)
+        self.body_regex_edit.setReadOnly(True)
 
         self.save_regex_btn = QPushButton("Save Regex")
-        self.save_regex_btn.clicked.connect(self.on_save_regex)
+        self.save_regex_btn.setEnabled(False)
         form.addWidget(self.save_regex_btn)
         top_splitter.addWidget(regex_widget)
 
@@ -7969,8 +7969,8 @@ class ForumBotGUI(QMainWindow):
             QMessageBox.information(self, "Proceed Template", "No BBCode available.")
             return
         unified_template = templab_manager.get_unified_template(category)
-        regex_dict = templab_manager.load_regex(thread.get("author", ""), category)
-        bbcode_filled = templab_manager.apply_template(raw_bbcode, unified_template, regex_dict)
+        regex_fallback = templab_manager.load_regex(thread.get("author", ""), category)
+        bbcode_filled = templab_manager.apply_template(raw_bbcode, unified_template, regex_fallback)
 
         if getattr(self, "bot", None):
             try:

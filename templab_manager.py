@@ -1,6 +1,6 @@
 # ★ header merged (author-title) & desc flexible (size/format order) ★
 import json
-import re
+import os, json, re
 from pathlib import Path
 from config.config import DATA_DIR
 from utils.utils import sanitize_filename
@@ -8,7 +8,13 @@ import logging
 # ------------------------------------------------------------------
 # Directories
 # ------------------------------------------------------------------
+try:  # openai may be missing in some environments
+    import openai  # type: ignore
+except Exception:  # pragma: no cover - fallback for missing dependency
+    openai = None  # type: ignore
 
+if openai:
+    openai.api_key = os.getenv("OPENAI_API_KEY")
 def _ensure_dir(sub: str) -> Path:
     base = Path(DATA_DIR)
     path = base / sub
@@ -65,6 +71,35 @@ def _grab(pattern, text: str):
     except re.error:
         return None
     return pat.search(text)
+
+def parse_bbcode_ai(raw: str) -> dict:
+    """Return dict with keys title, cover, desc, body, links."""
+    # Truncate excessively long posts after the download section
+    if len(raw) > 28000:
+        idx = raw.lower().find("[download")
+        if idx != -1:
+            raw = raw[:idx]
+
+    if not openai or not getattr(openai, "api_key", None):
+        raise json.JSONDecodeError("missing api key", raw, 0)
+
+    sys = (
+        "You are a strict BBCode parser. "
+        "Return ONLY valid JSON that matches this schema: "
+        '{"title":string,"cover":string|null,"desc":string|null,'
+        '"body":string|null,"links":[string]}'
+        " If a field does not exist use null or [] accordingly."
+    )
+    rsp = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo-0125",
+        temperature=0,
+        max_tokens=300,
+        messages=[
+            {"role": "system", "content": sys},
+            {"role": "user", "content": raw},
+        ],
+    )
+    return json.loads(rsp.choices[0].message.content)
 
 def get_unified_template(category: str) -> str:
     path = TEMPLAB_DIR / f"{sanitize_filename(category)}.template"
@@ -139,7 +174,7 @@ def _test_regex(pattern: str, text: str) -> bool:
     return bool(m and m.lastindex == 1)
 
 
-def apply_template(bbcode: str, template: str, regexes: dict) -> str:
+def _apply_template_regex(bbcode: str, template: str, regexes: dict) -> str:
     """Return bbcode with `template` applied using `regexes`."""
     groups: dict[str, str] = {}
     spans: list[tuple[int, int]] = []
@@ -219,6 +254,25 @@ def apply_template(bbcode: str, template: str, regexes: dict) -> str:
     # أدخِل القالب فى أول موضعٍ حُذِف
     insert_at = min(s for s, _ in spans) if spans else len(bbcode)
     return bbcode[:insert_at] + filled + bbcode[insert_at:]
+
+def apply_template(bbcode: str, template: str, regexes: dict) -> str:
+    """Parse BBCode via AI and fill the template. Fallback to regex."""
+    try:
+        ai = parse_bbcode_ai(bbcode)
+    except Exception:
+        logging.exception("AI parsing failed; using regex fallback")
+        return _apply_template_regex(bbcode, template, regexes)
+
+    filled = (
+        template
+        .replace("{TITLE}", ai.get("title", ""))
+        .replace("{COVER}", f"[IMG]{ai['cover']}[/IMG]" if ai.get("cover") else "")
+        .replace("{DESC}", ai.get("desc", ""))
+        .replace("{BODY}", ai.get("body", ""))
+        .replace("{LINKS}", "\n".join(ai.get("links", [])))
+    ).strip()
+
+    return filled
 def convert(thread: dict, apply_hooks: bool = True) -> str:
     category = str(thread.get("category", "")).lower()
     title = thread.get("title", "")
@@ -230,7 +284,6 @@ def convert(thread: dict, apply_hooks: bool = True) -> str:
         logging.warning(f"Unified template missing for category '{category}'")
         return bbcode
     regexes = load_regex(author, category)
-    cover_found = bool(regexes.get("cover_regex") and _grab(regexes.get("cover_regex"), bbcode))
     bbcode = apply_template(bbcode, template, regexes)
 
     # ------------------------------------------------------------------
@@ -238,10 +291,6 @@ def convert(thread: dict, apply_hooks: bool = True) -> str:
     # ------------------------------------------------------------------
     if "{TITLE}" in bbcode:
         bbcode = bbcode.replace("{TITLE}", title)
-
-    if "{COVER}" in bbcode:
-        if cover_found:
-            logging.info("Cover regex matched")
 
     if apply_hooks:
         img_hook = _HOOKS.get("rewrite_images")

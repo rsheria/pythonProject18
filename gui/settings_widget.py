@@ -269,11 +269,12 @@ class SettingsWidget(QWidget):
         template_layout = QVBoxLayout(template_group)
         self.template_combo = QComboBox()
         self.template_combo.addItems([f"Template {i+1}" for i in range(len(LINK_TEMPLATE_PRESETS))])
-        self.template_combo.currentIndexChanged.connect(self._on_template_selected)
+        self.template_combo.setEnabled(False)
         template_layout.addWidget(self.template_combo)
         self.links_template_edit = QPlainTextEdit()
         self.links_template_edit.setPlaceholderText("Use placeholders like {LINK_RG} and {PART}")
         self.links_template_edit.setPlainText(LINK_TEMPLATE_PRESETS[0])
+        self.links_template_edit.setReadOnly(True)
         template_layout.addWidget(self.links_template_edit)
         general_layout.addWidget(template_group)
 
