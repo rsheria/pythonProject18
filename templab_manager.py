@@ -9,16 +9,35 @@ from dotenv import load_dotenv, find_dotenv
 
 # Ensure environment variables from .env are loaded before accessing them
 load_dotenv(find_dotenv())
+
+# ------------------------------------------------------------------
+# Directories
+# OpenAI client (handles both legacy and new SDKs)
+# ------------------------------------------------------------------
+_OPENAI_CLIENT = None
+_API_KEY = os.getenv("OPENAI_API_KEY")
+try:
+    from openai import OpenAI  # type: ignore
+
+    if _API_KEY:
+        _OPENAI_CLIENT = OpenAI(api_key=_API_KEY)
+except Exception:  # pragma: no cover - fallback for missing dependency
+    try:  # legacy `openai` package (<1.x)
+        import openai  # type: ignore
+
+        if _API_KEY:
+            openai.api_key = _API_KEY
+            _OPENAI_CLIENT = openai
+    except Exception:
+        _OPENAI_CLIENT = None
+
 # ------------------------------------------------------------------
 # Directories
 # ------------------------------------------------------------------
-try:  # openai may be missing in some environments
-    import openai  # type: ignore
-except Exception:  # pragma: no cover - fallback for missing dependency
-    openai = None  # type: ignore
 
-if openai:
-    openai.api_key = os.getenv("OPENAI_API_KEY")
+# ------------------------------------------------------------------
+# Directories
+# ------------------------------------------------------------------
 def _ensure_dir(sub: str) -> Path:
     base = Path(DATA_DIR)
     path = base / sub
@@ -80,31 +99,49 @@ def parse_bbcode_ai(raw: str) -> dict:
     """Return dict with keys title, cover, desc, body, links."""
     # Truncate excessively long posts after the download section
     if len(raw) > 28000:
-        idx = raw.lower().find("[download")
+        idx = raw.lower().find('[download')
         if idx != -1:
             raw = raw[:idx]
 
-    if not openai or not getattr(openai, "api_key", None):
-        raise json.JSONDecodeError("missing api key", raw, 0)
+    if not _OPENAI_CLIENT:
+        raise json.JSONDecodeError('missing api key', raw, 0)
 
     sys = (
-        "You are a strict BBCode parser. "
-        "Return ONLY valid JSON that matches this schema: "
+        'You are a strict BBCode parser. '
+        'Return ONLY valid JSON that matches this schema: '
         '{"title":string,"cover":string|null,"desc":string|null,'
         '"body":string|null,"links":[string]}'
-        " If a field does not exist use null or [] accordingly."
+        ' If a field does not exist use null or [] accordingly.'
     )
-    rsp = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo-0125",
-        temperature=0,
-        max_tokens=300,
-        messages=[
-            {"role": "system", "content": sys},
-            {"role": "user", "content": raw},
-        ],
-    )
-    return json.loads(rsp.choices[0].message.content)
 
+    messages = [
+        {"role": "system", "content": sys},
+        {"role": "user", "content": raw},
+    ]
+    logging.info('🧠 Parsing BBCode via OpenAI')
+    try:
+        if hasattr(_OPENAI_CLIENT, 'chat'):
+            rsp = _OPENAI_CLIENT.chat.completions.create(
+                model='gpt-4o-mini',
+                temperature=0,
+                max_tokens=300,
+                messages=messages,
+            )
+            content = rsp.choices[0].message.content
+        else:
+            rsp = _OPENAI_CLIENT.ChatCompletion.create(
+                model='gpt-3.5-turbo-0125',
+                temperature=0,
+                max_tokens=300,
+                messages=messages,
+            )
+            choice = rsp.choices[0]
+            message = choice['message'] if isinstance(choice, dict) else choice.message
+            content = message['content'] if isinstance(message, dict) else message.content
+    except Exception as e:
+        raise json.JSONDecodeError(str(e), raw, 0)
+
+    return json.loads(content)
 def get_unified_template(category: str) -> str:
     path = TEMPLAB_DIR / f"{sanitize_filename(category)}.template"
     if path.exists():
