@@ -123,6 +123,7 @@ def parse_bbcode_ai(raw: str) -> dict:
         if hasattr(_OPENAI_CLIENT, 'chat'):
             rsp = _OPENAI_CLIENT.chat.completions.create(
                 model='gpt-4o-mini',
+                response_format={"type": "json_object"},
                 temperature=0,
                 max_tokens=300,
                 messages=messages,
