@@ -1,43 +1,22 @@
 # ★ header merged (author-title) & desc flexible (size/format order) ★
 import json
-import os, json, re
+import os
+import re
 from pathlib import Path
 from config.config import DATA_DIR
 from utils.utils import sanitize_filename
 import logging
 from dotenv import load_dotenv, find_dotenv
-
+try:
+    import openai
+except Exception:  # pragma: no cover - optional dependency
+    openai = None
 # Ensure environment variables from .env are loaded before accessing them
 load_dotenv(find_dotenv())
 
-# ------------------------------------------------------------------
-# Directories
-# OpenAI client (handles both legacy and new SDKs)
-# ------------------------------------------------------------------
-_OPENAI_CLIENT = None
-_API_KEY = os.getenv("OPENAI_API_KEY")
-try:
-    from openai import OpenAI  # type: ignore
-
-    if _API_KEY:
-        _OPENAI_CLIENT = OpenAI(api_key=_API_KEY)
-except Exception:  # pragma: no cover - fallback for missing dependency
-    try:  # legacy `openai` package (<1.x)
-        import openai  # type: ignore
-
-        if _API_KEY:
-            openai.api_key = _API_KEY
-            _OPENAI_CLIENT = openai
-    except Exception:
-        _OPENAI_CLIENT = None
-
-# ------------------------------------------------------------------
-# Directories
-# ------------------------------------------------------------------
-
-# ------------------------------------------------------------------
-# Directories
-# ------------------------------------------------------------------
+_OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+if openai:
+    openai.api_key = _OPENAI_KEY
 def _ensure_dir(sub: str) -> Path:
     base = Path(DATA_DIR)
     path = base / sub
@@ -57,12 +36,55 @@ TEMPLAB_DIR = _ensure_dir("templab")
 
 _HOOKS = {"rewrite_images": None, "rewrite_links": None, "reload_tree": None}
 
+DEFAULT_PROMPT = """
+You are a deterministic BBCode extractor.
+Return ONLY pure JSON with these exact keys:
+{ "title":"","cover":"","desc":"","body":"","links":[] }
+• title         – full title, no BBCode
+• cover         – direct image URL or empty
+• desc          – three lines: Genre / Format / Größe
+• body          – summary text, no BBCode tags
+• links         – list of raw download URLs
+Never wrap the JSON in markdown, code-fences, or prose.
+"""
+
 
 def set_hooks(hooks: dict) -> None:
     """Set optional hooks for rewriting and GUI updates."""
     if not isinstance(hooks, dict):
         return
     _HOOKS.update(hooks)
+
+# Config helpers
+# ------------------------------------------------------------------
+def _cfg_path(category: str, author: str) -> Path:
+    cat_dir = USERS_DIR / sanitize_filename(category)
+    cat_dir.mkdir(parents=True, exist_ok=True)
+    return cat_dir / f"{sanitize_filename(author)}.json"
+
+
+def _load_cfg(category: str, author: str) -> dict:
+    path = _cfg_path(category, author)
+    if path.exists():
+        try:
+            data = json.load(open(path, "r", encoding="utf-8"))
+            if isinstance(data, list):  # backward compatibility
+                data = {"template": "", "prompt": DEFAULT_PROMPT, "threads": data}
+            data.setdefault("template", "")
+            data.setdefault("prompt", DEFAULT_PROMPT)
+            data.setdefault("threads", {})
+            return data
+        except Exception:
+            pass
+    return {"template": "", "prompt": DEFAULT_PROMPT, "threads": {}}
+
+
+def _save_cfg(category: str, author: str, data: dict) -> None:
+    path = _cfg_path(category, author)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+# ------------------------------------------------------------------
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
@@ -95,61 +117,30 @@ def _grab(pattern, text: str):
         return None
     return pat.search(text)
 
-def parse_bbcode_ai(raw: str) -> dict:
-    """Return dict with keys title, cover, desc, body, links."""
-    # Truncate excessively long posts after the download section
-    if len(raw) > 28000:
-        idx = raw.lower().find('[download')
-        if idx != -1:
-            raw = raw[:idx]
-
-    if not _OPENAI_CLIENT:
-        raise json.JSONDecodeError('missing api key', raw, 0)
-
-    sys = (
-        'You are a strict BBCode parser. '
-        'Return ONLY valid JSON that matches this schema: '
-        '{"title":string,"cover":string|null,"desc":string|null,'
-        '"body":string|null,"links":[string]}'
-        ' If a field does not exist use null or [] accordingly.'
-    )
+def parse_bbcode_ai(bbcode: str, prompt: str) -> dict:
+    """Use OpenAI to extract structured data from BBCode."""
+    if not openai or not _OPENAI_KEY:
+        raise json.JSONDecodeError("missing api key", bbcode, 0)
 
     messages = [
-        {"role": "system", "content": sys},
-        {"role": "user", "content": raw},
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": bbcode[:12000]},
     ]
-    logging.info('🧠 Parsing BBCode via OpenAI')
-    try:
-        if hasattr(_OPENAI_CLIENT, 'chat'):
-            rsp = _OPENAI_CLIENT.chat.completions.create(
-                model='gpt-4o-mini',
-                response_format={"type": "json_object"},
-                temperature=0,
-                max_tokens=300,
-                messages=messages,
-            )
-            content = rsp.choices[0].message.content
-        else:
-            rsp = _OPENAI_CLIENT.ChatCompletion.create(
-                model='gpt-3.5-turbo-0125',
-                temperature=0,
-                max_tokens=300,
-                messages=messages,
-            )
-            choice = rsp.choices[0]
-            message = choice['message'] if isinstance(choice, dict) else choice.message
-            content = message['content'] if isinstance(message, dict) else message.content
-    except Exception as e:
-        raise json.JSONDecodeError(str(e), raw, 0)
 
-    return json.loads(content)
 def get_unified_template(category: str) -> str:
     path = TEMPLAB_DIR / f"{sanitize_filename(category)}.template"
     if path.exists():
         return path.read_text(encoding="utf-8")
     return ""
 
-
+    rsp = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        temperature=0,
+        messages=messages,
+    )
+    js = json.loads(rsp.choices[0].message.content)
+    assert all(k in js for k in ("title", "cover", "desc", "body", "links"))
+    return js
 def save_unified_template(category: str, text: str) -> None:
     path = TEMPLAB_DIR / f"{sanitize_filename(category)}.template"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -189,21 +180,17 @@ def save_regex(author: str, category: str, data: dict) -> None:
 
 
 def store_post(author: str, category: str, thread: dict) -> None:
-    dir_path = USERS_DIR / sanitize_filename(category)
-    dir_path.mkdir(parents=True, exist_ok=True)
-    file = dir_path / f"{sanitize_filename(author)}.json"
-    if file.exists():
-        try:
-            posts = json.load(open(file, "r", encoding="utf-8"))
-        except Exception:
-            posts = []
-    else:
-        posts = []
-    if isinstance(posts, dict):
-        posts = posts.get("posts", [])
-    posts.append(thread)
-    with open(file, "w", encoding="utf-8") as f:
-        json.dump(posts, f, ensure_ascii=False, indent=2)
+    data = _load_cfg(category, author)
+    threads = data.setdefault("threads", {})
+    key = (
+            thread.get("thread_id")
+            or thread.get("title")
+            or thread.get("thread_title")
+            or thread.get("version_title")
+            or str(len(threads) + 1)
+    )
+    threads[key] = thread
+    _save_cfg(category, author, data)
     cb = _HOOKS.get("reload_tree")
     if cb:
         try:
@@ -297,42 +284,27 @@ def _apply_template_regex(bbcode: str, template: str, regexes: dict) -> str:
     insert_at = min(s for s, _ in spans) if spans else len(bbcode)
     return bbcode[:insert_at] + filled + bbcode[insert_at:]
 
-def apply_template(bbcode: str, template: str, regexes: dict) -> str:
-    """Parse BBCode via AI and fill the template. Fallback to regex."""
-    try:
-        ai = parse_bbcode_ai(bbcode)
-    except Exception:
-        logging.exception("AI parsing failed; using regex fallback")
-        return _apply_template_regex(bbcode, template, regexes)
+def apply_template(bbcode: str, category: str, author: str) -> str:
+    cfg = _load_cfg(category, author)
+    data = parse_bbcode_ai(bbcode, cfg.get("prompt", DEFAULT_PROMPT))
 
     filled = (
-        template
-        .replace("{TITLE}", ai.get("title", ""))
-        .replace("{COVER}", f"[IMG]{ai['cover']}[/IMG]" if ai.get("cover") else "")
-        .replace("{DESC}", ai.get("desc", ""))
-        .replace("{BODY}", ai.get("body", ""))
-        .replace("{LINKS}", "\n".join(ai.get("links", [])))
+        cfg["template"]
+        .replace("{TITLE}", data["title"])
+        .replace("{COVER}", data["cover"])
+        .replace("{DESC}", data["desc"])
+        .replace("{BODY}", data["body"])
+        .replace("{LINKS}", "\n".join(data["links"]))
     ).strip()
 
     return filled
 def convert(thread: dict, apply_hooks: bool = True) -> str:
     category = str(thread.get("category", "")).lower()
-    title = thread.get("title", "")
-    logging.debug(f"templab_manager.convert: {category}/{title}")
     author = thread.get("author", "")
     bbcode = thread.get("bbcode_original") or ""
-    template = get_unified_template(category)
-    if not template:
-        logging.warning(f"Unified template missing for category '{category}'")
+    if not category or not author:
         return bbcode
-    regexes = load_regex(author, category)
-    bbcode = apply_template(bbcode, template, regexes)
-
-    # ------------------------------------------------------------------
-    # Replace common placeholders before applying hooks
-    # ------------------------------------------------------------------
-    if "{TITLE}" in bbcode:
-        bbcode = bbcode.replace("{TITLE}", title)
+    bbcode = apply_template(bbcode, category, author)
 
     if apply_hooks:
         img_hook = _HOOKS.get("rewrite_images")

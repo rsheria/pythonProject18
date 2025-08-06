@@ -2,7 +2,8 @@ import sys
 import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from templab_manager import apply_template
+from templab_manager import _apply_template_regex
+
 
 
 def test_apply_template_partial_match():
@@ -13,21 +14,22 @@ def test_apply_template_partial_match():
         "body_regex": r"Some (.+) text",
         "links_regex": r"Link:\\s+(.*)"  # will not match
     }
-    result = apply_template(bbcode, template, regexes)
+    result = _apply_template_regex(bbcode, template, regexes)
     assert result.startswith("header")
     assert "body" in result
     assert "Links: none" in result
+
 
 
 def test_apply_template_no_match_returns_original():
     text = "plain text"
     template = "{TITLE}{BODY}"
     regexes = {"header_regex": r"nope", "body_regex": r"missing"}
-    assert apply_template(text, template, regexes) == text
+    assert _apply_template_regex(text, template, regexes) == text
 
 
 def test_apply_template_empty_regexes():
     text = "[b]header[/b]"
     template = "{TITLE}"
     regexes = {}
-    assert apply_template(text, template, regexes) == text
+    assert _apply_template_regex(text, template, regexes) == text

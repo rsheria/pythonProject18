@@ -99,6 +99,7 @@ from PyQt5.QtWidgets import QProgressBar
 from PyQt5.QtWidgets import QMessageBox as QtMessageBox
 from utils.paths import get_data_folder
 import templab_manager
+from templab_manager import DEFAULT_PROMPT
 # import the DownloadWorker AGAIN if needed
 class StatusBarMessageBox:
     """Replacement for QMessageBox that writes messages to the status bar."""
@@ -1266,6 +1267,14 @@ class ForumBotGUI(QMainWindow):
         self.links_regex_edit.setReadOnly(True)
         self.body_regex_edit, self.body_status = _field("Body")
         self.body_regex_edit.setReadOnly(True)
+
+        self.prompt_edit = QPlainTextEdit()
+        self.prompt_edit.setPlaceholderText("Custom GPT prompt for this author…")
+        form.addWidget(QLabel("Prompt"))
+        form.addWidget(self.prompt_edit)
+        self.test_prompt_btn = QPushButton("Test Prompt")
+        form.addWidget(self.test_prompt_btn)
+        self.test_prompt_btn.clicked.connect(self.on_test_prompt)
 
         self.save_regex_btn = QPushButton("Save Regex")
         self.save_regex_btn.setEnabled(False)
@@ -7812,9 +7821,16 @@ class ForumBotGUI(QMainWindow):
         item = self.templab_tree.currentItem()
         if item:
             self.on_templab_tree_item_clicked(item, 0)
-        elif getattr(self, "current_templab_category", None):
-            tpl = templab_manager.get_unified_template(self.current_templab_category)
-            self.template_edit.setPlainText(tpl)
+
+        elif getattr(self, "current_templab_category", None) and getattr(
+            self, "current_templab_author", None
+        ):
+            cfg = templab_manager._load_cfg(
+                self.current_templab_category, self.current_templab_author
+            )
+            self.template_edit.setPlainText(cfg.get("template", ""))
+            self.prompt_edit.setPlainText(cfg.get("prompt", DEFAULT_PROMPT))
+
     def reload_templab_tree(self):
         self.templab_tree.clear()
         base = templab_manager.USERS_DIR
@@ -7832,13 +7848,21 @@ class ForumBotGUI(QMainWindow):
                 author_item.setData(0, Qt.UserRole, ("author", cat_dir.name, author))
                 cat_item.addChild(author_item)
                 try:
-                    posts = json.load(open(file, "r", encoding="utf-8"))
+                    cfg = json.load(open(file, "r", encoding="utf-8"))
                 except Exception:
-                    posts = []
+                    cfg = {}
+                posts = cfg.get("threads", {})
                 if isinstance(posts, dict):
-                    posts = posts.get("posts", [])
-                for idx, post in enumerate(posts):
-                    title = post.get("title") or post.get("thread_title") or post.get("version_title") or f"Post {idx+1}"
+                    iterable = posts.values()
+                else:
+                    iterable = posts
+                for idx, post in enumerate(iterable):
+                    title = (
+                            post.get("title")
+                            or post.get("thread_title")
+                            or post.get("version_title")
+                            or f"Post {idx + 1}"
+                    )
                     p_item = QTreeWidgetItem([title])
                     p_item.setData(0, Qt.UserRole, ("post", cat_dir.name, author, post))
 
@@ -7860,14 +7884,15 @@ class ForumBotGUI(QMainWindow):
 
     def on_category_selected(self, category):
         self.current_templab_category = category
-        tpl = templab_manager.get_unified_template(category)
-        self.template_edit.setPlainText(tpl)
+        self.template_edit.setPlainText("")
+        self.prompt_edit.setPlainText(DEFAULT_PROMPT)
 
     def on_author_selected(self, category, author):
         self.current_templab_category = category
         self.current_templab_author = author
-        tpl = templab_manager.get_unified_template(category)
-        self.template_edit.setPlainText(tpl)
+        cfg = templab_manager._load_cfg(category, author)
+        self.template_edit.setPlainText(cfg.get("template", ""))
+        self.prompt_edit.setPlainText(cfg.get("prompt", DEFAULT_PROMPT))
         data = templab_manager.load_regex(author, category)
 
         self.header_regex_edit.setText(self._to_str(data.get("header_regex")))
@@ -7880,8 +7905,9 @@ class ForumBotGUI(QMainWindow):
         self.current_templab_category = category
         self.current_templab_author = author
         self.current_post_data = post
-        tpl = templab_manager.get_unified_template(category)
-        self.template_edit.setPlainText(tpl)
+        cfg = templab_manager._load_cfg(category, author)
+        self.template_edit.setPlainText(cfg.get("template", ""))
+        self.prompt_edit.setPlainText(cfg.get("prompt", DEFAULT_PROMPT))
         data = templab_manager.load_regex(author, category)
         self.header_regex_edit.setText(self._to_str(data.get("header_regex")))
         self.cover_regex_edit.setText(self._to_str(data.get("cover_regex")))
@@ -7889,13 +7915,24 @@ class ForumBotGUI(QMainWindow):
         self.links_regex_edit.setText(self._to_str(data.get("links_regex")))
         self.body_regex_edit.setText(self._to_str(data.get("body_regex")))
         raw = post.get("bbcode_original") or post.get("bbcode_content", "")
+        self.current_post_raw = raw
         self.preview_edit.setPlainText(raw)
         self.on_test_regex()
 
     def on_save_template(self):
-        if not getattr(self, "current_templab_category", None):
+        if not (
+            getattr(self, "current_templab_category", None)
+            and getattr(self, "current_templab_author", None)
+        ):
             return
-        templab_manager.save_unified_template(self.current_templab_category, self.template_edit.toPlainText())
+        data = templab_manager._load_cfg(
+            self.current_templab_category, self.current_templab_author
+        )
+        data["template"] = self.template_edit.toPlainText()
+        data["prompt"] = self.prompt_edit.toPlainText()
+        templab_manager._save_cfg(
+            self.current_templab_category, self.current_templab_author, data
+        )
         # Keep current selections and preview intact
         self.on_test_regex()
 
@@ -7925,7 +7962,7 @@ class ForumBotGUI(QMainWindow):
             "links_regex": self.links_regex_edit.text(),
             "body_regex": self.body_regex_edit.text(),
         }
-        result = templab_manager.apply_template(raw, tpl, data)
+        result = templab_manager._apply_template_regex(raw, tpl, data)
         self.preview_edit.setPlainText(result)
 
         for edit, status_label, key in [
@@ -7937,6 +7974,18 @@ class ForumBotGUI(QMainWindow):
         ]:
             ok = templab_manager._test_regex(data[key], raw)
             status_label.setText("✓" if ok else "✕")
+
+    def on_test_prompt(self):
+        raw = getattr(self, "current_post_raw", "")
+        prompt = self.prompt_edit.toPlainText()
+        if not raw:
+            return
+        try:
+            js = templab_manager.parse_bbcode_ai(raw, prompt)
+            self.preview_edit.setPlainText(json.dumps(js, indent=2, ensure_ascii=False))
+            self.status_bar.showMessage("✓ AI parsed", 3000)
+        except Exception as e:
+            self.status_bar.showMessage(f"AI error: {e}", 5000)
 
     def _rewrite_images(self, bbcode: str) -> str:
         """Image rewriting moved to proceed step; avoid pre-processing here."""
@@ -7968,9 +8017,9 @@ class ForumBotGUI(QMainWindow):
         if not raw_bbcode:
             QMessageBox.information(self, "Proceed Template", "No BBCode available.")
             return
-        unified_template = templab_manager.get_unified_template(category)
-        regex_fallback = templab_manager.load_regex(thread.get("author", ""), category)
-        bbcode_filled = templab_manager.apply_template(raw_bbcode, unified_template, regex_fallback)
+        bbcode_filled = templab_manager.apply_template(
+            raw_bbcode, category, thread.get("author", "")
+        )
 
         if getattr(self, "bot", None):
             try:
