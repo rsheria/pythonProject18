@@ -1,7 +1,7 @@
 import sys
 import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-
+import templab_manager
 from templab_manager import _apply_template_regex
 
 
@@ -45,3 +45,29 @@ def test_apply_template_desc_regex_fewer_groups():
     result = _apply_template_regex(bbcode, template, regexes)
     assert "Format: pdf" in result
     assert "Größe: 1 MB" in result
+
+
+def test_apply_template_returns_filled_string(monkeypatch):
+    monkeypatch.setattr(
+        templab_manager,
+        "parse_bbcode_ai",
+        lambda bbcode, prompt: {
+            "title": "T",
+            "cover": "C",
+            "desc": "D",
+            "body": "B",
+            "links": ["L1", "L2"],
+        },
+    )
+
+    monkeypatch.setattr(
+        templab_manager,
+        "_load_cfg",
+        lambda category, author: {"template": "{TITLE}-{COVER}-{DESC}-{BODY}-{LINKS}"},
+    )
+
+    result = templab_manager.apply_template("bb", "cat", "auth")
+
+    assert isinstance(result, str)
+    assert "T" in result
+    assert "{LINKS}" in result

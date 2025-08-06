@@ -352,7 +352,7 @@ def apply_template(
             if filled and not filled.endswith("\n"):
                 filled += "\n"
             filled += links_block
-
+    return filled
 def convert(thread: dict, apply_hooks: bool = True) -> str:
     category = str(thread.get("category", "")).lower()
     author = thread.get("author", "")
