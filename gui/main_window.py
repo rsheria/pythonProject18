@@ -7851,7 +7851,13 @@ class ForumBotGUI(QMainWindow):
                     cfg = json.load(open(file, "r", encoding="utf-8"))
                 except Exception:
                     cfg = {}
-                posts = cfg.get("threads", {})
+                # Some template-lab files may contain a list of posts directly
+                # instead of a dict with a "threads" key. Guard against the
+                # latter to avoid `AttributeError` when calling `.get` on a list.
+                if isinstance(cfg, dict):
+                    posts = cfg.get("threads", {})
+                else:
+                    posts = cfg
                 if isinstance(posts, dict):
                     iterable = posts.values()
                 else:
