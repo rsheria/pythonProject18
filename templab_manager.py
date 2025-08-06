@@ -235,9 +235,16 @@ def _apply_template_regex(bbcode: str, template: str, regexes: dict) -> str:
             groups["size"] = siz.group(1).strip()
         # ---- description: Format / Size (أى ترتيب) ------------
         if key == "desc_regex":
-            # النمط يعيد أربع مجموعات؛ اثنتان منهما None حسب الترتيب
-            groups["format"] = m.group(1) or m.group(4)
-            groups["size"] = m.group(2) or m.group(3)
+            # قد لا يوفّر النمط جميع المجموعات؛ التقط المتاح منها بأمان
+            fmt1 = m.group(1).strip() if m.lastindex and m.lastindex >= 1 and m.group(1) else None
+            size1 = m.group(2).strip() if m.lastindex and m.lastindex >= 2 and m.group(2) else None
+            size2 = m.group(3).strip() if m.lastindex and m.lastindex >= 3 and m.group(3) else None
+            fmt2 = m.group(4).strip() if m.lastindex and m.lastindex >= 4 and m.group(4) else None
+
+            if fmt1 or fmt2:
+                groups["format"] = fmt1 or fmt2
+            if size1 or size2:
+                groups["size"] = size1 or size2
             spans.append(m.span(0))        # احذف الكتلة الأصلية
             continue
 

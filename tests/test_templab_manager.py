@@ -33,3 +33,15 @@ def test_apply_template_empty_regexes():
     template = "{TITLE}"
     regexes = {}
     assert _apply_template_regex(text, template, regexes) == text
+
+
+def test_apply_template_desc_regex_fewer_groups():
+    bbcode = "Format: PDF\nGröße: 1 MB\nbody"
+    template = "{DESC}\n{BODY}"
+    regexes = {
+        "desc_regex": r"(Format:.*?Größe:.*)",
+        "body_regex": r"(body)",
+    }
+    result = _apply_template_regex(bbcode, template, regexes)
+    assert "Format: pdf" in result
+    assert "Größe: 1 MB" in result

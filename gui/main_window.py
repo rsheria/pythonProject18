@@ -7989,9 +7989,9 @@ class ForumBotGUI(QMainWindow):
         try:
             js = templab_manager.parse_bbcode_ai(raw, prompt)
             self.preview_edit.setPlainText(json.dumps(js, indent=2, ensure_ascii=False))
-            self.status_bar.showMessage("✓ AI parsed", 3000)
+            self.statusBar().showMessage("✓ AI parsed", 3000)
         except Exception as e:
-            self.status_bar.showMessage(f"AI error: {e}", 5000)
+            self.statusBar().showMessage(f"AI error: {e}", 5000)
 
     def _rewrite_images(self, bbcode: str) -> str:
         """Image rewriting moved to proceed step; avoid pre-processing here."""
