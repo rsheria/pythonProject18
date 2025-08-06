@@ -342,10 +342,16 @@ def apply_template(
         .replace("{COVER}", data["cover"])
         .replace("{DESC}", data["desc"])
         .replace("{BODY}", data["body"])
-        .replace("{LINKS}", "\n".join(data["links"]))
-    ).strip()
+    )
 
-    return filled.strip()
+    # Leave the {LINKS} placeholder untouched so that the caller can insert
+    # freshly uploaded links (via the SettingsWidget template) later on.
+    if "{LINKS}" not in cfg["template"]:
+        links_block = "\n".join(data.get("links", []))
+        if links_block:
+            if filled and not filled.endswith("\n"):
+                filled += "\n"
+            filled += links_block
 
 def convert(thread: dict, apply_hooks: bool = True) -> str:
     category = str(thread.get("category", "")).lower()
@@ -354,6 +360,25 @@ def convert(thread: dict, apply_hooks: bool = True) -> str:
     if not category or not author:
         return bbcode
     bbcode = apply_template(bbcode, category, author)
+
+    # Replace the {LINKS} placeholder using the user's template and the
+    # uploaded links associated with this thread.  If no links exist yet,
+    # insert a placeholder so that the caller can update it later.
+    if "{LINKS}" in bbcode:
+        try:
+            from utils import apply_links_template, LINK_TEMPLATE_PRESETS
+            from core.user_manager import get_user_manager
+
+            links_dict = thread.get("links", {}) or {}
+            user_mgr = get_user_manager()
+            template = user_mgr.get_user_setting("links_template", LINK_TEMPLATE_PRESETS[0])
+            links_block = apply_links_template(template, links_dict).strip()
+        except Exception:
+            links_block = ""
+
+        if not links_block:
+            links_block = "[LINKS TBD]"
+        bbcode = bbcode.replace("{LINKS}", links_block)
 
     if apply_hooks:
         img_hook = _HOOKS.get("rewrite_images")
