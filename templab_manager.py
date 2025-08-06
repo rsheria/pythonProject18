@@ -7,16 +7,30 @@ from config.config import DATA_DIR
 from utils.utils import sanitize_filename
 import logging
 from dotenv import load_dotenv, find_dotenv
-try:
-    import openai
+
+# ``openai`` is an optional dependency.  Older versions (<1.0) exposed a
+# ``ChatCompletion`` class, while newer releases use an ``OpenAI`` client
+# instance.  Import and configure the module if available, but tolerate its
+# absence for test environments.
+try:  # pragma: no cover - optional dependency
+    import openai  # type: ignore
 except Exception:  # pragma: no cover - optional dependency
     openai = None
 # Ensure environment variables from .env are loaded before accessing them
 load_dotenv(find_dotenv())
 
 _OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-if openai:
-    openai.api_key = _OPENAI_KEY
+# In the new API a client object is required.  Keep a module level reference so
+# ``parse_bbcode_ai`` can decide which interface to use.
+_OPENAI_CLIENT = None
+if openai and _OPENAI_KEY:
+    if hasattr(openai, "OpenAI"):
+        try:  # pragma: no cover - network config handled elsewhere
+            _OPENAI_CLIENT = openai.OpenAI(api_key=_OPENAI_KEY)
+        except Exception:
+            _OPENAI_CLIENT = None
+    else:  # Legacy <1.0 style
+        openai.api_key = _OPENAI_KEY
 def _ensure_dir(sub: str) -> Path:
     base = Path(DATA_DIR)
     path = base / sub
@@ -119,7 +133,7 @@ def _grab(pattern, text: str):
 
 def parse_bbcode_ai(bbcode: str, prompt: str) -> dict:
     """Use OpenAI to extract structured data from BBCode."""
-    if not openai or not _OPENAI_KEY:
+    if (not openai and not _OPENAI_CLIENT) or not _OPENAI_KEY:
         raise json.JSONDecodeError("missing api key", bbcode, 0)
 
     messages = [
@@ -127,12 +141,27 @@ def parse_bbcode_ai(bbcode: str, prompt: str) -> dict:
         {"role": "user", "content": bbcode[:12000]},
     ]
 
-    rsp = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
-        temperature=0,
-        messages=messages,
-    )
-    js = json.loads(rsp.choices[0].message.content)
+    # Use the new client-based API when available.  Fallback to the legacy
+    # ``ChatCompletion`` class for older versions.
+    if _OPENAI_CLIENT is not None:
+        rsp = _OPENAI_CLIENT.chat.completions.create(
+            model="gpt-3.5-turbo",
+            temperature=0,
+            messages=messages,
+        )
+    else:  # pragma: no cover - requires legacy openai package
+        rsp = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            temperature=0,
+            messages=messages,
+        )
+
+    msg = rsp.choices[0].message
+    if isinstance(msg, dict):
+        content = msg.get("content", "")
+    else:  # ``ChatCompletionMessage`` object in modern SDK
+        content = getattr(msg, "content", "")
+    js = json.loads(content)
     assert all(k in js for k in ("title", "cover", "desc", "body", "links"))
     return js
 
