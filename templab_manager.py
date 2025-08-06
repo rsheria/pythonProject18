@@ -127,12 +127,6 @@ def parse_bbcode_ai(bbcode: str, prompt: str) -> dict:
         {"role": "user", "content": bbcode[:12000]},
     ]
 
-def get_unified_template(category: str) -> str:
-    path = TEMPLAB_DIR / f"{sanitize_filename(category)}.template"
-    if path.exists():
-        return path.read_text(encoding="utf-8")
-    return ""
-
     rsp = openai.ChatCompletion.create(
         model="gpt-3.5-turbo",
         temperature=0,
@@ -141,6 +135,12 @@ def get_unified_template(category: str) -> str:
     js = json.loads(rsp.choices[0].message.content)
     assert all(k in js for k in ("title", "cover", "desc", "body", "links"))
     return js
+
+def get_unified_template(category: str) -> str:
+    path = TEMPLAB_DIR / f"{sanitize_filename(category)}.template"
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    return ""
 def save_unified_template(category: str, text: str) -> None:
     path = TEMPLAB_DIR / f"{sanitize_filename(category)}.template"
     path.parent.mkdir(parents=True, exist_ok=True)
