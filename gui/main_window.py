@@ -3751,7 +3751,7 @@ class ForumBotGUI(QMainWindow):
 
         links_dict = thread_info.get("links", {})
         if not links_dict:
-            return ""
+            return "[LINKS TBD]"
 
         # Allow user-defined template
         template = self.user_manager.get_user_setting("links_template", "") if hasattr(self, "user_manager") else ""
@@ -8024,7 +8024,10 @@ class ForumBotGUI(QMainWindow):
             QMessageBox.information(self, "Proceed Template", "No BBCode available.")
             return
         bbcode_filled = templab_manager.apply_template(
-            raw_bbcode, category, thread.get("author", "")
+            raw_bbcode,
+            category,
+            thread.get("author", ""),
+            thread_title=title,  # passes GUI title
         )
 
         if getattr(self, "bot", None):
@@ -8039,6 +8042,8 @@ class ForumBotGUI(QMainWindow):
             logging.warning("⚠️ bot is not available.")
 
         links_block = self.build_links_block(category, title)
+        if not links_block:
+            links_block = "[LINKS TBD]"   # placeholder until upload finishes
         if "{LINKS}" in bbcode_filled:
             bbcode_filled = bbcode_filled.replace("{LINKS}", links_block)
             logging.info(f"🔗 Link-block inserted (length = {len(links_block)} chars)")

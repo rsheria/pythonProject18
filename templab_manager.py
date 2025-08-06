@@ -320,20 +320,33 @@ def _apply_template_regex(bbcode: str, template: str, regexes: dict) -> str:
     insert_at = min(s for s, _ in spans) if spans else len(bbcode)
     return bbcode[:insert_at] + filled + bbcode[insert_at:]
 
-def apply_template(bbcode: str, category: str, author: str) -> str:
+def apply_template(
+    bbcode: str,
+    category: str,
+    author: str,
+    *,
+    thread_title: str = "",
+) -> str:
+    """Fill the template with parsed data.
+
+    thread_title: Optional title from the GUI overriding the parsed one.
+    """
     cfg = _load_cfg(category, author)
     data = parse_bbcode_ai(bbcode, cfg.get("prompt", DEFAULT_PROMPT))
 
+    final_title = thread_title or data["title"]
+
     filled = (
         cfg["template"]
-        .replace("{TITLE}", data["title"])
+        .replace("{TITLE}", final_title)
         .replace("{COVER}", data["cover"])
         .replace("{DESC}", data["desc"])
         .replace("{BODY}", data["body"])
         .replace("{LINKS}", "\n".join(data["links"]))
     ).strip()
 
-    return filled
+    return filled.strip()
+
 def convert(thread: dict, apply_hooks: bool = True) -> str:
     category = str(thread.get("category", "")).lower()
     author = thread.get("author", "")
