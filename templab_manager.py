@@ -96,19 +96,20 @@ def _cfg_path(category: str, author: str) -> Path:
 
 def _load_cfg(category: str, author: str) -> dict:
     path = _cfg_path(category, author)
-    default_prompt = load_global_prompt()
+    cat_template = get_unified_template(category)
+    cat_prompt = load_category_prompt(category)
     if path.exists():
         try:
             data = json.load(open(path, "r", encoding="utf-8"))
             if isinstance(data, list):  # backward compatibility
-                data = {"template": "", "prompt": default_prompt, "threads": data}
-            data.setdefault("template", "")
-            data.setdefault("prompt", default_prompt)
+                data = {"template": cat_template, "prompt": cat_prompt, "threads": data}
+            data.setdefault("template", cat_template)
+            data.setdefault("prompt", cat_prompt)
             data.setdefault("threads", {})
             return data
         except Exception:
             pass
-    return {"template": "", "prompt": default_prompt, "threads": {}}
+    return {"template": cat_template, "prompt": cat_prompt, "threads": {}}
 
 
 def _save_cfg(category: str, author: str, data: dict) -> None:
@@ -161,37 +162,46 @@ def save_unified_template(category: str, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
 
+def _category_prompt_path(category: str) -> Path:
+    return TEMPLAB_DIR / f"{sanitize_filename(category)}.prompt"
 
-def load_regex(author: str, category: str) -> dict:
-    path = TEMPLAB_DIR / f"{sanitize_filename(category)}.{sanitize_filename(author)}.json"
+def load_category_prompt(category: str) -> str:
+    path = _category_prompt_path(category)
     if path.exists():
         try:
-            data = json.load(open(path, "r", encoding="utf-8"))
-            return {
-                "header_regex": data.get("header_regex", ""),
-                "cover_regex": data.get("cover_regex", ""),
-                "desc_regex": data.get("desc_regex", ""),
-                "links_regex": data.get("links_regex", ""),
-                "body_regex": data.get("body_regex", ""),
-            }
-            return _compile(data)
+            txt = path.read_text(encoding="utf-8")
+            return txt or load_global_prompt()
         except Exception:
             pass
-        return {
-        "header_regex": "",
-        "cover_regex": "",
-        "desc_regex": "",
-        "links_regex": "",
-        "body_regex": "",
-    }
+        return load_global_prompt()
 
 
 
-def save_regex(author: str, category: str, data: dict) -> None:
-    path = TEMPLAB_DIR / f"{sanitize_filename(category)}.{sanitize_filename(author)}.json"
+def save_category_prompt(category: str, prompt: str) -> None:
+    path = _category_prompt_path(category)
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    path.write_text(prompt, encoding="utf-8")
+
+
+def save_category_template_prompt(category: str, template: str, prompt: str) -> None:
+    """Persist a template/prompt for a whole category and propagate to all authors."""
+
+    save_unified_template(category, template)
+    save_category_prompt(category, prompt)
+
+    cat_dir = USERS_DIR / sanitize_filename(category)
+    if not cat_dir.exists():
+        return
+    for file in cat_dir.glob("*.json"):
+        try:
+            data = json.load(open(file, "r", encoding="utf-8"))
+        except Exception:
+            data = {}
+        data["template"] = template
+        data["prompt"] = prompt
+        with open(file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def store_post(author: str, category: str, thread: dict) -> None:
@@ -212,24 +222,6 @@ def store_post(author: str, category: str, thread: dict) -> None:
             cb()
         except Exception:
             pass
-
-def _test_regex(pattern: str, text: str) -> bool:
-    """Stubbed regex tester used by the GUI preview.
-
-    Regex support has been removed, so this function only reports success for
-    empty patterns."""
-
-    return not pattern
-
-def _apply_template_regex(bbcode: str, _template: str, _regexes: dict) -> str:
-        """Return ``bbcode`` unchanged.
-
-        The original implementation applied a template using regular expressions to
-        extract pieces of ``bbcode``.  Since regex support has been dropped, this
-        helper now behaves as a no-op, providing a consistent interface for the GUI
-        without performing any transformations."""
-
-        return bbcode
 
 def apply_template(
     bbcode: str,

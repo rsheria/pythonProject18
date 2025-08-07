@@ -1,16 +1,10 @@
 import sys
 import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+import json
 import templab_manager
-from templab_manager import _apply_template_regex
 
 
-
-def test_apply_template_regex_noop():
-    text = "[b]header[/b]\nbody"
-    template = "{TITLE}{BODY}"
-    regexes = {"header_regex": "pattern"}
-    assert _apply_template_regex(text, template, regexes) == text
 
 def test_apply_template_returns_filled_string(monkeypatch):
     monkeypatch.setattr(
@@ -37,7 +31,28 @@ def test_apply_template_returns_filled_string(monkeypatch):
     assert "T" in result
     assert "{LINKS}" in result
 
+def test_category_template_prompt_propagation(tmp_path, monkeypatch):
+    monkeypatch.setattr(templab_manager, "TEMPLAB_DIR", tmp_path)
+    monkeypatch.setattr(templab_manager, "USERS_DIR", tmp_path / "users")
+    (tmp_path / "users" / "cat").mkdir(parents=True)
 
+    # create some author files
+    for name in ["a1", "a2"]:
+        (tmp_path / "users" / "cat" / f"{name}.json").write_text(
+            json.dumps({"template": "old", "prompt": "old", "threads": {}}),
+            encoding="utf-8",
+        )
+
+    templab_manager.save_category_template_prompt("cat", "TPL", "PRM")
+
+    for name in ["a1", "a2"]:
+        data = json.loads((tmp_path / "users" / "cat" / f"{name}.json").read_text("utf-8"))
+        assert data["template"] == "TPL"
+        assert data["prompt"] == "PRM"
+
+    cfg = templab_manager._load_cfg("cat", "new")
+    assert cfg["template"] == "TPL"
+    assert cfg["prompt"] == "PRM"
 def test_global_prompt_persistence(tmp_path, monkeypatch):
     monkeypatch.setattr(templab_manager, "TEMPLAB_DIR", tmp_path)
     monkeypatch.setattr(templab_manager, "USERS_DIR", tmp_path / "users")

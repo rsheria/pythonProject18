@@ -1229,46 +1229,21 @@ class ForumBotGUI(QMainWindow):
         template_widget = QWidget()
         tpl_layout = QVBoxLayout(template_widget)
         self.template_edit = QPlainTextEdit()
-        self.template_edit.textChanged.connect(self.on_test_regex)
         tpl_layout.addWidget(self.template_edit)
         tpl_btns = QHBoxLayout()
         self.save_template_btn = QPushButton("Save Template")
         self.save_template_btn.clicked.connect(self.on_save_template)
         tpl_btns.addWidget(self.save_template_btn)
-        self.test_regex_btn = QPushButton("Test")
-        self.test_regex_btn.setEnabled(False)
         tpl_btns.addWidget(self.test_regex_btn)
         tpl_layout.addLayout(tpl_btns)
         top_splitter.addWidget(template_widget)
 
-        # Regex designer
-        regex_widget = QWidget()
-        form = QVBoxLayout(regex_widget)
-
-        def _field(name):
-            edit = QLineEdit()
-            label = QLabel()
-            row = QHBoxLayout()
-            row.addWidget(edit)
-            row.addWidget(label)
-            form.addWidget(QLabel(name))
-            form.addLayout(row)
-            return edit, label
-
-
-        self.header_regex_edit, self.header_status = _field("Header")
-        self.header_regex_edit.setReadOnly(True)
-        self.cover_regex_edit, self.cover_status = _field("Cover")
-        self.cover_regex_edit.setReadOnly(True)
-        self.desc_regex_edit, self.desc_status = _field("Description")
-        self.desc_regex_edit.setReadOnly(True)
-        self.links_regex_edit, self.links_status = _field("Links")
-        self.links_regex_edit.setReadOnly(True)
-        self.body_regex_edit, self.body_status = _field("Body")
-        self.body_regex_edit.setReadOnly(True)
+        # Prompt editor
+        prompt_widget = QWidget()
+        form = QVBoxLayout(prompt_widget)
 
         self.prompt_edit = QPlainTextEdit()
-        self.prompt_edit.setPlaceholderText("Custom GPT prompt for this author…")
+        self.prompt_edit.setPlaceholderText("Custom GPT prompt…")
         form.addWidget(QLabel("Prompt"))
         form.addWidget(self.prompt_edit)
         self.save_prompt_btn = QPushButton("Save Prompt")
@@ -1278,10 +1253,7 @@ class ForumBotGUI(QMainWindow):
         form.addWidget(self.test_prompt_btn)
         self.test_prompt_btn.clicked.connect(self.on_test_prompt)
 
-        self.save_regex_btn = QPushButton("Save Regex")
-        self.save_regex_btn.setEnabled(False)
-        form.addWidget(self.save_regex_btn)
-        top_splitter.addWidget(regex_widget)
+        top_splitter.addWidget(prompt_widget)
 
         # Preview
         self.preview_edit = QPlainTextEdit()
@@ -7892,22 +7864,16 @@ class ForumBotGUI(QMainWindow):
 
     def on_category_selected(self, category):
         self.current_templab_category = category
-        self.template_edit.setPlainText("")
-        self.prompt_edit.setPlainText(templab_manager.load_global_prompt())
+        self.current_templab_author = None
+        self.template_edit.setPlainText(templab_manager.get_unified_template(category))
+        self.prompt_edit.setPlainText(templab_manager.load_category_prompt(category))
 
     def on_author_selected(self, category, author):
         self.current_templab_category = category
         self.current_templab_author = author
         cfg = templab_manager._load_cfg(category, author)
         self.template_edit.setPlainText(cfg.get("template", ""))
-        self.prompt_edit.setPlainText(cfg.get("prompt", templab_manager.load_global_prompt()))
-        data = templab_manager.load_regex(author, category)
-
-        self.header_regex_edit.setText(self._to_str(data.get("header_regex")))
-        self.cover_regex_edit.setText(self._to_str(data.get("cover_regex")))
-        self.desc_regex_edit.setText(self._to_str(data.get("desc_regex")))
-        self.links_regex_edit.setText(self._to_str(data.get("links_regex")))
-        self.body_regex_edit.setText(self._to_str(data.get("body_regex")))
+        self.prompt_edit.setPlainText(cfg.get("prompt", templab_manager.load_category_prompt(category)))
 
     def on_post_selected(self, category, author, post):
         self.current_templab_category = category
@@ -7915,42 +7881,35 @@ class ForumBotGUI(QMainWindow):
         self.current_post_data = post
         cfg = templab_manager._load_cfg(category, author)
         self.template_edit.setPlainText(cfg.get("template", ""))
-        self.prompt_edit.setPlainText(cfg.get("prompt", templab_manager.load_global_prompt()))
-        data = templab_manager.load_regex(author, category)
-        self.header_regex_edit.setText(self._to_str(data.get("header_regex")))
-        self.cover_regex_edit.setText(self._to_str(data.get("cover_regex")))
-        self.desc_regex_edit.setText(self._to_str(data.get("desc_regex")))
-        self.links_regex_edit.setText(self._to_str(data.get("links_regex")))
-        self.body_regex_edit.setText(self._to_str(data.get("body_regex")))
+        self.prompt_edit.setPlainText(cfg.get("prompt", templab_manager.load_category_prompt(category)))
         raw = post.get("bbcode_original") or post.get("bbcode_content", "")
         self.current_post_raw = raw
         self.preview_edit.setPlainText(raw)
-        self.on_test_regex()
+
 
     def on_save_template(self):
-        if not (
-            getattr(self, "current_templab_category", None)
-            and getattr(self, "current_templab_author", None)
-        ):
+        if not getattr(self, "current_templab_category", None):
             return
-        data = templab_manager._load_cfg(
-            self.current_templab_category, self.current_templab_author
-        )
-        data["template"] = self.template_edit.toPlainText()
-        data["prompt"] = self.prompt_edit.toPlainText()
-        templab_manager._save_cfg(
-            self.current_templab_category, self.current_templab_author, data
-        )
-        # Keep current selections and preview intact
-        self.on_test_regex()
+        template = self.template_edit.toPlainText()
+        prompt = self.prompt_edit.toPlainText()
+        if getattr(self, "current_templab_author", None):
+            data = templab_manager._load_cfg(
+                self.current_templab_category, self.current_templab_author
+            )
+            data["template"] = template
+            data["prompt"] = prompt
+            templab_manager._save_cfg(
+                self.current_templab_category, self.current_templab_author, data
+            )
+        else:
+            templab_manager.save_category_template_prompt(
+                self.current_templab_category, template, prompt
+            )
 
     def on_save_prompt(self):
         prompt = self.prompt_edit.toPlainText()
-        templab_manager.save_global_prompt(prompt)
-        if (
-            getattr(self, "current_templab_category", None)
-            and getattr(self, "current_templab_author", None)
-        ):
+        if getattr(self, "current_templab_author", None):
+            templab_manager.save_global_prompt(prompt)
             data = templab_manager._load_cfg(
                 self.current_templab_category, self.current_templab_author
             )
@@ -7958,45 +7917,14 @@ class ForumBotGUI(QMainWindow):
             templab_manager._save_cfg(
                 self.current_templab_category, self.current_templab_author, data
             )
-
-    def on_save_regex(self):
-        if not (getattr(self, "current_templab_category", None) and getattr(self, "current_templab_author", None)):
-            return
-        data = {
-            "header_regex": self.header_regex_edit.text(),
-            "cover_regex": self.cover_regex_edit.text(),
-            "desc_regex": self.desc_regex_edit.text(),
-            "links_regex": self.links_regex_edit.text(),
-            "body_regex": self.body_regex_edit.text(),
-        }
-        templab_manager.save_regex(self.current_templab_author, self.current_templab_category, data)
-        # Keep current selections and preview intact
-        self.on_test_regex()
-
-    def on_test_regex(self):
-        if not getattr(self, "current_post_data", None):
-            return
-        raw = self.current_post_data.get("bbcode_original") or self.current_post_data.get("bbcode_content", "")
-        tpl = self.template_edit.toPlainText()
-        data = {
-            "header_regex": self.header_regex_edit.text(),
-            "cover_regex": self.cover_regex_edit.text(),
-            "desc_regex": self.desc_regex_edit.text(),
-            "links_regex": self.links_regex_edit.text(),
-            "body_regex": self.body_regex_edit.text(),
-        }
-        result = templab_manager._apply_template_regex(raw, tpl, data)
-        self.preview_edit.setPlainText(result)
-
-        for edit, status_label, key in [
-            (self.header_regex_edit, self.header_status, "header_regex"),
-            (self.cover_regex_edit, self.cover_status, "cover_regex"),
-            (self.desc_regex_edit, self.desc_status, "desc_regex"),
-            (self.links_regex_edit, self.links_status, "links_regex"),
-            (self.body_regex_edit, self.body_status, "body_regex"),
-        ]:
-            ok = templab_manager._test_regex(data[key], raw)
-            status_label.setText("✓" if ok else "✕")
+        elif getattr(self, "current_templab_category", None):
+            templab_manager.save_category_template_prompt(
+                self.current_templab_category,
+                templab_manager.get_unified_template(self.current_templab_category),
+                prompt,
+            )
+        else:
+            templab_manager.save_global_prompt(prompt)
 
     def on_test_prompt(self):
         raw = getattr(self, "current_post_raw", "")
