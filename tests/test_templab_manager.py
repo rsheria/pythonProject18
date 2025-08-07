@@ -71,3 +71,18 @@ def test_apply_template_returns_filled_string(monkeypatch):
     assert isinstance(result, str)
     assert "T" in result
     assert "{LINKS}" in result
+
+
+def test_global_prompt_persistence(tmp_path, monkeypatch):
+    monkeypatch.setattr(templab_manager, "TEMPLAB_DIR", tmp_path)
+    monkeypatch.setattr(templab_manager, "USERS_DIR", tmp_path / "users")
+    (tmp_path / "users").mkdir()
+
+    # No prompt saved yet -> falls back to default
+    assert templab_manager.load_global_prompt() == templab_manager.DEFAULT_PROMPT
+
+    templab_manager.save_global_prompt("MY PROMPT")
+    assert templab_manager.load_global_prompt() == "MY PROMPT"
+
+    cfg = templab_manager._load_cfg("cat", "author")
+    assert cfg["prompt"] == "MY PROMPT"

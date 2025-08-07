@@ -99,7 +99,6 @@ from PyQt5.QtWidgets import QProgressBar
 from PyQt5.QtWidgets import QMessageBox as QtMessageBox
 from utils.paths import get_data_folder
 import templab_manager
-from templab_manager import DEFAULT_PROMPT
 # import the DownloadWorker AGAIN if needed
 class StatusBarMessageBox:
     """Replacement for QMessageBox that writes messages to the status bar."""
@@ -1272,6 +1271,9 @@ class ForumBotGUI(QMainWindow):
         self.prompt_edit.setPlaceholderText("Custom GPT prompt for this author…")
         form.addWidget(QLabel("Prompt"))
         form.addWidget(self.prompt_edit)
+        self.save_prompt_btn = QPushButton("Save Prompt")
+        form.addWidget(self.save_prompt_btn)
+        self.save_prompt_btn.clicked.connect(self.on_save_prompt)
         self.test_prompt_btn = QPushButton("Test Prompt")
         form.addWidget(self.test_prompt_btn)
         self.test_prompt_btn.clicked.connect(self.on_test_prompt)
@@ -7829,7 +7831,7 @@ class ForumBotGUI(QMainWindow):
                 self.current_templab_category, self.current_templab_author
             )
             self.template_edit.setPlainText(cfg.get("template", ""))
-            self.prompt_edit.setPlainText(cfg.get("prompt", DEFAULT_PROMPT))
+            self.prompt_edit.setPlainText(cfg.get("prompt", templab_manager.load_global_prompt()))
 
     def reload_templab_tree(self):
         self.templab_tree.clear()
@@ -7891,14 +7893,14 @@ class ForumBotGUI(QMainWindow):
     def on_category_selected(self, category):
         self.current_templab_category = category
         self.template_edit.setPlainText("")
-        self.prompt_edit.setPlainText(DEFAULT_PROMPT)
+        self.prompt_edit.setPlainText(templab_manager.load_global_prompt())
 
     def on_author_selected(self, category, author):
         self.current_templab_category = category
         self.current_templab_author = author
         cfg = templab_manager._load_cfg(category, author)
         self.template_edit.setPlainText(cfg.get("template", ""))
-        self.prompt_edit.setPlainText(cfg.get("prompt", DEFAULT_PROMPT))
+        self.prompt_edit.setPlainText(cfg.get("prompt", templab_manager.load_global_prompt()))
         data = templab_manager.load_regex(author, category)
 
         self.header_regex_edit.setText(self._to_str(data.get("header_regex")))
@@ -7913,7 +7915,7 @@ class ForumBotGUI(QMainWindow):
         self.current_post_data = post
         cfg = templab_manager._load_cfg(category, author)
         self.template_edit.setPlainText(cfg.get("template", ""))
-        self.prompt_edit.setPlainText(cfg.get("prompt", DEFAULT_PROMPT))
+        self.prompt_edit.setPlainText(cfg.get("prompt", templab_manager.load_global_prompt()))
         data = templab_manager.load_regex(author, category)
         self.header_regex_edit.setText(self._to_str(data.get("header_regex")))
         self.cover_regex_edit.setText(self._to_str(data.get("cover_regex")))
@@ -7941,6 +7943,21 @@ class ForumBotGUI(QMainWindow):
         )
         # Keep current selections and preview intact
         self.on_test_regex()
+
+    def on_save_prompt(self):
+        prompt = self.prompt_edit.toPlainText()
+        templab_manager.save_global_prompt(prompt)
+        if (
+            getattr(self, "current_templab_category", None)
+            and getattr(self, "current_templab_author", None)
+        ):
+            data = templab_manager._load_cfg(
+                self.current_templab_category, self.current_templab_author
+            )
+            data["prompt"] = prompt
+            templab_manager._save_cfg(
+                self.current_templab_category, self.current_templab_author, data
+            )
 
     def on_save_regex(self):
         if not (getattr(self, "current_templab_category", None) and getattr(self, "current_templab_author", None)):

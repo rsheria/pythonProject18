@@ -62,7 +62,25 @@ Return ONLY pure JSON with these exact keys:
 Never wrap the JSON in markdown, code-fences, or prose.
 """
 
+def _prompt_path() -> Path:
+    return TEMPLAB_DIR / "prompt.txt"
 
+
+def load_global_prompt() -> str:
+    """Return the saved global prompt or the built-in default."""
+    try:
+        txt = _prompt_path().read_text(encoding="utf-8")
+        return txt or DEFAULT_PROMPT
+    except Exception:
+        return DEFAULT_PROMPT
+
+
+def save_global_prompt(prompt: str) -> None:
+    """Persist a new global prompt to disk."""
+    path = _prompt_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(prompt)
 def set_hooks(hooks: dict) -> None:
     """Set optional hooks for rewriting and GUI updates."""
     if not isinstance(hooks, dict):
@@ -79,18 +97,19 @@ def _cfg_path(category: str, author: str) -> Path:
 
 def _load_cfg(category: str, author: str) -> dict:
     path = _cfg_path(category, author)
+    default_prompt = load_global_prompt()
     if path.exists():
         try:
             data = json.load(open(path, "r", encoding="utf-8"))
             if isinstance(data, list):  # backward compatibility
-                data = {"template": "", "prompt": DEFAULT_PROMPT, "threads": data}
+                data = {"template": "", "prompt": default_prompt, "threads": data}
             data.setdefault("template", "")
-            data.setdefault("prompt", DEFAULT_PROMPT)
+            data.setdefault("prompt", default_prompt)
             data.setdefault("threads", {})
             return data
         except Exception:
             pass
-    return {"template": "", "prompt": DEFAULT_PROMPT, "threads": {}}
+    return {"template": "", "prompt": default_prompt, "threads": {}}
 
 
 def _save_cfg(category: str, author: str, data: dict) -> None:
@@ -332,7 +351,8 @@ def apply_template(
     thread_title: Optional title from the GUI overriding the parsed one.
     """
     cfg = _load_cfg(category, author)
-    data = parse_bbcode_ai(bbcode, cfg.get("prompt", DEFAULT_PROMPT))
+    prompt = cfg.get("prompt", load_global_prompt())
+    data = parse_bbcode_ai(bbcode, prompt)
 
     final_title = thread_title or data["title"]
 
