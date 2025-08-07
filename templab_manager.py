@@ -1,7 +1,6 @@
 # ★ header merged (author-title) & desc flexible (size/format order) ★
 import json
 import os
-import re
 from pathlib import Path
 from config.config import DATA_DIR
 from utils.utils import sanitize_filename
@@ -118,38 +117,6 @@ def _save_cfg(category: str, author: str, data: dict) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 # ------------------------------------------------------------------
-# ------------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------------
-def _compile(rx_dict: dict) -> dict:
-    """Compile regex patterns with flags re.S | re.I."""
-    compiled = {}
-    for key, pattern in rx_dict.items():
-        if pattern:
-            try:
-                compiled[key] = re.compile(pattern, re.S | re.I)
-            except re.error:
-                compiled[key] = None
-        else:
-            compiled[key] = None
-    return compiled
-
-
-def _grab(pattern, text: str):
-    """Search text using compiled regex pattern."""
-    if not pattern:
-        return None
-    if hasattr(pattern, "search"):
-        try:
-            return pattern.search(text)
-        except re.error:
-            return None
-    try:
-        pat = re.compile(pattern, re.S | re.I)
-    except re.error:
-        return None
-    return pat.search(text)
-
 def parse_bbcode_ai(bbcode: str, prompt: str) -> dict:
     """Use OpenAI to extract structured data from BBCode."""
     if (not openai and not _OPENAI_CLIENT) or not _OPENAI_KEY:
@@ -200,7 +167,7 @@ def load_regex(author: str, category: str) -> dict:
     if path.exists():
         try:
             data = json.load(open(path, "r", encoding="utf-8"))
-            data = {
+            return {
                 "header_regex": data.get("header_regex", ""),
                 "cover_regex": data.get("cover_regex", ""),
                 "desc_regex": data.get("desc_regex", ""),
@@ -210,13 +177,13 @@ def load_regex(author: str, category: str) -> dict:
             return _compile(data)
         except Exception:
             pass
-    return _compile({
+        return {
         "header_regex": "",
         "cover_regex": "",
         "desc_regex": "",
         "links_regex": "",
         "body_regex": "",
-    })
+    }
 
 
 
@@ -247,97 +214,22 @@ def store_post(author: str, category: str, thread: dict) -> None:
             pass
 
 def _test_regex(pattern: str, text: str) -> bool:
-    m = _grab(pattern, text) if pattern else None
-    return bool(m and m.lastindex == 1)
+    """Stubbed regex tester used by the GUI preview.
 
+    Regex support has been removed, so this function only reports success for
+    empty patterns."""
 
-def _apply_template_regex(bbcode: str, template: str, regexes: dict) -> str:
-    """Return bbcode with `template` applied using `regexes`."""
-    groups: dict[str, str] = {}
-    spans: list[tuple[int, int]] = []
+    return not pattern
 
-    # ---------- 1. اجمع القيم واحذف المقاطع الأصلية ----------
-    for key, pattern in regexes.items():
-        if not pattern:
-            continue
+def _apply_template_regex(bbcode: str, _template: str, _regexes: dict) -> str:
+        """Return ``bbcode`` unchanged.
 
-        m = _grab(pattern, bbcode)
-        if m is None:
-            # نمط غير صالح
-            continue
+        The original implementation applied a template using regular expressions to
+        extract pieces of ``bbcode``.  Since regex support has been dropped, this
+        helper now behaves as a no-op, providing a consistent interface for the GUI
+        without performing any transformations."""
 
-        # ---- header: مؤلِّف + عنوان (مجموعتـان) ---------------
-        if key == "header_regex":
-            if m.lastindex == 2:
-                groups["header_regex"] = f"{m.group(1).strip()} - {m.group(2).strip()}"
-            else:
-                groups["header_regex"] = m.group(1).strip()
-            spans.append(m.span(0))        # احذف السطرين الأصليَّين
-            continue
-        # ابحث عن Format و Größe منفصلين – يعمل مهما كان ترتيبهما أو وجود |
-        fmt = re.search(r"(?i)Format:\s*([^\r\n|]+)", bbcode)
-        siz = re.search(r"(?i)Gr(?:ö|o)ße:\s*([\d\.,]+\s*[kmg]?b)", bbcode)
-        if fmt:
-            groups["format"] = fmt.group(1).strip()
-        if siz:
-            groups["size"] = siz.group(1).strip()
-        # ---- description: Format / Size (أى ترتيب) ------------
-        if key == "desc_regex":
-            # قد لا يوفّر النمط جميع المجموعات؛ التقط المتاح منها بأمان
-            fmt1 = m.group(1).strip() if m.lastindex and m.lastindex >= 1 and m.group(1) else None
-            size1 = m.group(2).strip() if m.lastindex and m.lastindex >= 2 and m.group(2) else None
-            size2 = m.group(3).strip() if m.lastindex and m.lastindex >= 3 and m.group(3) else None
-            fmt2 = m.group(4).strip() if m.lastindex and m.lastindex >= 4 and m.group(4) else None
-
-            if fmt1 or fmt2:
-                groups["format"] = fmt1 or fmt2
-            if size1 or size2:
-                groups["size"] = size1 or size2
-            spans.append(m.span(0))        # احذف الكتلة الأصلية
-            continue
-
-        # ---- الأنماط الأخرى (مطلوب مجموعة واحدة) -------------
-        if not m or m.lastindex != 1:
-            return bbcode                   # نرجع النص الأصلى لو فشل
-        groups[key] = m.group(1)
-
-        # احذف الكتلة كلها لبعض المفاتيح
-        if key in ("body_regex", "cover_regex", "links_regex"):
-            spans.append(m.span(0))
-        else:
-            spans.append(m.span(1))
-
-    if not template or not spans:
         return bbcode
-
-    # ---------- 2. احذف المقاطع فى ترتيب عكسى ----------
-    for s, e in sorted(spans, key=lambda t: t[0], reverse=True):
-        bbcode = bbcode[:s] + bbcode[e:]
-
-    # ---------- 3. بِنِى الوصف ----------
-    if "format" in groups and "size" in groups:
-        desc_text = (
-            "Genre: Sachbuch\n"
-            f"Format: {groups['format'].strip().lower()}\n"
-            f"Größe: {groups['size'].upper()}"
-        )
-    elif "desc_block" in groups:
-        desc_text = groups["desc_block"]
-    else:
-        desc_text = ""
-
-    # ---------- 4. املأ القالب ----------
-    filled = (
-        template
-        .replace("{TITLE}", groups.get("header_regex", ""))
-        .replace("{COVER}", groups.get("cover_regex", ""))
-        .replace("{DESC}",  desc_text)
-        .replace("{BODY}",  groups.get("body_regex", ""))
-    )
-
-    # أدخِل القالب فى أول موضعٍ حُذِف
-    insert_at = min(s for s, _ in spans) if spans else len(bbcode)
-    return bbcode[:insert_at] + filled + bbcode[insert_at:]
 
 def apply_template(
     bbcode: str,

@@ -6,46 +6,11 @@ from templab_manager import _apply_template_regex
 
 
 
-def test_apply_template_partial_match():
-    bbcode = """[b]header[/b]\nSome body text\nLinks: none"""
-    template = "{TITLE}\n{BODY}"
-    regexes = {
-        "header_regex": r"\[b\](.+?)\[/b\]",
-        "body_regex": r"Some (.+) text",
-        "links_regex": r"Link:\\s+(.*)"  # will not match
-    }
-    result = _apply_template_regex(bbcode, template, regexes)
-    assert result.startswith("header")
-    assert "body" in result
-    assert "Links: none" in result
-
-
-
-def test_apply_template_no_match_returns_original():
-    text = "plain text"
+def test_apply_template_regex_noop():
+    text = "[b]header[/b]\nbody"
     template = "{TITLE}{BODY}"
-    regexes = {"header_regex": r"nope", "body_regex": r"missing"}
+    regexes = {"header_regex": "pattern"}
     assert _apply_template_regex(text, template, regexes) == text
-
-
-def test_apply_template_empty_regexes():
-    text = "[b]header[/b]"
-    template = "{TITLE}"
-    regexes = {}
-    assert _apply_template_regex(text, template, regexes) == text
-
-
-def test_apply_template_desc_regex_fewer_groups():
-    bbcode = "Format: PDF\nGröße: 1 MB\nbody"
-    template = "{DESC}\n{BODY}"
-    regexes = {
-        "desc_regex": r"(Format:.*?Größe:.*)",
-        "body_regex": r"(body)",
-    }
-    result = _apply_template_regex(bbcode, template, regexes)
-    assert "Format: pdf" in result
-    assert "Größe: 1 MB" in result
-
 
 def test_apply_template_returns_filled_string(monkeypatch):
     monkeypatch.setattr(
