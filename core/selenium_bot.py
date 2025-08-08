@@ -43,6 +43,57 @@ import xml.etree.ElementTree as ET
 import os, logging, requests
 from urllib.parse import urlparse
 
+# ---------------------------------------------------------------------------
+# Image URL helpers
+# ---------------------------------------------------------------------------
+
+IMG_TAG_RE = re.compile(r'\[IMG\](https?://[^\]]+)\[/IMG\]', re.I)
+
+
+def _get_real_image_url(driver, url: str, wait_sec: int = 8) -> str:
+    """Return a direct .jpg/.png/.gif link hidden behind an image-hosting page."""
+    try:
+        driver.get(url)
+        WebDriverWait(driver, wait_sec).until(
+            EC.presence_of_element_located((By.TAG_NAME, "img"))
+        )
+
+        selectors = [
+            "img#img",
+            "img.picture",
+            "img[src*='images']",
+            "img[src*='thumbs']",
+            "img:not([alt*='logo']):not([alt*='banner'])",
+        ]
+        for css in selectors:
+            imgs = driver.find_elements(By.CSS_SELECTOR, css)
+            if imgs:
+                src = imgs[0].get_attribute("src")
+                if src and src != url:
+                    return src
+
+        for img in driver.find_elements(By.TAG_NAME, "img"):
+            src = img.get_attribute("src")
+            if src and src != url and any(
+                src.lower().endswith(x) for x in (".jpg", ".jpeg", ".png", ".gif")
+            ):
+                return src
+
+    except Exception as e:
+        logging.warning(f"[image-fix] failed on {url}: {e}")
+    return url
+
+
+def fix_all_image_tags(driver, bbcode: str) -> str:
+    """Replace every IMG tag url with its real direct link."""
+    out = bbcode
+    for original in IMG_TAG_RE.findall(bbcode):
+        direct = _get_real_image_url(driver, original)
+        if direct != original:
+            out = out.replace(f"[IMG]{original}[/IMG]", f"[IMG]{direct}[/IMG]", 1)
+            logging.info(f"[image-fix]    {original}  ➜  {direct}")
+    return out
+
 def extract_version_title(post_element, main_thread_title):
     """
     Extracts the version title from a given post element with enhanced version detection.
@@ -5604,6 +5655,7 @@ class ForumBotSelenium:
             str: Updated content with first image replaced by fastpic.org URL
         """
         try:
+            content = fix_all_image_tags(self.driver, content)
             logging.info("🖼️ Processing images in content for fastpic.org upload")
             logging.info(f"📝 Content length: {len(content)}")
             logging.info(f"📝 Content preview: {content[:300]}...")  # Show first 300 chars
