@@ -78,11 +78,9 @@ from .advanced_bbcode_editor import AdvancedBBCodeEditor
 # Import modern UI components
 from .components import (ModernCard, ModernContentContainer, ModernScrollArea,
                          ModernSectionCard, ModernSidebar)
-from .dialogs import DownloadProgressDialog, LinksDialog
+from .dialogs import LinksDialog
 from .stats_widget import StatsWidget
 from .status_widget import StatusWidget
-from .upload_progress_dialog import UploadProgressDialog
-from .upload_progress_handler import UploadProgressHandler
 from .upload_status_handler import UploadStatusHandler
 # import the DownloadWorker AGAIN if needed
 class StatusBarMessageBox:
@@ -110,7 +108,7 @@ class StatusBarMessageBox:
         # Default to Yes for non-blocking behaviour
         return QtMessageBox.Yes
 
-QMessageBox = QtMessageBox
+QMessageBox = StatusBarMessageBox
 
 class StatusColorDelegate(QStyledItemDelegate):
     """Color only the thread title cell based on status."""
@@ -233,9 +231,7 @@ class ForumBotGUI(QMainWindow):
         self.config['upload_hosts'] = list(self.active_upload_hosts)
 
         # Initialize the handler first
-        self.progress_handler = None
         self.upload_handler = UploadStatusHandler()
-        self.upload_progress_dialog = None
         self.pending_uploads = 0
 
         # Initialize the bot (without download_dir to defer until user login)
@@ -319,9 +315,6 @@ class ForumBotGUI(QMainWindow):
         # ثم ننادي على initUI
         self.initUI()
 
-        # بعد initUI أصبح بإمكاننا الوصول لـ process_threads_table
-        self.progress_handler = UploadProgressHandler(self.process_threads_table)
-        
         # Connect the thread status update signal to the UI refresh method  
         self.thread_status_updated.connect(self.refresh_process_threads_table)
 
@@ -1725,20 +1718,8 @@ class ForumBotGUI(QMainWindow):
             # All links attempted
             self._start_reupload_process()
 
-    def on_reupload_host_progress(self, row, host_idx, progress, status_msg, current_size, total_size):
-        try:
-            if hasattr(self, 'backup_upload_progress_dialog') and self.backup_upload_progress_dialog:
-                host_name = self.get_host_name(host_idx)
-                if host_name:
-                    self.backup_upload_progress_dialog.update_host_progress(
-                        host=host_name,
-                        progress=progress,
-                        status_msg=status_msg,
-                        current_size=current_size,
-                        total_size=total_size
-                    )
-        except Exception as e:
-            logging.error(f"Error updating backup host progress: {str(e)}", exc_info=True)
+    def on_reupload_host_progress(self, *args, **kwargs):
+        pass
 
     def _start_reupload_process(self):
         state = self._reupload_state
@@ -1762,20 +1743,6 @@ class ForumBotGUI(QMainWindow):
             logging.error(f"Thread '{thread_title}' not found in backup_threads_table after download.")
             StatusBarMessageBox.warning(self, "Not Found", "Thread not found in backup table.")
             return
-
-        # Close any previously opened backup upload dialog
-        if hasattr(self, 'backup_upload_progress_dialog') and self.backup_upload_progress_dialog:
-            self.backup_upload_progress_dialog.close()
-            self.backup_upload_progress_dialog = None
-
-        # Import dialog from the gui package to ensure the module can be found
-        # when running the application from the project root
-        from gui.backup_upload_progress_dialog import \
-            BackupUploadProgressDialog
-        self.backup_upload_progress_dialog = BackupUploadProgressDialog(parent=self)
-        self.backup_upload_progress_dialog.show()
-        self.backup_upload_progress_dialog.raise_()
-        self.backup_upload_progress_dialog.activateWindow()
 
         thread_id = thread_info.get('thread_id', '')
 
@@ -1879,19 +1846,11 @@ class ForumBotGUI(QMainWindow):
             self.save_backup_threads_data()
             self.populate_backup_threads_table()
 
-            # close the progress dialog if any
-            if hasattr(self, 'backup_upload_progress_dialog') and self.backup_upload_progress_dialog:
-                self.backup_upload_progress_dialog.close()
-                self.backup_upload_progress_dialog = None
-
             QMessageBox.information(self, "Re-upload Successful",
                                     f"Files re-uploaded and Keeplinks link updated for '{thread_title}'.")
         except Exception as e:
             logging.error(f"Error in on_reupload_upload_complete: {e}", exc_info=True)
             QMessageBox.warning(self, "Error", f"An unexpected error occurred: {e}")
-            if hasattr(self, 'backup_upload_progress_dialog') and self.backup_upload_progress_dialog:
-                self.backup_upload_progress_dialog.close()
-                self.backup_upload_progress_dialog = None
 
     def reupload_dead_rapidgator_links(self):
         indexes = self.backup_threads_table.selectionModel().selectedRows()
@@ -3392,112 +3351,19 @@ class ForumBotGUI(QMainWindow):
                     
             logging.info(f"📋 Tracking {len(self._current_download_threads)} threads for download completion")
 
-            # 🔄 COMPREHENSIVE dialog reset and preparation
-            # First, handle old worker cleanup and signal disconnections
+            # Cleanup any existing download worker
+
             if hasattr(self, 'download_worker') and self.download_worker:
                 try:
-                    # 📌 COMPREHENSIVE: Disconnect ALL old worker signals to prevent interference
-                    self.download_worker.file_created.disconnect()
-                    self.download_worker.file_progress_update.disconnect()
-                    self.download_worker.status_update.disconnect()
-                    self.download_worker.operation_complete.disconnect()
-                    # Also disconnect any additional signals if they exist
-                    try:
-                        self.download_worker.download_success.disconnect()
-                        self.download_worker.download_error.disconnect()
-                        self.download_worker.file_progress.disconnect()
-                    except Exception:
-                        pass  # Some signals may not exist or be connected
-                    logging.info("🔌 COMPREHENSIVE: Disconnected ALL old download worker signals")
-                except TypeError:
-                    pass  # No connections to disconnect
-                    
-            # 🚫 FORCE FRESH DIALOG CREATION to eliminate any synchronization issues
-            logging.info("🗑️ DESTROYING any existing dialog to ensure completely fresh state...")
-            
-            # Step 1: Completely destroy old dialog if it exists
-            if hasattr(self, 'download_progress_dialog') and self.download_progress_dialog:
-                try:
-                    # Disconnect any remaining signals from old dialog
-                    try:
-                        self.download_progress_dialog.pause_clicked.disconnect()
-                        self.download_progress_dialog.continue_clicked.disconnect()
-                        self.download_progress_dialog.cancel_clicked.disconnect()
-                    except Exception:
-                        pass
-                    
-                    # Close and delete old dialog
-                    self.download_progress_dialog.close()
-                    self.download_progress_dialog.setParent(None)
-                    self.download_progress_dialog.deleteLater()
-                    logging.info("🗑️ Old dialog destroyed completely")
-                except Exception as e:
-                    logging.warning(f"Error destroying old dialog: {e}")
-                    
-                # Clear the reference
-                self.download_progress_dialog = None
-            
-            # Step 2: Force Qt to process deletion events
-            QApplication.processEvents()
-            import time
-            time.sleep(0.2)  # Give Qt time to fully cleanup old dialog
-            
-            # Step 3: Create completely fresh dialog
-            logging.info("🆕 Creating COMPLETELY FRESH download progress dialog...")
-            self.download_progress_dialog = DownloadProgressDialog(self)
-            
-            # Step 4: Verify fresh state
-            widget_count = len(self.download_progress_dialog.file_widgets) if hasattr(self.download_progress_dialog, 'file_widgets') else 0
-            logging.info(f"✅ Fresh dialog created successfully (widgets: {widget_count})")
-
-            # 🔄 Since we created a fresh dialog, no reset needed - it's already clean!
-            logging.info("✅ Fresh dialog is ready - no reset needed for brand new instance")
-
-
-            # Connect pause/continue/cancel from the dialog
-            self.download_progress_dialog.pause_clicked.connect(self.pause_downloads)
-            self.download_progress_dialog.continue_clicked.connect(self.resume_downloads)
-            self.download_progress_dialog.cancel_clicked.connect(self.cancel_downloads)
-            logging.info("🔗 Connected new dialog control signals")
-            
-            # Show dialog after all setup is complete
-            self.download_progress_dialog.show()
-            logging.info("👁️ Dialog shown and ready for new downloads")
-
-            # 🚨 COMPREHENSIVE cleanup for existing download worker
-            if hasattr(self, 'download_worker') and self.download_worker:
-                try:
-                    # Cancel and wait for proper cleanup
                     self.download_worker.cancel_downloads()
-                    
-                    # Give it a moment to clean up
+
                     QApplication.processEvents()
-                    
-                    # 🛡️ Disconnect ALL signals to prevent cross-references and crashes
-                    try:
-                        self.download_worker.file_created.disconnect()
-                        self.download_worker.file_progress_update.disconnect()
-                        self.download_worker.download_finished.disconnect()
-                        self.download_worker.status_update.disconnect()
-                        self.download_worker.operation_complete.disconnect()
-                        self.download_worker.file_progress.disconnect()
-                        self.download_worker.download_success.disconnect()
-                        self.download_worker.download_error.disconnect()
-                    except Exception as e:
-                        logging.debug(f"Signal disconnection (expected): {e}")
-                    
-                    # Force immediate cleanup
+
                     self.download_worker.deleteLater()
                     self.download_worker = None
-                    
-                    # Additional safety delay
-                    QApplication.processEvents()
-                    import time
-                    time.sleep(0.1)  # Brief pause to allow Qt cleanup
-                    
+
                 except Exception as e:
                     logging.warning(f"⚠️ Error cleaning up existing download worker: {e}")
-                    self.download_worker = None
 
             # Create the worker
             self.download_worker = DownloadWorker(
@@ -3507,30 +3373,11 @@ class ForumBotGUI(QMainWindow):
                 gui=self
             )
             self.register_worker(self.download_worker)
-            # 🔗 CRITICAL: Connect worker signals to RESET dialog for fresh progress tracking
-            dialog_session_id = getattr(self.download_progress_dialog, 'session_id', 'unknown')
-            logging.info(f"🔗 Connecting download worker signals to progress dialog (Session: {dialog_session_id})...")
-            
-            # Connect the primary progress signals for file creation and updates
-            self.download_worker.file_created.connect(
-                self.download_progress_dialog.create_file_widget
-            )
-            self.download_worker.file_progress_update.connect(
-                self.download_progress_dialog.update_file_progress
-            )
-            logging.info(f"📊 Connected file progress signals to dialog session {dialog_session_id}")
 
             # Connect status and completion signals
             self.download_worker.status_update.connect(self.update_download_status)
             self.download_worker.operation_complete.connect(self.on_download_complete)
             self.download_worker.file_progress.connect(self.on_file_progress_update)
-            logging.info("📡 Connected status and completion signals")
-            
-            # ✅ FINAL VALIDATION: Ensure everything is ready for clean download start
-            dialog_widgets = len(self.download_progress_dialog.file_widgets) if hasattr(self.download_progress_dialog, 'file_widgets') else 0
-            logging.info(f"🚀 READY TO START: Clean download session prepared (dialog widgets: {dialog_widgets})")
-
-            # -------------- NEW: Connect success/error signals to color row --------------
             self.download_worker.download_success.connect(self.on_download_row_success)
             self.download_worker.download_error.connect(self.on_download_row_error)
 
@@ -3548,27 +3395,6 @@ class ForumBotGUI(QMainWindow):
             )
             # 🔓 Release lock on critical error
             self._download_in_progress = False
-
-    def _update_download_progress_dialog(self, host, progress, status_msg, current_size, total_size, current_file):
-        """
-        This method acts as a slot for the `host_progress_updated` signal of `DownloadProgressDialog`.
-        It is meant to be executed on the main thread to safely update the UI.
-        """
-        if self.download_progress_dialog:  # Check if dialog is still open
-            self.download_progress_dialog._update_host_widget(host, progress, status_msg, current_size, total_size,
-                                                              current_file)
-
-    def handle_host_progress(self, row, host_idx, progress, status, current_size, total_size):
-        """Handle host progress signal from the upload worker and update the progress dialog."""
-        host_name = self.get_host_name(host_idx)
-        if self.upload_progress_dialog:  # Check if the dialog is still active
-            self.upload_progress_dialog.update_host_progress(
-                host=host_name,
-                progress=progress,
-                status_msg=status,
-                current_size=current_size,
-                total_size=total_size
-            )
 
     def pause_downloads(self):
         if self.download_worker:
@@ -3590,9 +3416,6 @@ class ForumBotGUI(QMainWindow):
 
     def on_download_complete(self, success, message):
         """🔒 Handle download completion and release session lock"""
-        if hasattr(self, 'download_progress_dialog') and self.download_progress_dialog:
-            self.download_progress_dialog.close()
-            self.download_progress_dialog = None
 
         if success:
             QMessageBox.information(self, "Download Complete", message)
@@ -3806,10 +3629,6 @@ class ForumBotGUI(QMainWindow):
     def upload_selected_process_threads(self):
         """رفع المواضيع المحددة إلى المضيفات مع تحكم Pause/Continue/Cancel."""
         try:
-            # إنشاء وعرض نافذة التقدم
-            self.upload_progress_dialog = UploadProgressDialog(self)
-            self.upload_progress_dialog.show()
-
             # الحصول على الصفوف المحددة في جدول Process Threads
             selected_items = self.process_threads_table.selectedItems()
             if not selected_items:
@@ -3858,13 +3677,8 @@ class ForumBotGUI(QMainWindow):
                 )
                 self.upload_workers[row] = upload_worker
                 self.register_worker(upload_worker)
-                # ربط أزرار Pause/Continue/Cancel في الديالوج بالـ worker
-                self.upload_progress_dialog.pause_clicked.connect(upload_worker.pause_uploads)
-                self.upload_progress_dialog.continue_clicked.connect(upload_worker.resume_uploads)
-                self.upload_progress_dialog.cancel_clicked.connect(upload_worker.cancel_uploads)
 
                 # ربط إشارات التقدم والإنهاء بمعالجات الـ GUI
-                upload_worker.host_progress.connect(self.handle_host_progress)
                 upload_worker.upload_complete.connect(self.handle_upload_complete)
                 upload_worker.upload_complete.connect(lambda *_: self._on_upload_worker_complete())
                 upload_worker.upload_success.connect(self.on_upload_row_success)
@@ -3881,17 +3695,6 @@ class ForumBotGUI(QMainWindow):
             logging.error(f"Error starting upload: {e}", exc_info=True)
             QMessageBox.critical(self, "خطأ", f"فشل بدء الرفع: {e}")
             self.process_upload_button.setEnabled(True)
-
-    def handle_host_progress(self, row, host_idx, progress, status, current_size, total_size):
-        """Handle host progress signal from the upload worker and update the progress dialog."""
-        host_name = self.get_host_name(host_idx)
-        self.upload_progress_dialog.update_host_progress(
-            host=host_name,
-            progress=progress,
-            status_msg=status,
-            current_size=current_size,
-            total_size=total_size
-        )
 
     def handle_upload_complete(self, row, urls_dict):
         try:
@@ -3989,9 +3792,8 @@ class ForumBotGUI(QMainWindow):
         """Track completed upload workers and close dialog when done."""
         try:
             self.pending_uploads -= 1
-            if self.pending_uploads <= 0 and self.upload_progress_dialog:
-                self.upload_progress_dialog.close()
-                self.upload_progress_dialog = None
+            if self.pending_uploads <= 0:
+                pass
         except Exception as e:
             logging.error(f"Error handling upload worker completion: {e}")
     def apply_auto_process_result(self, job):
@@ -4492,23 +4294,9 @@ class ForumBotGUI(QMainWindow):
 
     def update_upload_progress(self, row: int, host_idx: int, progress: int, status_msg: str,
                                current_size: int = 0, total_size: int = 0):
-        """Update both table progress bar and detailed progress dialog"""
+        """Update upload progress placeholders (legacy method)."""
         try:
-            # Update table progress bar
-            if self.progress_handler:
-                self.progress_handler.update_progress(row, host_idx, progress, status_msg,
-                                                      current_size, total_size)
-
-            # Update detailed progress dialog
-            if self.upload_progress_dialog:
-                host_name = self.get_host_name(host_idx)
-                self.upload_progress_dialog.update_host_progress(
-                    host=host_name,
-                    progress=progress,
-                    status_msg=status_msg,
-                    current_size=current_size,
-                    total_size=total_size
-                )
+            pass
         except Exception as e:
             logging.error(f"Error updating upload progress: {str(e)}")
 
@@ -4525,14 +4313,7 @@ class ForumBotGUI(QMainWindow):
 
     def handle_upload_error(self, row: int, host_idx: int, error_msg: str):
         """Handle upload errors in the progress display."""
-        if self.progress_handler:
-            self.progress_handler.update_progress(
-                row,
-                host_idx,
-                0,  # Reset progress
-                f"Error: {error_msg}",
-                error=True
-            )
+        pass
 
     def update_upload_status(self, row: int, host: str, current_part: int, total_parts: int, status: str):
         """Update status text for specific upload."""
