@@ -259,10 +259,25 @@ class UploadWorker(QThread):
         # ─── Progress callback ──────────────────────────────────────
         size = file_path.stat().st_size
         name = file_path.name
-
+        start = time.time()
         def cb(curr, total):
             self._check_control()
             pct = int(curr / total * 100) if total else 0
+            elapsed = time.time() - start
+            speed = curr / elapsed if elapsed and curr else 0.0
+            eta = (total - curr) / speed if speed and total else 0.0
+            status = OperationStatus(
+                section="Uploads",
+                item=name,
+                op_type=OpType.UPLOAD,
+                stage=OpStage.RUNNING if pct < 100 else OpStage.FINISHED,
+                message=f"Uploading {name}" if pct < 100 else "Complete",
+                progress=pct,
+                speed=speed,
+                eta=eta,
+                host=host,
+            )
+            self.progress_update.emit(status)
             self.host_progress.emit(
                 self.row, host_idx, pct, f"Uploading {name}", curr, total
             )
@@ -273,9 +288,28 @@ class UploadWorker(QThread):
             self._check_control()
 
             if not url:
+                status = OperationStatus(
+                    section="Uploads",
+                    item=name,
+                    op_type=OpType.UPLOAD,
+                    stage=OpStage.ERROR,
+                    message=f"Failed {name}",
+                    host=host,
+                )
+                self.progress_update.emit(status)
                 self.host_progress.emit(
                     self.row, host_idx, 0, f"Failed {name}", 0, size
                 )
+                status = OperationStatus(
+                    section="Uploads",
+                    item=name,
+                    op_type=OpType.UPLOAD,
+                    stage=OpStage.FINISHED,
+                    message=f"Complete {name}",
+                    progress=100,
+                    host=host,
+                )
+                self.progress_update.emit(status)
                 return None
 
             self.host_progress.emit(
@@ -285,6 +319,15 @@ class UploadWorker(QThread):
 
         except Exception as e:
             msg = str(e)
+            status = OperationStatus(
+                section="Uploads",
+                item=name,
+                op_type=OpType.UPLOAD,
+                stage=OpStage.ERROR,
+                message=f"Error {name}: {msg}",
+                host=host,
+            )
+            self.progress_update.emit(status)
             self.host_progress.emit(
                 self.row, host_idx, 0, f"Error {name}: {msg}", 0, size
             )

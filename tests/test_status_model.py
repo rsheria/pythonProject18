@@ -29,4 +29,4 @@ def test_status_model_upsert():
     )
 
     assert model.rowCount() == 1
-    assert model.data(model.index(0, 9)) == 100
+    assert model.data(model.index(0, 10)) == 100

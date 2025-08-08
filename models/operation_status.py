@@ -27,5 +27,6 @@ class OperationStatus:
     message: str = "Waiting…"
     progress: int = 0
     speed: float = 0.0
+    eta: float = 0.0
     host: str = "-"
     errors: int = 0

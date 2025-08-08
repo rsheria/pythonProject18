@@ -17,6 +17,7 @@ class StatusTableModel(QAbstractTableModel):
         "Errors",
         "Host",
         "Speed",
+        "ETA",
         "Progress",
     ]
 
@@ -61,6 +62,8 @@ class StatusTableModel(QAbstractTableModel):
             if col == 8:
                 return self._human_speed(op.speed)
             if col == 9:
+                return self._human_time(op.eta)
+            if col == 10:
                 return op.progress
         if role == Qt.BackgroundRole:
             if op.stage == OpStage.QUEUED:
@@ -82,11 +85,19 @@ class StatusTableModel(QAbstractTableModel):
             speed /= 1024.0
             idx += 1
         return f"{speed:.1f} {units[idx]}"
-
+    @staticmethod
+    def _human_time(seconds: float) -> str:
+        if seconds <= 0:
+            return "-"
+        m, s = divmod(int(seconds), 60)
+        h, m = divmod(m, 60)
+        if h:
+            return f"{h:d}:{m:02d}:{s:02d}"
+        return f"{m:d}:{s:02d}"
     def upsert(self, op: OperationStatus) -> None:
-        key = (op.section, op.item, op.op_type)
+        key = (op.section, op.item, op.op_type, op.host)
         for row, existing in enumerate(self._rows):
-            if (existing.section, existing.item, existing.op_type) == key:
+            if (existing.section, existing.item, existing.op_type, existing.host) == key:
                 self._rows[row] = op
                 top_left = self.index(row, 0)
                 bottom_right = self.index(row, self.columnCount() - 1)

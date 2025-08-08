@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from queue import Queue
 from threading import Lock
-
+from urllib.parse import urlparse
 
 import requests
 from PyQt5.QtCore import QThread, pyqtSignal
@@ -495,7 +495,20 @@ class DownloadWorker(QThread):
                     elapsed = time.time() - start
                     speed = cur / elapsed if elapsed and cur else 0.0
                     eta = (tot - cur) / speed if speed and tot else 0.0
-                    
+                    # Emit detailed OperationStatus for status table
+                    host = urlparse(info.get("link", "")).hostname or "-"
+                    status = OperationStatus(
+                        section="Downloads",
+                        item=display_name,
+                        op_type=OpType.DOWNLOAD,
+                        stage=OpStage.RUNNING if pct < 100 else OpStage.FINISHED,
+                        message="Downloading" if pct < 100 else "Complete",
+                        progress=pct,
+                        speed=speed,
+                        eta=eta,
+                        host=host,
+                    )
+                    self.progress_update.emit(status)
                     # 🛡️ Protected signal emission with session tracking
                     if hasattr(self, "file_progress_update"):
                         logging.debug(
@@ -684,6 +697,14 @@ class DownloadWorker(QThread):
             return
 
         self.status_update.emit(f"Processing '{info['thread_title']}'")
+        proc_status = OperationStatus(
+            section="Downloads",
+            item=info["thread_title"],
+            op_type=OpType.DOWNLOAD,
+            stage=OpStage.RUNNING,
+            message="Processing files",
+        )
+        self.progress_update.emit(proc_status)
         try:
             td = self.create_thread_dir(info["category_name"], thread_id)
             password = (
@@ -711,13 +732,23 @@ class DownloadWorker(QThread):
                 logging.info(
                     "Processed main file for '%s': %s", info["thread_title"], main
                 )
+                proc_status.stage = OpStage.FINISHED
+                proc_status.message = "Processing complete"
+                proc_status.progress = 100
                 self.download_success.emit(row)
             else:
                 logging.warning("No processed output for '%s'", info["thread_title"])
+                proc_status.stage = OpStage.ERROR
+                proc_status.message = "Processing failed"
+                self.progress_update.emit(proc_status)
+
         except Exception as e:
             err = f"Error processing '{info['thread_title']}': {e}"
             logging.error(err, exc_info=True)
             self.status_update.emit(err)
+            proc_status.stage = OpStage.ERROR
+            proc_status.message = err
+            self.progress_update.emit(proc_status)
             self.download_error.emit(row, err)
 
     def create_thread_dir(self, category_name, thread_id):
