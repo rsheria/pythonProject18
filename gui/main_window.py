@@ -1860,6 +1860,7 @@ class ForumBotGUI(QMainWindow):
             thread_id=thread_id,
             upload_hosts=hosts,
             section="Backup Upload",
+            keeplinks_url=thread_info.get('keeplinks_link'),
         )
         self.register_worker(self.current_upload_worker)
         self.current_upload_worker.upload_complete.connect(
@@ -2692,7 +2693,8 @@ class ForumBotGUI(QMainWindow):
         if updated_link:
             logging.info("Keeplinks link updated successfully.")
             keeplinks_link = updated_link
-            logging.info("Keeplinks link updated successfully.")
+            # Store the (unchanged) Keeplinks link back into thread info
+            thread_info['keeplinks_link'] = keeplinks_link
             # Update Rapidgator links in backup data
             thread_info['rapidgator_links'] = new_links
             self.save_backup_threads_data()

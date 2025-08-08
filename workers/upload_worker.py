@@ -37,6 +37,7 @@ class UploadWorker(QThread):
             thread_id: str,
             upload_hosts: Optional[List[str]] = None,
             section: str = "Uploads",
+            keeplinks_url: Optional[str] = None,
     ):
         super().__init__()  # QThread init
         self.bot = bot
@@ -45,7 +46,9 @@ class UploadWorker(QThread):
         self.thread_id = thread_id
         self.config = bot.config  # Store config reference for quick access
         self.section = section
-
+        # إذا كنا نعيد الرفع لروابط موجودة مسبقاً في Keeplinks،
+        # نمرّر الرابط القديم كي لا يتم إنشاء رابط جديد.
+        self.keeplinks_url = keeplinks_url
         # تحكم بالإيقاف والإلغاء
         self.is_cancelled = False
         self.is_paused = False
@@ -345,9 +348,13 @@ class UploadWorker(QThread):
 
         # Add Keeplinks if we have any URLs
         if all_urls:
-            keeplink = self.bot.send_to_keeplinks(all_urls)
-            if keeplink:
-                final["keeplinks"] = keeplink
+            if self.keeplinks_url:
+                # استخدم الرابط القديم بدون إنشاء رابط جديد
+                final["keeplinks"] = self.keeplinks_url
+            else:
+                keeplink = self.bot.send_to_keeplinks(all_urls)
+                if keeplink:
+                    final["keeplinks"] = keeplink
 
         return final
 
