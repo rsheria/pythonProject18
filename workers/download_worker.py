@@ -486,7 +486,7 @@ class DownloadWorker(QThread):
                         host = urlparse(info.get("link", "")).hostname or "-"
                         status = OperationStatus(
                             section="Downloads",
-                            item=display_name,
+                            item=info.get("thread_title", display_name),
                             op_type=OpType.DOWNLOAD,
                             stage=OpStage.RUNNING if pct < 100 else OpStage.FINISHED,
                             message="Downloading" if pct < 100 else "Complete",
@@ -722,6 +722,7 @@ class DownloadWorker(QThread):
                 proc_status.stage = OpStage.FINISHED
                 proc_status.message = "Processing complete"
                 proc_status.progress = 100
+                self.progress_update.emit(proc_status)
                 self.download_success.emit(row)
             else:
                 logging.warning("No processed output for '%s'", info["thread_title"])
