@@ -117,6 +117,12 @@ def _save_cfg(category: str, author: str, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    cb = _HOOKS.get("reload_tree")
+    if cb:
+        try:
+            cb()
+        except Exception:
+            pass
 # ------------------------------------------------------------------
 def parse_bbcode_ai(bbcode: str, prompt: str) -> dict:
     """Use OpenAI to extract structured data from BBCode."""
@@ -175,7 +181,7 @@ def load_category_prompt(category: str) -> str:
             pass
         return load_global_prompt()
 
-
+    return load_global_prompt()
 
 def save_category_prompt(category: str, prompt: str) -> None:
     path = _category_prompt_path(category)
@@ -198,11 +204,18 @@ def save_category_template_prompt(category: str, template: str, prompt: str) -> 
             data = json.load(open(file, "r", encoding="utf-8"))
         except Exception:
             data = {}
+        if isinstance(data, list):
+            data = {"threads": data}
         data["template"] = template
         data["prompt"] = prompt
         with open(file, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-
+    cb = _HOOKS.get("reload_tree")
+    if cb:
+        try:
+            cb()
+        except Exception:
+            pass
 
 def store_post(author: str, category: str, thread: dict) -> None:
     data = _load_cfg(category, author)
@@ -216,12 +229,7 @@ def store_post(author: str, category: str, thread: dict) -> None:
     )
     threads[key] = thread
     _save_cfg(category, author, data)
-    cb = _HOOKS.get("reload_tree")
-    if cb:
-        try:
-            cb()
-        except Exception:
-            pass
+
 
 def apply_template(
     bbcode: str,
