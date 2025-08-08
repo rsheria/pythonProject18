@@ -14,6 +14,7 @@ from workers.mega_download_worker import MegaDownloadWorker
 from workers.megathreads_worker import MegaThreadsWorkerThread
 from workers.upload_worker import UploadWorker
 from workers.worker_thread import WorkerThread
+from workers.proceed_template_worker import ProceedTemplateWorker
 
 from .themes import style_manager, theme_manager
 logging.basicConfig(level=logging.INFO, filename="forum_bot.log",
@@ -7835,35 +7836,46 @@ class ForumBotGUI(QMainWindow):
         if not raw_bbcode:
             QMessageBox.information(self, "Proceed Template", "No BBCode available.")
             return
-        bbcode_filled = templab_manager.apply_template(
-            raw_bbcode,
-            category,
-            thread.get("author", ""),
-            thread_title=title,  # passes GUI title
-        )
-
-        if getattr(self, "bot", None):
-            try:
-                logging.info("🖼️  Processing images via bot …")
-                processed = self.bot.process_images_in_content(bbcode_filled)
-                logging.info(f"🔄 Content changed: {processed != bbcode_filled}")
-                bbcode_filled = processed
-            except Exception:
-                logging.exception("image rewrite failed")
-        else:
-            logging.warning("⚠️ bot is not available.")
 
         links_block = self.build_links_block(category, title)
         if not links_block:
-            links_block = "[LINKS TBD]"   # placeholder until upload finishes
-        if "{LINKS}" in bbcode_filled:
-            bbcode_filled = bbcode_filled.replace("{LINKS}", links_block)
-            logging.info(f"🔗 Link-block inserted (length = {len(links_block)} chars)")
+            links_block = "[LINKS TBD]"  # placeholder until upload finishes
+
+            # Initial queued status entry
+        init_status = OperationStatus(
+            section="Template",
+            item=title,
+            op_type=OpType.POST,
+            host="fastpic.org",
+            stage=OpStage.QUEUED,
+            message="Waiting",
+        )
+        self.status_widget.model.upsert(init_status)
+
+        worker = ProceedTemplateWorker(
+            bot=self.bot,
+            bot_lock=self.bot_lock,
+            category=category,
+            title=title,
+            raw_bbcode=raw_bbcode,
+            author=thread.get("author", ""),
+            links_block=links_block,
+        )
+        self.register_worker(worker)
+        worker.finished.connect(
+            lambda cat, t, bb: self.on_proceed_template_finished(row, thread, cat, t, bb)
+        )
+        worker.start()
+
+    def on_proceed_template_finished(self, row, thread, category, title, bbcode_filled):
+        """Handle completion of the proceed template worker."""
+        if not bbcode_filled:
+            QMessageBox.information(self, "Proceed Template", "Template processing failed.")
+            return
 
         self.process_bbcode_editor.set_text(bbcode_filled)
         thread["bbcode_content"] = bbcode_filled
         self.current_post_data = thread
-        self.current_post_data["bbcode_content"] = bbcode_filled
         self.save_process_threads_data()
         QMessageBox.information(self, "Proceed Template", "Template applied & image uploaded")
 
