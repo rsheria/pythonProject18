@@ -132,14 +132,8 @@ class UploadWorker(QThread):
 
             self._check_control()
 
-            status = OperationStatus(
-                section="Uploads",
-                item=str(self.folder_path.name),
-                op_type=OpType.UPLOAD,
-                stage=OpStage.RUNNING,
-                message="Starting uploads...",
-            )
-            self.progress_update.emit(status)
+            # إطلاق رفع كل مستضيف بالتوازي بدون إنشاء صف "Batch" في جدول الحالة.
+            # سيتم تحديث جدول الحالة فقط لكل مستضيف على حدة أثناء رفع الملفات.
 
             # إطلاق رفع كل مستضيف بالتوازي
             futures = {}
@@ -158,22 +152,14 @@ class UploadWorker(QThread):
                 else:
                     self.upload_results[idx]["status"] = "failed"
                 completed += 1
-                status.progress = int((completed / total) * 100)
-                status.message = f"Uploaded {completed}/{total} hosts"
-                self.progress_update.emit(status)
+
 
             # تحضير القاموس النهائي مع Keeplinks
             final = self._prepare_final_urls()
 
             if "error" in final:
-                status.stage = OpStage.ERROR
-                status.message = final["error"]
-                self.progress_update.emit(status)
                 self.upload_error.emit(self.row, final["error"])
             else:
-                status.stage = OpStage.FINISHED
-                status.message = "Completed"
-                self.progress_update.emit(status)
                 self.upload_success.emit(self.row)
 
             self.upload_complete.emit(self.row, final)

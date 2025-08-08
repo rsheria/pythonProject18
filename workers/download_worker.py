@@ -196,14 +196,10 @@ class DownloadWorker(QThread):
             self.status_update.emit("Initializing downloads...")
             self.initialize_download_queue()
 
-            status = OperationStatus(
-                section="Downloads",
-                item="Batch",
-                op_type=OpType.DOWNLOAD,
-                stage=OpStage.RUNNING,
-                message="Initializing downloads...",
-            )
-            self.progress_update.emit(status)
+            # Track overall progress internally without emitting a dedicated
+            # "Batch" row to the status table. The status table should only
+            # display actual file downloads and the subsequent file processing
+            # stage for each thread.
 
             total_threads = len(self.selected_rows)
             processed_threads = 0
@@ -271,11 +267,6 @@ class DownloadWorker(QThread):
                     self.status_update.emit(
                         f"Overall Progress: {pct}% ({processed_threads}/{total_threads})"
                     )
-                    status.progress = pct
-                    status.message = (
-                        f"Processed {processed_threads}/{total_threads} threads"
-                    )
-                    self.progress_update.emit(status)
                 # done?
                 if (
                     processed_threads == total_threads
@@ -291,16 +282,8 @@ class DownloadWorker(QThread):
 
             # finish up
             if self.is_cancelled:
-                status.stage = OpStage.ERROR
-                status.message = "Cancelled"
-                self.progress_update.emit(status)
                 self.operation_complete.emit(False, "Operation cancelled.")
             else:
-                status.stage = OpStage.FINISHED
-                status.message = (
-                    f"Completed {processed_threads}/{total_threads} threads"
-                )
-                self.progress_update.emit(status)
                 self.operation_complete.emit(
                     True, f"Completed {processed_threads}/{total_threads} threads"
                 )
@@ -495,20 +478,24 @@ class DownloadWorker(QThread):
                     elapsed = time.time() - start
                     speed = cur / elapsed if elapsed and cur else 0.0
                     eta = (tot - cur) / speed if speed and tot else 0.0
-                    # Emit detailed OperationStatus for status table
-                    host = urlparse(info.get("link", "")).hostname or "-"
-                    status = OperationStatus(
-                        section="Downloads",
-                        item=display_name,
-                        op_type=OpType.DOWNLOAD,
-                        stage=OpStage.RUNNING if pct < 100 else OpStage.FINISHED,
-                        message="Downloading" if pct < 100 else "Complete",
-                        progress=pct,
-                        speed=speed,
-                        eta=eta,
-                        host=host,
-                    )
-                    self.progress_update.emit(status)
+                    # Emit detailed OperationStatus for status table only when the
+                    # download actually starts (progress > 0). This avoids showing
+                    # an intermediate "waiting" row before JDownloader begins the
+                    # real download.
+                    if pct > 0:
+                        host = urlparse(info.get("link", "")).hostname or "-"
+                        status = OperationStatus(
+                            section="Downloads",
+                            item=display_name,
+                            op_type=OpType.DOWNLOAD,
+                            stage=OpStage.RUNNING if pct < 100 else OpStage.FINISHED,
+                            message="Downloading" if pct < 100 else "Complete",
+                            progress=pct,
+                            speed=speed,
+                            eta=eta,
+                            host=host,
+                        )
+                        self.progress_update.emit(status)
                     # 🛡️ Protected signal emission with session tracking
                     if hasattr(self, "file_progress_update"):
                         logging.debug(

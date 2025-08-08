@@ -30,6 +30,15 @@ class HostDownloadWidget(QWidget):
         # شريط التقدّم
         self.progress_bar = QProgressBar()
         self.progress_bar.setAlignment(Qt.AlignCenter)
+        self.progress_bar.setFormat("%p%")
+        self.progress_bar.setStyleSheet(
+            "QProgressBar::chunk { background-color: #4caf50; }"
+        )
+        # Show numeric percentage and use a green chunk for better visibility
+        self.progress_bar.setFormat("%p%")
+        self.progress_bar.setStyleSheet(
+            "QProgressBar::chunk { background-color: #4caf50; }"
+        )
         layout.addWidget(self.progress_bar)
 
         # صف المعلومات (اسم الملف، السرعة، المدة المتبقية)
