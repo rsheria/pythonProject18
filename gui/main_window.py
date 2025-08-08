@@ -7861,6 +7861,12 @@ class ForumBotGUI(QMainWindow):
             author=thread.get("author", ""),
             links_block=links_block,
         )
+        # Keep a reference to the worker so it isn't garbage collected while
+        # running.  Losing the reference causes ``QThread: Destroyed while
+        # thread is still running`` crashes on some platforms.
+        if not hasattr(self, "proceed_template_workers"):
+            self.proceed_template_workers = {}
+        self.proceed_template_workers[row] = worker
         self.register_worker(worker)
         worker.finished.connect(
             lambda cat, t, bb: self.on_proceed_template_finished(row, thread, cat, t, bb)
@@ -7884,3 +7890,8 @@ class ForumBotGUI(QMainWindow):
         if status_item:
             status_item.setData(Qt.UserRole + 1, "Converted")
         self.process_threads_table.viewport().update()
+
+        # Remove finished worker from tracking to avoid dangling threads
+        worker = getattr(self, "proceed_template_workers", {}).pop(row, None)
+        if worker:
+            worker.deleteLater()
