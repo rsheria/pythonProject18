@@ -426,6 +426,11 @@ class ForumBotGUI(QMainWindow):
     def register_worker(self, worker):
         if hasattr(worker, 'progress_update'):
             self.status_widget.connect_worker(worker)
+        # Automatically show status panel when any worker starts
+        if hasattr(self, 'sidebar'):
+            self.sidebar.set_active_item_by_text("STATUS")
+        else:
+            self.content_area.setCurrentWidget(self.status_widget)
     def apply_settings(self):
         # مسار التحميل الجديد
         new_dl = self.config['download_dir']

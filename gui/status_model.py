@@ -1,7 +1,8 @@
 from typing import List
 
 from PyQt5.QtCore import QAbstractTableModel, QModelIndex, Qt
-from PyQt5.QtGui import QColor
+from PyQt5.QtGui import QColor, QPalette
+from PyQt5.QtWidgets import QApplication
 
 from models.operation_status import OperationStatus, OpStage
 
@@ -66,14 +67,26 @@ class StatusTableModel(QAbstractTableModel):
             if col == 10:
                 return op.progress
         if role == Qt.BackgroundRole:
-            if op.stage == OpStage.QUEUED:
-                return QColor("#FFFDE7")
-            if op.stage == OpStage.RUNNING:
-                return QColor("#E3F2FD")
-            if op.stage == OpStage.FINISHED:
-                return QColor("#E8F5E9")
-            if op.stage == OpStage.ERROR:
-                return QColor("#FFEBEE")
+            palette = QApplication.palette()
+            base = palette.color(QPalette.Base)
+            is_dark = base.lightness() < 128
+            if is_dark:
+                colors = {
+                    OpStage.QUEUED: "#5D4037",  # dark amber
+                    OpStage.RUNNING: "#1565C0",  # dark blue
+                    OpStage.FINISHED: "#2E7D32",  # deep green
+                    OpStage.ERROR: "#C62828",  # deep red
+                }
+            else:
+                colors = {
+                    OpStage.QUEUED: "#FFF8E1",  # light amber
+                    OpStage.RUNNING: "#BBDEFB",  # light blue
+                    OpStage.FINISHED: "#A5D6A7",  # brighter green
+                    OpStage.ERROR: "#EF9A9A",  # brighter red
+                }
+            color = colors.get(op.stage)
+            if color:
+                return QColor(color)
         return None
 
     # ------------------------------------------------------------------

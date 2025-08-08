@@ -2,6 +2,8 @@ from PyQt5.QtCore import QObject, Qt
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
     QApplication,
+    QAbstractScrollArea,
+    QHeaderView,
     QTableView,
     QVBoxLayout,
     QWidget,
@@ -25,8 +27,14 @@ class ProgressBarDelegate(QStyledItemDelegate):
         opt.textVisible = True
         opt.textAlignment = Qt.AlignCenter
         opt.state = option.state | QStyle.State_Enabled
-        opt.palette = QApplication.palette()
-        opt.palette.setColor(QPalette.Highlight, QColor("#4caf50"))
+        # adapt progress bar colour to theme
+        palette = QApplication.palette()
+        opt.palette = palette
+        base = palette.color(QPalette.Base)
+        is_dark = base.lightness() < 128
+        bar_color = QColor("#66bb6a") if is_dark else QColor("#2e7d32")
+        opt.palette.setColor(QPalette.Highlight, bar_color)
+        opt.palette.setColor(QPalette.HighlightedText, QColor("white"))
         QApplication.style().drawControl(QStyle.CE_ProgressBar, opt, painter)
 
 class StatusWidget(QWidget):
@@ -38,6 +46,15 @@ class StatusWidget(QWidget):
         self.table.setModel(self.model)
         self.table.setSelectionBehavior(QTableView.SelectRows)
         self.table.setAlternatingRowColors(True)
+        # Improve responsiveness and readability
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        header.setStretchLastSection(True)
+        # allow the message column to take remaining space
+        header.setSectionResizeMode(5, QHeaderView.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
+        self.table.setSortingEnabled(True)
         # Use a progress bar delegate for the Progress column
         self.table.setItemDelegateForColumn(10, ProgressBarDelegate(self.table))
         layout.addWidget(self.table)
