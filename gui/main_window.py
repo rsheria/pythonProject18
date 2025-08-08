@@ -70,6 +70,7 @@ from dotenv import find_dotenv, set_key
 from gui.advanced_bbcode_editor import AdvancedBBCodeEditor
 from gui.utils.responsive_manager import ResponsiveManager
 from models.job_model import AutoProcessJob
+from models.operation_status import OperationStatus, OpStage, OpType
 from utils import sanitize_filename
 from utils.paths import get_data_folder
 from workers.login_thread import LoginThread
@@ -84,29 +85,47 @@ from .status_widget import StatusWidget
 from .upload_status_handler import UploadStatusHandler
 # import the DownloadWorker AGAIN if needed
 class StatusBarMessageBox:
-    """Replacement for QMessageBox that writes messages to the status bar."""
+    """Replacement for QMessageBox that writes messages to the status bar.
+
+    It mirrors the standard ``QMessageBox`` API enough for this project while
+    still providing feedback through the application's status bar.  The dialog
+    itself is shown using the real ``QMessageBox`` so that standard buttons like
+    ``Yes`` and ``No`` are available.  These button attributes are exposed on
+    the class to maintain drop‑in compatibility with ``QMessageBox``.
+    """
+
+    # Expose common buttons so ``QMessageBox.Yes`` etc. continue to work
+    Yes = QtMessageBox.Yes
+    No = QtMessageBox.No
+    Ok = QtMessageBox.Ok
+    Cancel = QtMessageBox.Cancel
 
     @staticmethod
     def information(parent, title, text, *args, **kwargs):
         if hasattr(parent, "show_status_message"):
             parent.show_status_message(text)
+        return QtMessageBox.information(parent, title, text, *args, **kwargs)
 
     @staticmethod
     def warning(parent, title, text, *args, **kwargs):
         if hasattr(parent, "show_status_message"):
             parent.show_status_message(text)
+        return QtMessageBox.warning(parent, title, text, *args, **kwargs)
 
     @staticmethod
     def critical(parent, title, text, *args, **kwargs):
         if hasattr(parent, "show_status_message"):
             parent.show_status_message(text)
-
+        return QtMessageBox.critical(parent, title, text, *args, **kwargs)
     @staticmethod
-    def question(parent, title, text, buttons=QtMessageBox.Yes | QtMessageBox.No, defaultButton=QtMessageBox.No):
+    def question(parent, title, text,
+                 buttons=QtMessageBox.Yes | QtMessageBox.No,
+                 defaultButton=QtMessageBox.No):
         if hasattr(parent, "show_status_message"):
             parent.show_status_message(text)
-        # Default to Yes for non-blocking behaviour
-        return QtMessageBox.Yes
+        # Display the actual QMessageBox so the user can respond
+        return QtMessageBox.question(parent, title, text, buttons, defaultButton)
+
 
 QMessageBox = StatusBarMessageBox
 
@@ -1646,6 +1665,13 @@ class ForumBotGUI(QMainWindow):
         try:
             logging.info(f"Re-uploading files for thread '{thread_title}'")
 
+            # Ensure the status panel is visible so the user can follow the
+            # re-upload progress in real time
+            if hasattr(self, 'sidebar'):
+                self.sidebar.set_active_item_by_text("STATUS")
+            else:
+                self.content_area.setCurrentWidget(self.status_widget)
+
             # Retrieve Rapidgator backup links
             backup_links = thread_info.get('rapidgator_backup_links', [])
             flat = []
@@ -1703,11 +1729,32 @@ class ForumBotGUI(QMainWindow):
             download_folder = os.path.join(self.bot.download_dir, "BackupReupload", str(thread_id))
             os.makedirs(download_folder, exist_ok=True)
 
+            start_time = time.time()
+
+            def progress_cb(cur, total, filename):
+                pct = int(cur / total * 100) if total else 0
+                elapsed = time.time() - start_time
+                speed = cur / elapsed if elapsed else 0
+                eta = (total - cur) / speed if speed else 0
+                status = OperationStatus(
+                    section="Backup Download",
+                    item=filename,
+                    op_type=OpType.DOWNLOAD,
+                    stage=OpStage.RUNNING if pct < 100 else OpStage.FINISHED,
+                    message="Downloading" if pct < 100 else "Complete",
+                    progress=pct,
+                    speed=speed,
+                    eta=eta,
+                    host="rapidgator.net",
+                )
+                self.status_widget.model.upsert(status)
+
             result = self.bot.download_rapidgator_net(
                 rg_link,
                 "BackupReupload",
                 thread_id,
                 state['thread_title'],
+                progress_callback=progress_cb,
                 download_dir=download_folder
             )
             if result:
@@ -1716,6 +1763,15 @@ class ForumBotGUI(QMainWindow):
                 logging.warning(
                     f"Failed to download RG link {current_index + 1}/{len(rg_links)}: {rg_link}"
                 )
+                fail_status = OperationStatus(
+                    section="Backup Download",
+                    item=os.path.basename(rg_link),
+                    op_type=OpType.DOWNLOAD,
+                    stage=OpStage.ERROR,
+                    message="Failed",
+                    host="rapidgator.net",
+                )
+                self.status_widget.model.upsert(fail_status)
             state['current_index'] += 1
             self._download_next_rg_link()
 
@@ -1773,6 +1829,14 @@ class ForumBotGUI(QMainWindow):
                 if thread_title in threads:
                     password = threads[thread_title].get("password")
                     break
+        process_status = OperationStatus(
+            section="Backup Download",
+            item=thread_title,
+            op_type=OpType.DOWNLOAD,
+            stage=OpStage.RUNNING,
+            message="Processing files",
+        )
+        self.status_widget.model.upsert(process_status)
         processed_files = self.file_processor.process_downloads(
             Path(reupload_folder), moved_files, thread_title, password
         )
@@ -1781,9 +1845,13 @@ class ForumBotGUI(QMainWindow):
             return
 
         # Upload only to main hosts (exclude backup RG account)
-        hosts = [h for h in self.active_upload_hosts if h != 'rapidgator-backup']
-        if not hosts:
-            hosts = [h for h in self.active_upload_hosts if h]
+        process_status.stage = OpStage.FINISHED
+        process_status.message = "Processing complete"
+        process_status.progress = 100
+        self.status_widget.model.upsert(process_status)
+
+        # Upload to all active hosts including Rapidgator backup
+        hosts = list(self.active_upload_hosts) if self.active_upload_hosts else []
 
         self.current_upload_worker = UploadWorker(
             bot=self.bot,
@@ -1791,6 +1859,7 @@ class ForumBotGUI(QMainWindow):
             folder_path=reupload_folder,
             thread_id=thread_id,
             upload_hosts=hosts,
+            section="Backup Upload",
         )
         self.register_worker(self.current_upload_worker)
         self.current_upload_worker.upload_complete.connect(

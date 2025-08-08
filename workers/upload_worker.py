@@ -36,6 +36,7 @@ class UploadWorker(QThread):
             folder_path: str,
             thread_id: str,
             upload_hosts: Optional[List[str]] = None,
+            section: str = "Uploads",
     ):
         super().__init__()  # QThread init
         self.bot = bot
@@ -43,6 +44,7 @@ class UploadWorker(QThread):
         self.folder_path = Path(folder_path)
         self.thread_id = thread_id
         self.config = bot.config  # Store config reference for quick access
+        self.section = section
 
         # تحكم بالإيقاف والإلغاء
         self.is_cancelled = False
@@ -253,7 +255,7 @@ class UploadWorker(QThread):
             speed = curr / elapsed if elapsed and curr else 0.0
             eta = (total - curr) / speed if speed and total else 0.0
             status = OperationStatus(
-                section="Uploads",
+                section=self.section,
                 item=name,
                 op_type=OpType.UPLOAD,
                 stage=OpStage.RUNNING if pct < 100 else OpStage.FINISHED,
@@ -275,7 +277,7 @@ class UploadWorker(QThread):
 
             if not url:
                 status = OperationStatus(
-                    section="Uploads",
+                    section=self.section,
                     item=name,
                     op_type=OpType.UPLOAD,
                     stage=OpStage.ERROR,
@@ -287,7 +289,7 @@ class UploadWorker(QThread):
                     self.row, host_idx, 0, f"Failed {name}", 0, size
                 )
                 status = OperationStatus(
-                    section="Uploads",
+                    section=self.section,
                     item=name,
                     op_type=OpType.UPLOAD,
                     stage=OpStage.FINISHED,
@@ -306,7 +308,7 @@ class UploadWorker(QThread):
         except Exception as e:
             msg = str(e)
             status = OperationStatus(
-                section="Uploads",
+                section=self.section,
                 item=name,
                 op_type=OpType.UPLOAD,
                 stage=OpStage.ERROR,
