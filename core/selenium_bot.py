@@ -5293,6 +5293,58 @@ class ForumBotSelenium:
             logging.debug(f"Could not parse German datetime '{date_text}': {e}")
             return None
 
+    def _resolve_final_url(self, url, depth=0):
+        """Follow redirects and HTML indirections to resolve the final image URL."""
+        if depth > 3:
+            return url
+        try:
+            with requests.Session() as session:
+                response = session.get(url, allow_redirects=True, timeout=10)
+                final_url = response.url
+                content_type = response.headers.get("Content-Type", "")
+                if "image" in content_type:
+                    return final_url
+                soup = BeautifulSoup(response.text, "html.parser")
+                img = soup.find("img")
+                if img and img.get("src"):
+                    src = img.get("src")
+                    if src.startswith("//"):
+                        src = "https:" + src
+                    elif src.startswith("/"):
+                        src = urljoin(final_url, src)
+                    return self._resolve_final_url(src, depth + 1)
+                refresh = soup.find("meta", attrs={"http-equiv": "refresh"})
+                if refresh:
+                    match = re.search(r"url=(.+)", refresh.get("content", ""), re.IGNORECASE)
+                    if match:
+                        target = match.group(1).strip('"')
+                        if target.startswith("//"):
+                            target = "https:" + target
+                        elif target.startswith("/"):
+                            target = urljoin(final_url, target)
+                        return self._resolve_final_url(target, depth + 1)
+                return final_url
+        except Exception as e:
+            logging.debug(f"Failed to resolve final URL for {url}: {e}")
+        # Selenium fallback to mimic 'open image in new tab'
+        try:
+            if hasattr(self, "driver") and self.driver:
+                original = self.driver.current_window_handle
+                src = ""
+                self.driver.execute_script("window.open(arguments[0], '_blank');", url)
+                self.driver.switch_to.window(self.driver.window_handles[-1])
+                try:
+                    WebDriverWait(self.driver, 10).until(lambda d: d.find_elements(By.TAG_NAME, 'img'))
+                    img = self.driver.find_element(By.TAG_NAME, 'img')
+                    src = img.get_attribute('src')
+                finally:
+                    self.driver.close()
+                    self.driver.switch_to.window(original)
+                if src:
+                    return self._resolve_final_url(src, depth + 1)
+        except Exception as e:
+            logging.debug(f"Selenium fallback failed for {url}: {e}")
+        return url
     def _resolve_final_url(self, url):
         """Follow redirects to resolve the final image URL."""
         try:
