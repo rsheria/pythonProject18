@@ -5293,18 +5293,41 @@ class ForumBotSelenium:
             logging.debug(f"Could not parse German datetime '{date_text}': {e}")
             return None
 
-    def _get_direct_image_url(self, img_tag):
-        """Extract the direct image URL, simulating 'open image in new tab'."""
+    def _resolve_final_url(self, url):
+        """Follow redirects to resolve the final image URL."""
         try:
-            parent = img_tag.parent
-            if parent and parent.name == 'a' and parent.get('href'):
-                return parent.get('href')
+            with requests.Session() as session:
+                response = session.head(url, allow_redirects=True, timeout=10)
+                final_url = response.url
+                content_type = response.headers.get("Content-Type", "")
+                if "image" in content_type:
+                    return final_url
+                response = session.get(url, allow_redirects=True, timeout=10, stream=True)
+                return response.url
+        except Exception as e:
+            logging.debug(f"Failed to resolve final URL for {url}: {e}")
+            return url
+    def _get_direct_image_url(self, img_tag):
+        """Extract final image URL similar to 'open image in new tab'."""
+        try:
+            candidate = ""
             for attr in ("data-src", "data-original", "data-lazy", "src"):
                 val = img_tag.get(attr)
                 if val:
-                    return val
-        except Exception:
-            pass
+                    candidate = val
+                    break
+            if not candidate:
+                parent = img_tag.parent
+                if parent and parent.name == 'a' and parent.get('href'):
+                    candidate = parent.get('href')
+            if candidate:
+                if candidate.startswith('//'):
+                    candidate = 'https:' + candidate
+                elif candidate.startswith('/'):
+                    candidate = self.forum_url.rstrip('/') + candidate
+                return self._resolve_final_url(candidate)
+        except Exception as e:
+            logging.debug(f"Could not extract image URL: {e}")
         return ""
 
     def convert_post_html_to_bbcode(self, post):
