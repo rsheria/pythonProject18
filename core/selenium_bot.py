@@ -51,37 +51,77 @@ IMG_TAG_RE = re.compile(r'\[IMG\](https?://[^\]]+)\[/IMG\]', re.I)
 
 
 def _get_real_image_url(driver, url: str, wait_sec: int = 8) -> str:
-    """Return a direct .jpg/.png/.gif link hidden behind an image-hosting page."""
+    """
+    Navigate to an image hosting page and return the direct image link.
+    Includes special handling for directupload.eu while keeping a
+    generic fallback for other hosts.
+    """
     try:
+        current_url = driver.current_url
         driver.get(url)
+        if "directupload.eu" in driver.current_url:
+            try:
+                image_element = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "img.image-container__image"))
+                )
+                real_image_url = image_element.get_attribute("src")
+                if current_url and current_url != url:
+                    driver.get(current_url)
+                return real_image_url if real_image_url else url
+            except Exception as e:
+                logging.warning(
+                    f"Could not find image on directupload.eu for {url}: {e}"
+                )
         WebDriverWait(driver, wait_sec).until(
             EC.presence_of_element_located((By.TAG_NAME, "img"))
         )
 
-        selectors = [
+        selectors_to_try = [
             "img#img",
             "img.picture",
-            "img[src*='images']",
             "img[src*='thumbs']",
+            "img[src*='images']",
             "img:not([alt*='logo']):not([alt*='banner'])",
         ]
-        for css in selectors:
-            imgs = driver.find_elements(By.CSS_SELECTOR, css)
-            if imgs:
-                src = imgs[0].get_attribute("src")
-                if src and src != url:
-                    return src
+        real_image_url = None
 
-        for img in driver.find_elements(By.TAG_NAME, "img"):
-            src = img.get_attribute("src")
-            if src and src != url and any(
-                src.lower().endswith(x) for x in (".jpg", ".jpeg", ".png", ".gif")
-            ):
-                return src
+        for selector in selectors_to_try:
+            try:
+                img_elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                if img_elements:
+                    real_image_url = img_elements[0].get_attribute("src")
+                    if real_image_url and real_image_url != url:
+                        break
+            except Exception:
+                continue
+
+        if not real_image_url:
+            all_images = driver.find_elements(By.TAG_NAME, "img")
+            for img in all_images:
+                src = img.get_attribute("src")
+                if src and src != url and any(
+                    ext in src.lower() for ext in [
+                        ".jpg",
+                        ".jpeg",
+                        ".png",
+                        ".gif",
+                        ".webp",
+                        ".bmp",
+                    ]
+                ):
+                    real_image_url = src
+                    break
+
+        if current_url and current_url != url:
+            driver.get(current_url)
+
+        return real_image_url if real_image_url else url
 
     except Exception as e:
-        logging.warning(f"[image-fix] failed on {url}: {e}")
-    return url
+        logging.warning(
+            f"Could not extract real image URL from {url}: {e}"
+        )
+        return url
 
 
 def fix_all_image_tags(driver, bbcode: str) -> str:
