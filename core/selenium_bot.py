@@ -3855,24 +3855,32 @@ class ForumBotSelenium:
                             bbcode += traverse(child)
                         bbcode += '[/U]'
                     elif tag_name == 'a':
-                        href = node.get('href', '')
-                        if href:
-                            # Normalize the link
-                            if href.startswith('//'):
-                                href = 'https:' + href
-                            elif href.startswith('/'):
-                                href = 'https://example.com' + href  # Fallback base URL
-                            
-                            link_text = ''.join(traverse(child) for child in node.children)
-                            if link_text.strip():
-                                bbcode += f'[URL={href}]{link_text}[/URL]'
-                            else:
-                                bbcode += f'[URL]{href}[/URL]'
+                        # If link wraps an image, treat as direct image link
+                        img_child = node.find('img')
+                        if img_child:
+                            src = self._get_direct_image_url(img_child)
+                            if src:
+                                if src.startswith('//'):
+                                    src = 'https:' + src
+                                bbcode += f'[IMG]{src}[/IMG]'
                         else:
-                            for child in node.children:
-                                bbcode += traverse(child)
+                            href = node.get('href', '')
+                            if href:
+                                if href.startswith('//'):
+                                    href = 'https:' + href
+                                elif href.startswith('/'):
+                                    href = 'https://example.com' + href  # Fallback base URL
+
+                                link_text = ''.join(traverse(child) for child in node.children)
+                                if link_text.strip():
+                                    bbcode += f'[URL={href}]{link_text}[/URL]'
+                                else:
+                                    bbcode += f'[URL]{href}[/URL]'
+                            else:
+                                for child in node.children:
+                                    bbcode += traverse(child)
                     elif tag_name == 'img':
-                        src = node.get('src', '')
+                        src = self._get_direct_image_url(node)
                         if src:
                             if src.startswith('//'):
                                 src = 'https:' + src
@@ -5284,33 +5292,69 @@ class ForumBotSelenium:
         except Exception as e:
             logging.debug(f"Could not parse German datetime '{date_text}': {e}")
             return None
-    
+
+    def _get_direct_image_url(self, img_tag):
+        """Extract the direct image URL, simulating 'open image in new tab'."""
+        try:
+            parent = img_tag.parent
+            if parent and parent.name == 'a' and parent.get('href'):
+                return parent.get('href')
+            for attr in ("data-src", "data-original", "data-lazy", "src"):
+                val = img_tag.get(attr)
+                if val:
+                    return val
+        except Exception:
+            pass
+        return ""
+
     def convert_post_html_to_bbcode(self, post):
-        """
-        Convert post HTML content to BBCode format.
-        Enhanced version with better formatting preservation.
-        """
+        """Convert post HTML content to BBCode with direct image links."""
+        import html
         try:
             if not post:
                 return "[CENTER]No content available.[/CENTER]"
             
             # Get post content
-            post_content = post.get_text(separator='\n', strip=True)
-            
-            if not post_content:
-                return "[CENTER]No content extracted.[/CENTER]"
-            
-            # Basic BBCode conversion
-            bbcode_content = post_content
-            
-            # Clean up excessive whitespace
-            bbcode_content = re.sub(r'\n\s*\n\s*\n+', '\n\n', bbcode_content)
-            bbcode_content = bbcode_content.strip()
-            
-            if not bbcode_content:
+            soup = BeautifulSoup(str(post), 'html.parser')
+
+            # Replace images with BBCode using direct URLs
+            for img in soup.find_all('img'):
+                parent = img.parent
+                src = self._get_direct_image_url(img)
+                if src:
+                    img.replace_with(soup.new_string(f"[IMG]{src}[/IMG]"))
+                    if parent and parent.name == 'a':
+                        parent.unwrap()
+
+            # Convert anchors to BBCode
+            for a in soup.find_all('a'):
+                href = a.get('href')
+                text = a.get_text(strip=True)
+                if href:
+                    a.replace_with(f"[URL={href}]{text}[/URL]" if text else f"[URL]{href}[/URL]")
+
+            html_text = str(soup)
+
+            # Basic formatting replacements
+            bbcode = re.sub(r'<br\s*/?>', '\n', html_text, flags=re.IGNORECASE)
+            bbcode = re.sub(r'<b>(.*?)</b>', r'[B]\1[/B]', bbcode, flags=re.IGNORECASE)
+            bbcode = re.sub(r'<strong>(.*?)</strong>', r'[B]\1[/B]', bbcode, flags=re.IGNORECASE)
+            bbcode = re.sub(r'<i>(.*?)</i>', r'[I]\1[/I]', bbcode, flags=re.IGNORECASE)
+            bbcode = re.sub(r'<em>(.*?)</em>', r'[I]\1[/I]', bbcode, flags=re.IGNORECASE)
+            bbcode = re.sub(r'<u>(.*?)</u>', r'[U]\1[/U]', bbcode, flags=re.IGNORECASE)
+
+            # Remove remaining HTML tags
+            bbcode = re.sub(r'<[^>]+>', '', bbcode)
+
+            # Decode HTML entities and tidy up
+            bbcode = html.unescape(bbcode)
+            bbcode = re.sub(r'\n\s*\n\s*\n+', '\n\n', bbcode)
+            bbcode = bbcode.strip()
+
+            if not bbcode:
                 return "[CENTER]Content processing resulted in empty text.[/CENTER]"
             
-            return bbcode_content
+            return bbcode
             
         except Exception as e:
             logging.debug(f"Error converting post HTML to BBCode: {e}")
