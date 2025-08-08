@@ -1888,8 +1888,14 @@ class ForumBotGUI(QMainWindow):
             katfile_links = urls_dict.get('katfile', [])
             mega_links = urls_dict.get('mega', [])
 
-            # Combined new links
-            new_links = rapidgator_links + nitroflare_links + ddownload_links + katfile_links + mega_links
+            # Combined new links (excluding Rapidgator backup so it remains private)
+            new_links = (
+                rapidgator_links
+                + nitroflare_links
+                + ddownload_links
+                + katfile_links
+                + mega_links
+            )
 
             # If we already had a Keeplinks link for this thread:
             keeplinks_url = urls_dict.get('keeplinks', '') or old_keeplinks
@@ -1908,10 +1914,12 @@ class ForumBotGUI(QMainWindow):
             keeplinks_url = updated_link
             # If success, store them in backup data
             thread_info['keeplinks_link'] = keeplinks_url  # final Keeplinks
-            thread_info['rapidgator_links'] = rapidgator_links
-            if backup_rg_urls:
-                thread_info['rapidgator_backup_links'] = list(backup_rg_urls)
-            thread_info['dead_rapidgator_links'] = []  # reset dead links
+            # Replace old Rapidgator links with the freshly uploaded ones
+            thread_info['rapidgator_links'] = list(rapidgator_links)
+            # Always overwrite Rapidgator backup links so old links don't linger
+            thread_info['rapidgator_backup_links'] = list(backup_rg_urls)
+            # Reset dead-link tracking; we now have fresh links
+            thread_info['dead_rapidgator_links'] = []
             # If new mega links were provided, keep them
             if mega_links:
                 thread_info['mega_link'] = "\n".join(mega_links)
@@ -3792,9 +3800,15 @@ class ForumBotGUI(QMainWindow):
 
                 # 2) Pull out newly-uploaded host links
                 rapidgator_links = urls_dict.get('rapidgator', [])
+                if isinstance(rapidgator_links, str):
+                    rapidgator_links = [rapidgator_links]
+                else:
+                    rapidgator_links = list(rapidgator_links)
                 backup_rg_urls = urls_dict.get('rapidgator-backup', [])
                 if isinstance(backup_rg_urls, str):
                     backup_rg_urls = [backup_rg_urls]
+                else:
+                    backup_rg_urls = list(backup_rg_urls)
                 nitroflare_links = urls_dict.get('nitroflare', [])
                 ddownload_links = urls_dict.get('ddownload', [])
                 katfile_links = urls_dict.get('katfile', [])
