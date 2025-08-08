@@ -1234,7 +1234,6 @@ class ForumBotGUI(QMainWindow):
         self.save_template_btn = QPushButton("Save Template")
         self.save_template_btn.clicked.connect(self.on_save_template)
         tpl_btns.addWidget(self.save_template_btn)
-        tpl_btns.addWidget(self.test_regex_btn)
         tpl_layout.addLayout(tpl_btns)
         top_splitter.addWidget(template_widget)
 
