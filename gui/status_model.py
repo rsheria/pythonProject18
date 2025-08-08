@@ -1,8 +1,9 @@
 from typing import List
 
 from PyQt5.QtCore import QAbstractTableModel, QModelIndex, Qt
-from PyQt5.QtGui import QColor, QPalette
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtGui import QColor
+
+from .themes import theme_manager
 
 from models.operation_status import OperationStatus, OpStage
 
@@ -67,26 +68,33 @@ class StatusTableModel(QAbstractTableModel):
             if col == 10:
                 return op.progress
         if role == Qt.BackgroundRole:
-            palette = QApplication.palette()
-            base = palette.color(QPalette.Base)
-            is_dark = base.lightness() < 128
-            if is_dark:
+            t = theme_manager.get_current_theme()
+            if theme_manager.theme_mode == "dark":
                 colors = {
-                    OpStage.QUEUED: "#5D4037",  # dark amber
-                    OpStage.RUNNING: "#1565C0",  # dark blue
-                    OpStage.FINISHED: "#2E7D32",  # deep green
-                    OpStage.ERROR: "#C62828",  # deep red
+                    OpStage.QUEUED: t.SURFACE_VARIANT,
+                    OpStage.RUNNING: getattr(t, "INFO_LIGHT", t.INFO),
+                    OpStage.FINISHED: getattr(t, "SUCCESS_LIGHT", t.SUCCESS),
+                    OpStage.ERROR: getattr(t, "ERROR_LIGHT", t.ERROR),
+
                 }
             else:
                 colors = {
-                    OpStage.QUEUED: "#FFF8E1",  # light amber
-                    OpStage.RUNNING: "#BBDEFB",  # light blue
-                    OpStage.FINISHED: "#A5D6A7",  # brighter green
-                    OpStage.ERROR: "#EF9A9A",  # brighter red
+                    OpStage.QUEUED: t.SURFACE_VARIANT,
+                    OpStage.RUNNING: t.INFO,
+                    OpStage.FINISHED: t.SUCCESS,
+                    OpStage.ERROR: t.ERROR,
+
                 }
             color = colors.get(op.stage)
             if color:
                 return QColor(color)
+        if role == Qt.ForegroundRole:
+            t = theme_manager.get_current_theme()
+            if op.stage == OpStage.QUEUED:
+                return QColor(t.TEXT_PRIMARY)
+            if theme_manager.theme_mode == "dark":
+                return QColor(t.BACKGROUND)
+            return QColor(t.TEXT_ON_PRIMARY)
         return None
 
     # ------------------------------------------------------------------
