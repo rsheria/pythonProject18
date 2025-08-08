@@ -1,104 +1,89 @@
 # ★ Inserts Keeplinks + host links at {LINKS} placeholder ★
-from config.config import DATA_DIR
-from workers.download_worker import DownloadWorker
-from workers.upload_worker   import UploadWorker
-from workers.worker_thread   import WorkerThread
-from workers.megathreads_worker import MegaThreadsWorkerThread
-from workers.mega_download_worker import MegaDownloadWorker
-from workers.auto_process_worker import AutoProcessWorker
-from downloaders.katfile import KatfileDownloader as KatfileDownloaderAPI
-from PyQt5.QtWidgets import QApplication, QAction, QPlainTextEdit
-from config.config import save_configuration
-from .themes import theme_manager, style_manager
-from pathlib import Path
+
 import hashlib
 import logging
+from pathlib import Path
+
+from PyQt5.QtWidgets import QAction, QApplication, QPlainTextEdit
+
+from config.config import DATA_DIR, save_configuration
+from downloaders.katfile import KatfileDownloader as KatfileDownloaderAPI
+from workers.auto_process_worker import AutoProcessWorker
+from workers.download_worker import DownloadWorker
+from workers.mega_download_worker import MegaDownloadWorker
+from workers.megathreads_worker import MegaThreadsWorkerThread
+from workers.upload_worker import UploadWorker
+from workers.worker_thread import WorkerThread
+
+from .themes import style_manager, theme_manager
 logging.basicConfig(level=logging.INFO, filename="forum_bot.log",
                     filemode="a", format="%(asctime)s %(levelname)s %(message)s")
-import random
-import re
-import time
-import subprocess
-import shutil
-from selenium.common import TimeoutException, ElementClickInterceptedException
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.wait import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from .dialogs import DownloadProgressDialog, LinksDialog
-from .upload_progress_dialog import UploadProgressDialog
-from core.file_processor import FileProcessor
-from core.file_monitor import FileMonitor
-from workers.login_thread import LoginThread
-import requests
-from PyQt5.QtWidgets import (
-    QApplication,
-    QMainWindow,
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QSplitter,
-    QListWidget,
-    QListWidgetItem,
-    QStackedWidget,
-    QLabel,
-    QLineEdit,
-    QPushButton,
-    QTableWidget,
-    QTableWidgetItem,
-    QHeaderView,
-    QTextEdit,
-    QGroupBox,
-    QProgressBar,
-    QStatusBar,
-    QToolBar,
-    QAction,
-    QInputDialog,
-    QFileDialog,
-    QTreeWidget,
-    QTreeWidgetItem,
-    QTreeView,
-    QCheckBox,
-    QComboBox,
-    QSpinBox,
-                             QTabWidget, QFrame, QScrollArea, QSizePolicy, QTextBrowser,
-                             QAbstractItemView, QShortcut, QMenu, QProgressDialog, QDialogButtonBox,
-                             QErrorMessage, QDialog, QStyle, QStyledItemDelegate, QStyleOptionViewItem)
-from PyQt5.QtGui import QGuiApplication, QScreen
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread, QObject, QSize, QMutex, QMutexLocker, QDateTime, Q_ARG, QMetaObject, QThreadPool
-from PyQt5.QtGui import QIcon, QFont, QPixmap, QStandardItemModel, QStandardItem, QKeySequence, QTextCursor, QBrush, QColor, QPalette
-from .stats_widget import StatsWidget
-# Import modern UI components
-from .components import (
-    ModernSidebar, ModernCard, ModernSectionCard, 
-    ModernScrollArea, ModernContentContainer
-)
-from gui.utils.responsive_manager import ResponsiveManager
-import webbrowser
-from core.selenium_bot import ForumBotSelenium as SeleniumBot
-from config.config import load_configuration
-from utils import sanitize_filename
-from utils.paths import get_data_folder
-from core.user_manager import get_user_manager
-from core.category_manager import CategoryManager
-from gui.advanced_bbcode_editor import AdvancedBBCodeEditor
-from core.job_manager import JobManager
-from models.job_model import AutoProcessJob
-import os
-import sys
 import json
 import logging
+import os
+import random
+import re
+import shutil
+import subprocess
+import sys
+import time
+import webbrowser
 from datetime import datetime
+from urllib.parse import urlparse, urlunparse
+
+import requests
 from bs4 import BeautifulSoup, NavigableString
-from dotenv import set_key, find_dotenv
+from PyQt5.QtCore import (Q_ARG, QDateTime, QMetaObject, QMutex, QMutexLocker,
+                          QObject, QSize, Qt, QThread, QThreadPool, QTimer,
+                          pyqtSignal)
+from PyQt5.QtGui import (QBrush, QColor, QFont, QGuiApplication, QIcon,
+                         QKeySequence, QPalette, QPixmap, QScreen,
+                         QStandardItem, QStandardItemModel, QTextCursor)
+from PyQt5.QtWidgets import (QAbstractItemView, QAction, QApplication,
+                             QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+                             QErrorMessage, QFileDialog, QFrame, QGroupBox,
+                             QHBoxLayout, QHeaderView, QInputDialog, QLabel,
+                             QLineEdit, QListWidget, QListWidgetItem,
+                             QMainWindow, QMenu)
+from PyQt5.QtWidgets import QMessageBox as QtMessageBox
+from PyQt5.QtWidgets import (QProgressBar, QProgressDialog, QPushButton,
+                             QScrollArea, QShortcut, QSizePolicy, QSpinBox,
+                             QSplitter, QStackedWidget, QStatusBar, QStyle,
+                             QStyledItemDelegate, QStyleOptionViewItem,
+                             QTableWidget, QTableWidgetItem, QTabWidget,
+                             QTextBrowser, QTextEdit, QToolBar, QTreeView,
+                             QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+                             QWidget)
+from selenium.common import ElementClickInterceptedException, TimeoutException
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.wait import WebDriverWait
+import templab_manager
+from config.config import load_configuration
+from core.category_manager import CategoryManager
+from core.file_monitor import FileMonitor
+from core.file_processor import FileProcessor
+from core.job_manager import JobManager
+from core.selenium_bot import ForumBotSelenium as SeleniumBot
+from core.user_manager import get_user_manager
+from dotenv import find_dotenv, set_key
+from gui.advanced_bbcode_editor import AdvancedBBCodeEditor
+from gui.utils.responsive_manager import ResponsiveManager
+from models.job_model import AutoProcessJob
+from utils import sanitize_filename
+from utils.paths import get_data_folder
+from workers.login_thread import LoginThread
+
+from .advanced_bbcode_editor import AdvancedBBCodeEditor
+# Import modern UI components
+from .components import (ModernCard, ModernContentContainer, ModernScrollArea,
+                         ModernSectionCard, ModernSidebar)
+from .dialogs import DownloadProgressDialog, LinksDialog
+from .stats_widget import StatsWidget
+from .status_widget import StatusWidget
+from .upload_progress_dialog import UploadProgressDialog
 from .upload_progress_handler import UploadProgressHandler
 from .upload_status_handler import UploadStatusHandler
-from .advanced_bbcode_editor import AdvancedBBCodeEditor
-from utils import sanitize_filename
-from urllib.parse import urlparse, urlunparse
-from PyQt5.QtWidgets import QProgressBar
-from PyQt5.QtWidgets import QMessageBox as QtMessageBox
-from utils.paths import get_data_folder
-import templab_manager
 # import the DownloadWorker AGAIN if needed
 class StatusBarMessageBox:
     """Replacement for QMessageBox that writes messages to the status bar."""
@@ -441,7 +426,13 @@ class ForumBotGUI(QMainWindow):
 
         # إضافته لمنطقة المحتوى
         self.content_area.addWidget(self.settings_tab)
+    def init_status_view(self):
+        self.status_widget = StatusWidget(self)
+        self.content_area.addWidget(self.status_widget)
 
+    def register_worker(self, worker):
+        if hasattr(worker, 'progress_update'):
+            self.status_widget.connect_worker(worker)
     def apply_settings(self):
         # مسار التحميل الجديد
         new_dl = self.config['download_dir']
@@ -850,7 +841,7 @@ class ForumBotGUI(QMainWindow):
         self.sidebar.add_item("Megathreads", "🗂️")
         self.sidebar.add_item("Template Lab", "🧪")
         self.sidebar.add_item("Settings", "⚙️")
-        
+        self.sidebar.add_item("STATUS", "📊")
         # Connect sidebar signals
         self.sidebar.item_clicked.connect(self.on_sidebar_item_clicked)
         
@@ -871,7 +862,7 @@ class ForumBotGUI(QMainWindow):
         self.init_megathreads_view()  # Initialize the new Megathreads view
         self.init_template_lab_view()
         self.init_settings_view()  # Initialize the new Settings view
-
+        self.init_status_view()
         templab_manager.set_hooks({
             "rewrite_images": None,
             "rewrite_links": getattr(self, "_rewrite_links", None),
@@ -944,7 +935,7 @@ class ForumBotGUI(QMainWindow):
 
         # 3) Dynamic palette based on current theme
         theme = theme_manager.get_current_theme()
-        from PyQt5.QtGui import QPalette, QColor
+        from PyQt5.QtGui import QColor, QPalette
         palette = self.palette()
         palette.setColor(QPalette.Window, QColor(theme.BACKGROUND))
         palette.setColor(QPalette.WindowText, QColor(theme.TEXT_PRIMARY))
@@ -1454,7 +1445,8 @@ class ForumBotGUI(QMainWindow):
             "Process Threads": 2,
             "Megathreads": 3,
             "Template Lab": 4,
-            "Settings": 5
+            "Settings": 5,
+            "STATUS": 6,
         }
         
         if item_text in item_mapping:
@@ -1778,7 +1770,8 @@ class ForumBotGUI(QMainWindow):
 
         # Import dialog from the gui package to ensure the module can be found
         # when running the application from the project root
-        from gui.backup_upload_progress_dialog import BackupUploadProgressDialog
+        from gui.backup_upload_progress_dialog import \
+            BackupUploadProgressDialog
         self.backup_upload_progress_dialog = BackupUploadProgressDialog(parent=self)
         self.backup_upload_progress_dialog.show()
         self.backup_upload_progress_dialog.raise_()
@@ -1827,7 +1820,7 @@ class ForumBotGUI(QMainWindow):
             thread_id=thread_id,
             upload_hosts=hosts,
         )
-
+        self.register_worker(self.current_upload_worker)
         self.current_upload_worker.upload_complete.connect(
             lambda r, urls: self.on_reupload_upload_complete(thread_title, thread_info, r, urls)
         )
@@ -2835,6 +2828,7 @@ class ForumBotGUI(QMainWindow):
         # Assuming your DownloadWorker takes (url, size, dest_path, ...)
         dest = os.path.join(self.download_dir, file_code)
         self.download_worker = DownloadWorker(direct_url, size, dest)
+        self.register_worker(self.download_worker)
         self.download_worker.start()
         QMessageBox.information(self, "Download Started",
                                 f"Downloading to:\n{dest}\n\nSize: {size} bytes")
@@ -3512,7 +3506,7 @@ class ForumBotGUI(QMainWindow):
                 selected_rows=selected_rows,
                 gui=self
             )
-
+            self.register_worker(self.download_worker)
             # 🔗 CRITICAL: Connect worker signals to RESET dialog for fresh progress tracking
             dialog_session_id = getattr(self.download_progress_dialog, 'session_id', 'unknown')
             logging.info(f"🔗 Connecting download worker signals to progress dialog (Session: {dialog_session_id})...")
@@ -3863,7 +3857,7 @@ class ForumBotGUI(QMainWindow):
 
                 )
                 self.upload_workers[row] = upload_worker
-
+                self.register_worker(upload_worker)
                 # ربط أزرار Pause/Continue/Cancel في الديالوج بالـ worker
                 self.upload_progress_dialog.pause_clicked.connect(upload_worker.pause_uploads)
                 self.upload_progress_dialog.continue_clicked.connect(upload_worker.resume_uploads)
@@ -4087,6 +4081,7 @@ class ForumBotGUI(QMainWindow):
                                 title=title, url=url)
             self.job_manager.add_job(job)
             worker = AutoProcessWorker(job, self.bot, self.job_manager, self)
+            self.register_worker(worker)
             self.auto_thread_pool.start(worker)
 
     def start_auto_process(self, thread_ids):
@@ -6497,7 +6492,9 @@ class ForumBotGUI(QMainWindow):
 
     def add_manual_link(self, thread_title, from_section, category):
         """Allow user to manually add a download link for a thread."""
-        from PyQt5.QtWidgets import QInputDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox, QPushButton, QDialog
+        from PyQt5.QtWidgets import (QComboBox, QDialog, QHBoxLayout,
+                                     QInputDialog, QLabel, QLineEdit,
+                                     QPushButton, QVBoxLayout)
         
         # Create custom dialog for adding manual link
         dialog = QDialog(self)
