@@ -111,7 +111,7 @@ QTreeView,  QTreeWidget {{
 }}
 
 /* No default background for items - let the delegate handle it */
-QTableWidget::item {{
+QTableView::item, QTableWidget::item {{
     padding: 4px;
 }}
 
@@ -128,11 +128,11 @@ QHeaderView::section {{
 
 
 /* خلايا عادية */
-QTableWidget::item {{
+QTableView::item, QTableWidget::item {{
     background:{t.SURFACE};
     color:{t.TEXT_PRIMARY};
 }}
-QTableWidget::item:hover {{
+QTableView::item:hover, QTableWidget::item:hover {{
     background:{sb_hover};
 }}
 /* رؤوس الأعمدة */
