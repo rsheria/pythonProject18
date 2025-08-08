@@ -113,6 +113,10 @@ QTreeView,  QTreeWidget {{
 /* No default background for items - let the delegate handle it */
 QTableView::item, QTableWidget::item {{
     padding: 4px;
+    color:{t.TEXT_PRIMARY};
+}}
+QTableView::item:hover, QTableWidget::item:hover {{
+    background:{sb_hover};    
 }}
 
 /* Column headers */
@@ -126,24 +130,6 @@ QHeaderView::section {{
 
 /* Status colors will be handled by StatusColorDelegate */
 
-
-/* خلايا عادية */
-QTableView::item, QTableWidget::item {{
-    background:{t.SURFACE};
-    color:{t.TEXT_PRIMARY};
-}}
-QTableView::item:hover, QTableWidget::item:hover {{
-    background:{sb_hover};
-}}
-/* رؤوس الأعمدة */
-QHeaderView::section {{
-    background:{getattr(t,'TABLE_HEADER', t.SURFACE_ELEVATED)};
-    color:{t.TEXT_PRIMARY};
-    border:1px solid {t.BORDER};
-    padding:4px;
-    font-weight:600;
-}}
-/* خلايا الحالة */
 QTableWidgetItem#status-pending    {{background:{t.SURFACE_VARIANT}; color:{t.TEXT_PRIMARY};}}
 QTableWidgetItem#status-downloaded {{background:{t.WARNING};         color:{t.TEXT_ON_PRIMARY};}}
 QTableWidgetItem#status-uploaded   {{background:{t.INFO};            color:{t.TEXT_ON_PRIMARY};}}
