@@ -16,11 +16,10 @@ import threading
 from pathlib import Path
 from collections import defaultdict
 from typing import Optional
-from urllib.parse import unquote, urljoin
+from urllib.parse import unquote, urljoin, urlparse, quote
 import unicodedata
 import requests
 from datetime import datetime, date, timedelta
-from urllib.parse import urlparse, quote
 from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.common import WebDriverException, TimeoutException, NoSuchElementException
@@ -41,7 +40,26 @@ from urllib.parse import urlencode
 import difflib
 import xml.etree.ElementTree as ET
 import os, logging, requests
-from urllib.parse import urlparse
+
+
+def is_image_url(url):
+    image_exts = ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp')
+    return url.lower().endswith(image_exts)
+
+
+def is_known_image_host(url):
+    hosts = [
+        "directupload",
+        "fastpic",
+        "imgur",
+        "postimg",
+        "abload",
+        "imgbox",
+        "ibb.co",
+        "imgbb",
+    ]
+    netloc = urlparse(url).netloc.lower()
+    return any(h in netloc for h in hosts)
 
 # ---------------------------------------------------------------------------
 # Image URL helpers
@@ -87,20 +105,34 @@ def _get_real_image_url(driver, url: str, wait_sec: int = 8) -> str:
                         img = soup.select_one(selector)
                         if img and img.get("src"):
                             candidates.append(img["src"])
-                biggest, biggest_area = "", 0
-
-                for img in soup.find_all("img"):
-                    src = img.get("src")
-                    if not src:
-                        continue
-                    w = int(img.get("width") or img.get("data-width") or 0)
-                    h = int(img.get("height") or img.get("data-height") or 0)
-                    area = w * h
-                    if area > biggest_area:
-                        biggest_area = area
-                        biggest = src
-                if biggest:
-                    candidates.append(biggest)
+                    if not candidates:
+                        best_src, best_area = "", 0
+                        for img in soup.find_all("img"):
+                            src = img.get("src")
+                            if not src:
+                                continue
+                            w = int(img.get("width") or img.get("data-width") or 0)
+                            h = int(img.get("height") or img.get("data-height") or 0)
+                            area = w * h
+                            if area > best_area:
+                                best_area = area
+                                best_src = src
+                        if best_src:
+                            candidates.append(best_src)
+                elif not candidates:
+                    best_src, best_area = "", 0
+                    for img in soup.find_all("img"):
+                        src = img.get("src")
+                        if not src:
+                            continue
+                        w = int(img.get("width") or img.get("data-width") or 0)
+                        h = int(img.get("height") or img.get("data-height") or 0)
+                        area = w * h
+                        if area > best_area:
+                            best_area = area
+                            best_src = src
+                    if best_src:
+                        candidates.append(best_src)
 
                 for cand in candidates:
                     cand = urljoin(final_url, cand)
@@ -5422,14 +5454,23 @@ class ForumBotSelenium:
                     candidates.append(self._resolve_final_url(src))
 
             for a in soup.find_all("a", href=True):
-                href = a["href"]
-                if href.startswith("//"):
-                    href = "https:" + href
-                elif href.startswith("/"):
-                    href = urljoin(self.forum_url.rstrip("/") + "/", href)
-                if a.find("img") or re.search(r"\.(?:jpe?g|png|gif|webp|bmp)(?:\?|$)", href, re.I) \
-                        or any(h in href.lower() for h in
-                               ("directupload", "fastpic", "imgur", "postimg", "abload", "imgbox", "ibb.co", "imgbb")):
+                href = a["href"].strip()
+
+                img_tag = a.find("img")
+                if img_tag and img_tag.get("src"):
+                    src = img_tag["src"].strip()
+                    if src.startswith("//"):
+                        src = "https:" + src
+                    elif src.startswith("/"):
+                        src = urljoin(self.forum_url.rstrip("/") + "/", src)
+                    candidates.append(self._resolve_final_url(src))
+                    continue
+
+                if is_image_url(href) or is_known_image_host(href):
+                    if href.startswith("//"):
+                        href = "https:" + href
+                    elif href.startswith("/"):
+                        href = urljoin(self.forum_url.rstrip("/") + "/", href)
                     candidates.append(self._resolve_final_url(href))
 
             text = soup.get_text(" ")
@@ -5537,13 +5578,12 @@ class ForumBotSelenium:
                 return ''.join(traverse(c) for c in node.children)
 
             bbcode = traverse(soup)
-            bbcode = fix_all_image_tags(self.driver, bbcode)
             bbcode = self._enforce_single_image_host_in_bbcode(bbcode)
             bbcode = re.sub(r'\n{3,}', '\n\n', bbcode).strip()
 
             if not bbcode:
                 return "[CENTER]Content processing resulted in empty text.[/CENTER]"
-            
+            bbcode = fix_all_image_tags(self.driver, bbcode)
             return bbcode
             
         except Exception as e:
