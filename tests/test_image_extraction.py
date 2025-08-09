@@ -1,7 +1,12 @@
 import sys
 import pathlib
 import pytest
-
+try:
+    from bs4 import BeautifulSoup
+    BS4_AVAILABLE = True
+except ModuleNotFoundError:
+    BeautifulSoup = None
+    BS4_AVAILABLE = False
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 import types
@@ -55,9 +60,12 @@ sys.modules['PyQt5.QtCore'] = pyqt5.QtCore
 
 sys.modules['deathbycaptcha'] = types.ModuleType('deathbycaptcha')
 
-from core.selenium_bot import ForumBotSelenium
+if BS4_AVAILABLE:
+    from core.selenium_bot import ForumBotSelenium
+else:
+    ForumBotSelenium = object
 
-
+@pytest.mark.skipif(not BS4_AVAILABLE, reason="bs4 not installed")
 def test_anchor_image_uses_img_src(monkeypatch):
     bot = ForumBotSelenium.__new__(ForumBotSelenium)
     bot.forum_url = "https://forum.example"
@@ -72,7 +80,30 @@ def test_anchor_image_uses_img_src(monkeypatch):
     )
 
     bbcode = bot.convert_post_html_to_bbcode(html)
+    assert (
+            "[IMG]https://s1.directupload.eu/images/250715/wtl9hlez.jpg[/IMG]" in bbcode
+    )
+    assert "https://www.directupload.eu" not in bbcode
 
+
+@pytest.mark.skipif(not BS4_AVAILABLE, reason="bs4 not installed")
+def test_megathread_anchor_image_uses_img_src(monkeypatch):
+    bot = ForumBotSelenium.__new__(ForumBotSelenium)
+    bot.forum_url = "https://forum.example"
+    bot.driver = None
+
+    html = (
+        '<div id="post_message_1">'
+        '<a href="https://www.directupload.eu" target="_blank">'
+        '<img src="https://s1.directupload.eu/images/250715/wtl9hlez.jpg">'
+        '</a>'
+        '</div>'
+    )
+
+    soup = BeautifulSoup(html, 'html.parser')
+    post_element = soup.find('div')
+
+    bbcode = bot.convert_megathread_post_to_bbcode(html, post_element)
     assert (
         "[IMG]https://s1.directupload.eu/images/250715/wtl9hlez.jpg[/IMG]" in bbcode
     )

@@ -3798,7 +3798,7 @@ class ForumBotSelenium:
         """
         from bs4 import BeautifulSoup, NavigableString
         import re
-        
+        logging.debug("convert_megathread_post_to_bbcode: starting conversion")
         try:
             # Parse the specific post HTML content
             soup = BeautifulSoup(post_html, 'html.parser')
@@ -3856,7 +3856,31 @@ class ForumBotSelenium:
                         bbcode += '[/U]'
                     elif tag_name == 'a':
                         href = node.get('href', '')
-                        if href:
+                        imgs = node.find_all('img')
+                        if imgs:
+                            # If the anchor wraps images, emit the images without the link
+                            text_parts = []
+                            for child in node.children:
+                                if getattr(child, 'name', None) == 'img':
+                                    src = child.get('src', '')
+                                    if src:
+                                        if src.startswith('//'):
+                                            src = 'https:' + src
+                                        bbcode += f'[IMG]{src}[/IMG]'
+                                else:
+                                    text_parts.append(traverse(child))
+                            text_content = ''.join(text_parts).strip()
+                            if text_content:
+                                if href:
+                                    if href.startswith('//'):
+                                        href = 'https:' + href
+                                    elif href.startswith('/'):
+                                        href = 'https://example.com' + href
+                                    bbcode += f'[URL={href}]{text_content}[/URL]'
+                                else:
+                                    bbcode += text_content
+                        elif href:
+
                             # Normalize the link
                             if href.startswith('//'):
                                 href = 'https:' + href
@@ -4124,22 +4148,6 @@ class ForumBotSelenium:
             # Since original scenario uses "Heute", this is a fallback.
             return today
 
-    def preprocess_post_html(self, post_element):
-        """
-        Clean HTML before converting to BBCode:
-        - Replace <a><img></a> with <img src="real_link">
-        """
-        soup = BeautifulSoup(str(post_element), "html.parser")
-
-        # Loop over all <a> tags that contain <img>
-        for a_tag in soup.find_all("a"):
-            img_tag = a_tag.find("img")
-            if img_tag:
-                # Keep only the <img> and remove the <a>
-                a_tag.replace_with(img_tag)
-
-        return str(soup)
-
     def convert_post_html_to_bbcode(self, post_element):
         """
         Converts HTML content to BBCode.
@@ -4151,17 +4159,29 @@ class ForumBotSelenium:
 
         if not post_element:
             return "[CENTER]No content available.[/CENTER]"
-
+        logging.debug("convert_post_html_to_bbcode: starting conversion")
         soup = BeautifulSoup(str(post_element), "html.parser")
 
-        # 1️⃣ أي <img> جوه <a> → استبدلها بـ BBCode صورة
+        # 1️⃣ Handle <a> tags that wrap images so the image src is preserved
         for a_tag in soup.find_all("a"):
-            img_tag = a_tag.find("img")
-            if img_tag and img_tag.get("src"):
-                src = img_tag["src"]
-                if src.startswith("//"):
-                    src = "https:" + src
-                a_tag.replace_with(f"[img]{src}[/img]")
+            imgs = a_tag.find_all("img")
+            if imgs:
+                replacement = ""
+                # Preserve any text within the <a> tag as a normal link
+                text_nodes = [child for child in a_tag.contents if getattr(child, "name", None) != "img"]
+                text_content = "".join(str(t) for t in text_nodes).strip()
+                href = a_tag.get("href", "")
+                if text_content:
+                    if href:
+                        replacement += f"[url={href}]{text_content}[/url]"
+                    else:
+                        replacement += text_content
+                for img_tag in imgs:
+                    src = img_tag.get("src", "")
+                    if src.startswith("//"):
+                        src = "https:" + src
+                    replacement += f"[img]{src}[/img]"
+                a_tag.replace_with(replacement)
 
         # 2️⃣ أي <img> مش جوه <a> → استبدلها بـ BBCode صورة
         for img_tag in soup.find_all("img"):

@@ -6629,6 +6629,7 @@ class ForumBotGUI(QMainWindow):
 
     def html_to_bbcode(self, html_content):
         """Convert HTML content to BBCode."""
+        logging.debug("html_to_bbcode: starting conversion")
         soup = BeautifulSoup(html_content, 'html.parser')
 
         # Remove unnecessary elements
@@ -6670,12 +6671,23 @@ class ForumBotGUI(QMainWindow):
                     traverse(child)
                 bbcode += '[/U]'
             elif node.name == 'a':
-                href = node.get('href', '')
-                if href:
-                    # Normalize the link before adding
-                    normalized_href = self.normalize_link(href)
-                    # Only add the link itself
-                    bbcode += normalized_href + '\n'
+                imgs = node.find_all('img')
+                if imgs:
+                    # If the anchor wraps images, emit images without using the href
+                    for child in node.children:
+                        if getattr(child, 'name', None) == 'img':
+                            src = child.get('src', '')
+                            if src:
+                                bbcode += f'[IMG]{src}[/IMG]'
+                        else:
+                            traverse(child)
+                else:
+                    href = node.get('href', '')
+                    if href:
+                        # Normalize the link before adding
+                        normalized_href = self.normalize_link(href)
+                        # Only add the link itself
+                        bbcode += normalized_href + '\n'
             elif node.name == 'img':
                 src = node.get('src', '')
                 bbcode += f'[IMG]{src}[/IMG]'
