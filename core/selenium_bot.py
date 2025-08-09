@@ -40,26 +40,55 @@ from urllib.parse import urlencode
 import difflib
 import xml.etree.ElementTree as ET
 import os, logging, requests
+from urllib.parse import urlparse, urljoin
+
+def normalize_url(base, u: str) -> str:
+    u = (u or "").strip()
+    if not u:
+        return ""
+    if u.startswith("//"):
+        return "https:" + u
+    if u.startswith("/"):
+        return urljoin(base.rstrip("/") + "/", u)
+    return u
 
 
-def is_image_url(url):
-    image_exts = ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp')
-    return url.lower().endswith(image_exts)
+def is_image_url(u: str) -> bool:
+    return u.lower().split("?", 1)[0].endswith(
+        (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
+    )
 
 
-def is_known_image_host(url):
-    hosts = [
-        "directupload",
-        "fastpic",
-        "imgur",
-        "postimg",
-        "abload",
-        "imgbox",
-        "ibb.co",
-        "imgbb",
-    ]
-    netloc = urlparse(url).netloc.lower()
-    return any(h in netloc for h in hosts)
+def is_known_image_host(u: str) -> bool:
+    host = urlparse(u).netloc.lower()
+    return any(
+        x in host
+        for x in [
+            "directupload",
+            "fastpic",
+            "imgur",
+            "postimg",
+            "abload",
+            "imgbox",
+            "ibb.co",
+            "imgbb",
+        ]
+    )
+
+
+def is_bare_domain(u: str) -> bool:
+    p = urlparse(u)
+    return (p.path in ("", "/")) and not p.query and not p.fragment
+
+
+def root_domain(netloc: str) -> str:
+    netloc = netloc.split(":")[0]
+    parts = netloc.split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else netloc
+
+
+def is_forum_domain(forum_url: str, netloc: str) -> bool:
+    return root_domain(urlparse(forum_url).netloc) == root_domain(netloc)
 
 # ---------------------------------------------------------------------------
 # Image URL helpers
@@ -68,114 +97,88 @@ def is_known_image_host(url):
 IMG_TAG_RE = re.compile(r'\[IMG\](https?://[^\]]+)\[/IMG\]', re.I)
 
 def _get_real_image_url(driver, url: str, wait_sec: int = 8) -> str:
-    """Return a direct image URL for a given hosting link."""
+
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0 Safari/537.36"
-        ),
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
         "Referer": url,
     }
 
     try:
-        with requests.Session() as session:
-            resp = session.get(url, headers=headers, allow_redirects=True, timeout=10)
-            if resp.ok:
-                final_url = resp.url
-                ctype = resp.headers.get("Content-Type", "")
-                if ctype.startswith("image/"):
-                    return final_url
-
-                soup = BeautifulSoup(resp.text, "html.parser")
-                candidates = []
-
-                tag = soup.find("meta", attrs={"property": "og:image"}) or soup.find(
-                    "meta", attrs={"name": "og:image"}
-                )
-                if tag and tag.get("content"):
-                    candidates.append(tag["content"])
-
-                link_tag = soup.find("link", rel="image_src")
-                if link_tag and link_tag.get("href"):
-                    candidates.append(link_tag["href"])
-
-                if "directupload" in final_url:
-                    for selector in ["#thepic img", ".image img", "img.image-container__image"]:
-                        img = soup.select_one(selector)
-                        if img and img.get("src"):
-                            candidates.append(img["src"])
-                    if not candidates:
-                        best_src, best_area = "", 0
-                        for img in soup.find_all("img"):
-                            src = img.get("src")
-                            if not src:
-                                continue
-                            w = int(img.get("width") or img.get("data-width") or 0)
-                            h = int(img.get("height") or img.get("data-height") or 0)
-                            area = w * h
-                            if area > best_area:
-                                best_area = area
-                                best_src = src
-                        if best_src:
-                            candidates.append(best_src)
-                elif not candidates:
-                    best_src, best_area = "", 0
-                    for img in soup.find_all("img"):
-                        src = img.get("src")
-                        if not src:
-                            continue
-                        w = int(img.get("width") or img.get("data-width") or 0)
-                        h = int(img.get("height") or img.get("data-height") or 0)
-                        area = w * h
-                        if area > best_area:
-                            best_area = area
-                            best_src = src
-                    if best_src:
-                        candidates.append(best_src)
-
-                for cand in candidates:
-                    cand = urljoin(final_url, cand)
-                    try:
-                        head = session.head(cand, allow_redirects=True, timeout=10)
-                        if head.headers.get("Content-Type", "").startswith("image/"):
-                            return head.url
-                        get_resp = session.get(cand, allow_redirects=True, timeout=10, stream=True)
-                        if get_resp.headers.get("Content-Type", "").startswith("image/"):
-                            return get_resp.url
-                    except Exception:
-                        continue
-    except Exception as e:
-        logging.debug(f"HTTP image resolution failed for {url}: {e}")
+        import requests
+        from bs4 import BeautifulSoup
+        import re
+        with requests.Session() as s:
+            r = s.get(url, headers=headers, allow_redirects=True, timeout=10)
+            if not r.ok:
+                return url
+            final_url = r.url
+            ctype = (r.headers.get("Content-Type") or "").lower()
+            if ctype.startswith("image/"):
+                return final_url
+            soup = BeautifulSoup(r.text, "html.parser")
+            cand = []
+            tag = soup.find("meta", attrs={"property": "og:image"}) or soup.find(
+                "meta", attrs={"name": "og:image"}
+            )
+            if tag and tag.get("content"):
+                cand.append(tag["content"])
+            link_tag = soup.find("link", rel=lambda v: v and "image_src" in v)
+            if link_tag and link_tag.get("href"):
+                cand.append(link_tag["href"])
+            if "directupload" in final_url.lower():
+                path = urlparse(final_url).path.lower()
+                is_image_page = bool(re.search(r"/(file|show|images)/", path))
+                if is_image_page:
+                    for sel in ["#thepic img", ".image img", "img.image-container__image", "main img"]:
+                        im = soup.select_one(sel)
+                        if im and im.get("src"):
+                            cand.append(im["src"])
+                else:
+                    cand = []
+            for c in cand:
+                c = normalize_url(final_url, c)
+                try:
+                    h = s.head(c, allow_redirects=True, timeout=10)
+                    if (h.headers.get("Content-Type") or "").lower().startswith("image/"):
+                        return h.url
+                    g = s.get(c, allow_redirects=True, timeout=10, stream=True)
+                    if (g.headers.get("Content-Type") or "").lower().startswith("image/"):
+                        return g.url
+                except Exception:
+                    continue
+    except Exception:
+        pass
 
     try:
-        current_url = driver.current_url
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        import re
         driver.get(url)
         WebDriverWait(driver, wait_sec).until(EC.presence_of_element_located((By.TAG_NAME, "img")))
+        p = urlparse(driver.current_url).path.lower()
+        if "directupload" in url.lower() and not re.search(r"/(file|show|images)/", p):
+            return url
         best_src, best_area = "", 0
 
-        for img in driver.find_elements(By.TAG_NAME, "img"):
-            src = img.get_attribute("src") or ""
+        for im in driver.find_elements(By.TAG_NAME, "img"):
+            src = im.get_attribute("src") or ""
             if not src:
                 continue
             try:
-                w = int(img.get_attribute("naturalWidth") or img.get_attribute("width") or 0)
-                h = int(img.get_attribute("naturalHeight") or img.get_attribute("height") or 0)
-                area = w * h
-                if area > best_area:
-                    best_area = area
+                w = int(im.get_attribute("naturalWidth") or im.get_attribute("width") or 0)
+                h = int(im.get_attribute("naturalHeight") or im.get_attribute("height") or 0)
+                if w * h > best_area:
+                    best_area = w * h
                     best_src = src
             except Exception:
                 continue
 
-
-        if current_url and current_url != url:
-            driver.get(current_url)
-
         return best_src or url
 
-    except Exception as e:
-        logging.warning(f"Could not extract real image URL from {url}: {e}")
+    except Exception:
+
         return url
 
 
@@ -4008,7 +4011,6 @@ class ForumBotSelenium:
                             if src:
                                 if src.startswith('//'):
                                     src = 'https:' + src
-                                    src = self._resolve_final_url(src)
                                 bbcode += f'[IMG]{src}[/IMG]'
                         else:
                             href = node.get('href', '')
@@ -5396,94 +5398,6 @@ class ForumBotSelenium:
             logging.debug(f"Could not parse German datetime '{date_text}': {e}")
             return None
 
-    def _root_domain(self, netloc: str) -> str:
-        try:
-            netloc = netloc.split(":")[0]
-            parts = netloc.split(".")
-            return ".".join(parts[-2:]) if len(parts) >= 2 else netloc
-        except Exception:
-            return netloc
-
-        def _is_forum_domain(self, netloc: str) -> bool:
-            from urllib.parse import urlparse
-        try:
-            forum_netloc = urlparse(self.forum_url).netloc
-            return self._root_domain(netloc) == self._root_domain(forum_netloc)
-        except Exception:
-            return False
-
-        def _filter_images_same_host(self, urls: list[str]) -> list[str]:
-            """Keep all images from the first non-forum root domain; else keep only the first image."""
-            from urllib.parse import urlparse
-            seen, cleaned = set(), []
-            blacklist = ("smilies", "avatar", "sprite", "icon", "pixel", "spacer", "logo")
-            for u in urls:
-                if not u:
-                    continue
-                lu = u.lower()
-                if any(b in lu for b in blacklist):
-                    continue
-                if u not in seen:
-                    seen.add(u)
-                    cleaned.append(u)
-            if not cleaned:
-                return []
-            primary = None
-            for u in cleaned:
-                rd = self._root_domain(urlparse(u).netloc)
-                if not self._is_forum_domain(urlparse(u).netloc):
-                    primary = rd
-                    break
-            if not primary:
-                return [cleaned[0]]
-            return [u for u in cleaned if self._root_domain(urlparse(u).netloc) == primary] or [cleaned[0]]
-
-        def _extract_image_candidates(self, soup) -> list[str]:
-            """Collect candidates from <img>, <a>, and inline [IMG] tags; return resolved direct URLs."""
-            import re
-            from urllib.parse import urljoin
-            candidates = []
-
-            for img in soup.find_all("img"):
-                src = self._get_direct_image_url(img) or img.get("src") or ""
-                if src:
-                    if src.startswith("//"):
-                        src = "https:" + src
-                    elif src.startswith("/"):
-                        src = urljoin(self.forum_url.rstrip("/") + "/", src)
-                    candidates.append(self._resolve_final_url(src))
-
-            for a in soup.find_all("a", href=True):
-                href = a["href"].strip()
-
-                img_tag = a.find("img")
-                if img_tag and img_tag.get("src"):
-                    src = img_tag["src"].strip()
-                    if src.startswith("//"):
-                        src = "https:" + src
-                    elif src.startswith("/"):
-                        src = urljoin(self.forum_url.rstrip("/") + "/", src)
-                    candidates.append(self._resolve_final_url(src))
-                    continue
-
-                if is_image_url(href) or is_known_image_host(href):
-                    if href.startswith("//"):
-                        href = "https:" + href
-                    elif href.startswith("/"):
-                        href = urljoin(self.forum_url.rstrip("/") + "/", href)
-                    candidates.append(self._resolve_final_url(href))
-
-            text = soup.get_text(" ")
-            for m in re.findall(r"\[IMG\](https?://[^\]]+)\[/IMG\]", text, re.I):
-                candidates.append(self._resolve_final_url(m))
-
-            seen, uniq = set(), []
-            for u in candidates:
-                if u and u not in seen:
-                    seen.add(u)
-                    uniq.append(u)
-            return uniq
-
         def _enforce_single_image_host_in_bbcode(self, bbcode: str) -> str:
             import re
             urls = re.findall(r"\[IMG\](https?://[^\]]+)\[/IMG\]", bbcode, flags=re.I)
@@ -5493,21 +5407,14 @@ class ForumBotSelenium:
             if not keep:
                 return bbcode
 
-            def repl(m):
-                url = m.group(1)
-                return f"[IMG]{url}[/IMG]" if url in keep else ""
+        def repl(m):
+            url = m.group(1)
+            return f"[IMG]{url}[/IMG]" if url in keep else ""
 
-            bbcode = re.sub(r"\[IMG\](https?://[^\]]+)\[/IMG\]", repl, bbcode, flags=re.I)
-            bbcode = re.sub(r"\n{3,}", "\n\n", bbcode)
-            return bbcode
+        bbcode = re.sub(r"\[IMG\](https?://[^\]]+)\[/IMG\]", repl, bbcode, flags=re.I)
+        bbcode = re.sub(r"\n{3,}", "\n\n", bbcode)
+        return bbcode
 
-        def _resolve_final_url(self, url: str) -> str:
-            """Return a direct image URL using _get_real_image_url helper."""
-
-        try:
-            return _get_real_image_url(self.driver, url) or url
-        except Exception:
-            return url
     def _get_direct_image_url(self, img_tag):
         """Extract image URL from common attributes without resolving."""
         try:
@@ -5539,51 +5446,46 @@ class ForumBotSelenium:
             if not post:
                 return "[CENTER]No content available.[/CENTER]"
             
-            soup = BeautifulSoup(str(post), 'html.parser')
-            candidates = self._extract_image_candidates(soup)
-            selected = set(self._filter_images_same_host(candidates))
+            soup = BeautifulSoup(str(post), "html.parser")
+            candidates = set(self._extract_image_candidates(soup))
 
             def traverse(node):
                 if isinstance(node, NavigableString):
                     return str(node)
-                if not hasattr(node, 'name'):
+                if not hasattr(node, "name"):
                     return ""
                 tag = node.name.lower()
-                if tag in ('b', 'strong'):
-                    return '[B]' + ''.join(traverse(c) for c in node.children) + '[/B]'
-                if tag in ('i', 'em'):
-                    return '[I]' + ''.join(traverse(c) for c in node.children) + '[/I]'
-                if tag == 'u':
-                    return '[U]' + ''.join(traverse(c) for c in node.children) + '[/U]'
-                if tag == 'br':
-                    return '\n'
-                if tag == 'img':
-                    src = self._get_direct_image_url(node)
-                    src = self._resolve_final_url(src) if src else ''
-                    return f'[IMG]{src}[/IMG]' if src in selected else ''
-                if tag == 'a':
-                    href = node.get('href') or ''
-                    img_child = node.find('img')
-                    if img_child:
-                        src = self._get_direct_image_url(img_child) or href
-                        src = self._resolve_final_url(src)
-                        return f'[IMG]{src}[/IMG]' if src in selected else ''
-                    final = self._resolve_final_url(href) if href else ''
-                    text = ''.join(traverse(c) for c in node.children)
-                    if final in selected:
-                        return f'[IMG]{final}[/IMG]'
+                if tag in ("b", "strong"):
+                    return "[B]" + "".join(traverse(c) for c in node.children) + "[/B]"
+                if tag in ("i", "em"):
+                    return "[I]" + "".join(traverse(c) for c in node.children) + "[/I]"
+                if tag == "u":
+                    return "[U]" + "".join(traverse(c) for c in node.children) + "[/U]"
+                if tag == "br":
+                    return "\n"
+                if tag == "img":
+                    src = normalize_url(self.forum_url, node.get("src") or "")
+                    return f"[IMG]{src}[/IMG]" if src else ""
+                if tag == "a":
+                    img = node.find("img")
+                    if img and img.get("src"):
+                        src = normalize_url(self.forum_url, img.get("src"))
+                        return f"[IMG]{src}[/IMG]" if src else ""
+                    href = normalize_url(self.forum_url, node.get("href") or "")
+                    if href in candidates:
+                        return f"[IMG]{href}[/IMG]"
+                    text = "".join(traverse(c) for c in node.children)
                     if href:
-                        return f'[URL={href}]{text}[/URL]' if text.strip() else f'[URL]{href}[/URL]'
-                    return text
-                return ''.join(traverse(c) for c in node.children)
+                        return f"[URL={href}]{text}[/URL]" if text.strip() else f"[URL]{href}[/URL]"
+                        return text
+                        return "".join(traverse(c) for c in node.children)
 
             bbcode = traverse(soup)
             bbcode = self._enforce_single_image_host_in_bbcode(bbcode)
-            bbcode = re.sub(r'\n{3,}', '\n\n', bbcode).strip()
+            bbcode = re.sub(r"\n{3,}", "\n\n", bbcode).strip()
 
             if not bbcode:
                 return "[CENTER]Content processing resulted in empty text.[/CENTER]"
-            bbcode = fix_all_image_tags(self.driver, bbcode)
             return bbcode
             
         except Exception as e:
