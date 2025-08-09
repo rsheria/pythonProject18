@@ -30,11 +30,19 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
-from bs4 import BeautifulSoup
+# Optional dependency: BeautifulSoup is used for HTML parsing when available.
+try:
+    from bs4 import BeautifulSoup  # type: ignore
+except Exception:  # pragma: no cover - bs4 may not be installed in tests
+    BeautifulSoup = None  # type: ignore
 from PyQt5.QtCore import QThread, pyqtSignal, QTimer
 from utils import sanitize_filename
 import deathbycaptcha
-from uploaders.rapidgator_upload_handler import RapidgatorUploadHandler
+# Optional: rapidgator uploading is not needed for tests; avoid hard dependency.
+try:
+    from uploaders.rapidgator_upload_handler import RapidgatorUploadHandler  # type: ignore
+except Exception:  # pragma: no cover
+    RapidgatorUploadHandler = None  # type: ignore
 import xml.etree.ElementTree as ET
 from urllib.parse import urlencode
 import difflib
@@ -130,7 +138,16 @@ def _get_real_image_url(driver, url: str, wait_sec: int = 8) -> str:
                 path = urlparse(final_url).path.lower()
                 is_image_page = bool(re.search(r"/(file|show|images)/", path))
                 if is_image_page:
-                    for sel in ["#thepic img", ".image img", "img.image-container__image", "main img"]:
+                    # directupload sometimes uses <img id="zoom"> for the actual image
+                    im = soup.find("img", id="zoom")
+                    if im and im.get("src"):
+                        cand.append(im["src"])
+                    for sel in [
+                        "#thepic img",
+                        ".image img",
+                        "img.image-container__image",
+                        "main img",
+                    ]:
                         im = soup.select_one(sel)
                         if im and im.get("src"):
                             cand.append(im["src"])
@@ -5437,15 +5454,93 @@ class ForumBotSelenium:
             logging.debug(f"Could not extract image URL: {e}")
         return ""
 
+    def _extract_image_candidates(self, soup):
+        """Collect potential image URLs from img tags and direct image links."""
+        urls = []
+        for img in soup.find_all("img"):
+            src = normalize_url(self.forum_url, img.get("src") or "")
+            if src:
+                urls.append(src)
+        for a in soup.find_all("a"):
+            href = normalize_url(self.forum_url, a.get("href") or "")
+            if href and is_image_url(href):
+                urls.append(href)
+        return urls
+
+    def _filter_images_same_host(self, urls):
+        if not urls:
+            return []
+        host = urlparse(urls[0]).netloc
+        return [u for u in urls if urlparse(u).netloc == host]
+
+    def _enforce_single_image_host_in_bbcode(self, bbcode: str) -> str:
+        import re
+        urls = re.findall(r"\[IMG\](https?://[^\]]+)\[/IMG\]", bbcode, flags=re.I)
+        if not urls:
+            return bbcode
+        keep = set(self._filter_images_same_host(urls))
+        if not keep:
+            return bbcode
+
+        def repl(m):
+            url = m.group(1)
+            return f"[IMG]{url}[/IMG]" if url in keep else ""
+
+        bbcode = re.sub(r"\[IMG\](https?://[^\]]+)\[/IMG\]", repl, bbcode, flags=re.I)
+        bbcode = re.sub(r"\n{3,}", "\n\n", bbcode)
+        return bbcode
     def convert_post_html_to_bbcode(self, post):
         """Convert post HTML content to BBCode with direct image links."""
         import html
-        from bs4 import BeautifulSoup, NavigableString
         import re
+        try:
+            from bs4 import BeautifulSoup, NavigableString
+        except Exception:
+            BeautifulSoup = None
+            NavigableString = str
         try:
             if not post:
                 return "[CENTER]No content available.[/CENTER]"
-            
+
+            if BeautifulSoup is None:
+                text = str(post)
+                text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+
+                def _ai(m):
+                    src = normalize_url(self.forum_url, m.group(2))
+                    return f"[IMG]{src}[/IMG]"
+
+                text = re.sub(
+                    r"<a[^>]*href=\"([^\"]*)\"[^>]*>\s*<img[^>]+src=\"([^\"]+)\"[^>]*>\s*</a>",
+                    _ai,
+                    text,
+                    flags=re.I,
+                )
+
+                def _img(m):
+                    src = normalize_url(self.forum_url, m.group(1))
+                    return f"[IMG]{src}[/IMG]"
+
+                text = re.sub(r"<img[^>]+src=\"([^\"]+)\"[^>]*>", _img, text, flags=re.I)
+                text = re.sub(r"<(b|strong)>(.*?)</\1>", r"[B]\2[/B]", text, flags=re.I | re.S)
+                text = re.sub(r"<(i|em)>(.*?)</\1>", r"[I]\2[/I]", text, flags=re.I | re.S)
+                text = re.sub(r"<u>(.*?)</u>", r"[U]\1[/U]", text, flags=re.I | re.S)
+
+                def _link(m):
+                    href = normalize_url(self.forum_url, m.group(1))
+                    inner = m.group(2)
+                    return f"[URL={href}]{inner}[/URL]" if inner.strip() else f"[URL]{href}[/URL]"
+
+                text = re.sub(r"<a[^>]+href=\"([^\"]+)\"[^>]*>(.*?)</a>", _link, text, flags=re.I | re.S)
+                text = re.sub(r"<[^>]+>", "", text)
+                bbcode = html.unescape(text)
+                bbcode = fix_all_image_tags(self.driver, bbcode)
+                bbcode = self._enforce_single_image_host_in_bbcode(bbcode)
+                bbcode = re.sub(r"\n{3,}", "\n\n", bbcode).strip()
+                if not bbcode:
+                    return "[CENTER]Content processing resulted in empty text.[/CENTER]"
+                return bbcode
+
             soup = BeautifulSoup(str(post), "html.parser")
             candidates = set(self._extract_image_candidates(soup))
 
@@ -5477,10 +5572,10 @@ class ForumBotSelenium:
                     text = "".join(traverse(c) for c in node.children)
                     if href:
                         return f"[URL={href}]{text}[/URL]" if text.strip() else f"[URL]{href}[/URL]"
-                        return text
-                        return "".join(traverse(c) for c in node.children)
+                    return text
 
             bbcode = traverse(soup)
+            bbcode = fix_all_image_tags(self.driver, bbcode)
             bbcode = self._enforce_single_image_host_in_bbcode(bbcode)
             bbcode = re.sub(r"\n{3,}", "\n\n", bbcode).strip()
 

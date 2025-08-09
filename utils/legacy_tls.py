@@ -1,5 +1,9 @@
 import ssl
-from requests.adapters import HTTPAdapter
+try:
+    from requests.adapters import HTTPAdapter  # type: ignore
+except Exception:  # pragma: no cover - requests may be stubbed in tests
+    class HTTPAdapter:  # type: ignore
+        pass
 
 class DDownloadAdapter(HTTPAdapter):
     """Adapter يخلّى Requests يكلّم ddownload بنجاح."""

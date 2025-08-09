@@ -24,10 +24,17 @@ from utils.legacy_tls import DDownloadAdapter
 SITE_ALIASES = {
     "dddownload": "ddownload",
 }
-import requests
-from requests.exceptions import SSLError, ConnectionError
-import re
-from bs4 import BeautifulSoup
+import types, re
+try:
+    import requests
+    from requests.exceptions import SSLError, ConnectionError
+except Exception:  # pragma: no cover - requests may be stubbed
+    requests = types.SimpleNamespace(Session=object, Response=object)
+    SSLError = ConnectionError = Exception
+try:
+    from bs4 import BeautifulSoup  # type: ignore
+except Exception:  # pragma: no cover
+    BeautifulSoup = None  # type: ignore
 from urllib.parse import urljoin
 def _safe_get(session: requests.Session, url: str, **kw) -> requests.Response:
     """GET with fallback to disable TLS verification, then downgrade to HTTP."""
