@@ -4210,7 +4210,7 @@ class ForumBotSelenium:
             return post_id_match.group(1)
         return None
 
-        # ملف: selenium_bot.py
+        # ملف: selenfdt.py
 
     def navigate_to_megathread_category(self, category_url, date_filter, page_from=1, page_to=1):
         """
