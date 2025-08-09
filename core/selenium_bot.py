@@ -49,20 +49,85 @@ from urllib.parse import urlparse
 
 IMG_TAG_RE = re.compile(r'\[IMG\](https?://[^\]]+)\[/IMG\]', re.I)
 
-
 def _get_real_image_url(driver, url: str, wait_sec: int = 8) -> str:
-    """
-    Navigate to an image hosting page and return the direct image link.
-    Includes special handling for directupload.eu while keeping a
-    generic fallback for other hosts.
+    """Return a direct image URL for a given hosting link.
+
+    The function first attempts to resolve the link via lightweight HTTP
+    requests to avoid unnecessary browser work and to cope with hosts that
+    redirect unknown clients to their homepage (e.g. directupload.eu). If
+    a direct link cannot be extracted through HTTP, Selenium is used as a
+    fallback to parse the rendered page. If everything fails, the original
+    ``url`` is returned.
     """
     try:
+        # ------------------------------------------------------------------
+        # 1) Try resolving via plain HTTP request
+        # ------------------------------------------------------------------
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0 Safari/537.36"
+            ),
+            "Referer": url,
+        }
+
+        try:
+            resp = requests.get(url, headers=headers, allow_redirects=True, timeout=10)
+            if resp.ok:
+                final_url = resp.url
+                content_type = resp.headers.get("Content-Type", "")
+
+                # If server already redirected to the raw image, we're done
+                if content_type.startswith("image/") or re.search(
+                    r"\.(?:jpg|jpeg|png|gif|webp|bmp)(?:\?|$)", final_url, re.I
+                ):
+                    return final_url
+
+                # Otherwise, inspect the HTML for an <img> tag
+                soup = BeautifulSoup(resp.text, "html.parser")
+
+                # --- directupload.eu specific
+                if "directupload" in final_url:
+                    img = soup.select_one("img.image-container__image")
+                    if img and img.get("src"):
+                        return img["src"]
+
+                # --- generic fallback selectors on raw HTML
+                selectors_to_try = [
+                    "img#img",
+                    "img.picture",
+                    "img[src*='thumbs']",
+                    "img[src*='images']",
+                    "img:not([alt*='logo']):not([alt*='banner'])",
+                ]
+
+                for selector in selectors_to_try:
+                    img = soup.select_one(selector)
+                    if img and img.get("src") and img["src"] != url:
+                        return img["src"]
+
+                for img in soup.find_all("img"):
+                    src = img.get("src")
+                    if src and src != url and re.search(
+                        r"\.(jpg|jpeg|png|gif|webp|bmp)(?:\?|$)", src, re.I
+                    ):
+                        return src
+        except Exception as e:
+            logging.debug(f"HTTP image resolution failed for {url}: {e}")
+
+        # ------------------------------------------------------------------
+        # 2) Selenium fallback
+        # ------------------------------------------------------------------
         current_url = driver.current_url
         driver.get(url)
+
         if "directupload.eu" in driver.current_url:
             try:
                 image_element = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "img.image-container__image"))
+                    EC.presence_of_element_located(
+                        (By.CSS_SELECTOR, "img.image-container__image")
+                    )
                 )
                 real_image_url = image_element.get_attribute("src")
                 if current_url and current_url != url:
@@ -72,6 +137,7 @@ def _get_real_image_url(driver, url: str, wait_sec: int = 8) -> str:
                 logging.warning(
                     f"Could not find image on directupload.eu for {url}: {e}"
                 )
+
         WebDriverWait(driver, wait_sec).until(
             EC.presence_of_element_located((By.TAG_NAME, "img"))
         )
@@ -83,6 +149,13 @@ def _get_real_image_url(driver, url: str, wait_sec: int = 8) -> str:
             "img[src*='images']",
             "img:not([alt*='logo']):not([alt*='banner'])",
         ]
+        for img in driver.find_elements(By.TAG_NAME, "img"):
+            src = img.get_attribute("src")
+            if src and src != url and any(
+                src.lower().endswith(x) for x in (".jpg", ".jpeg", ".png", ".gif")
+            ):
+                return src
+
         real_image_url = None
 
         for selector in selectors_to_try:
