@@ -50,150 +50,100 @@ from urllib.parse import urlparse
 IMG_TAG_RE = re.compile(r'\[IMG\](https?://[^\]]+)\[/IMG\]', re.I)
 
 def _get_real_image_url(driver, url: str, wait_sec: int = 8) -> str:
-    """Return a direct image URL for a given hosting link.
+    """Return a direct image URL for a given hosting link."""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0 Safari/537.36"
+        ),
+        "Referer": url,
+    }
 
-    The function first attempts to resolve the link via lightweight HTTP
-    requests to avoid unnecessary browser work and to cope with hosts that
-    redirect unknown clients to their homepage (e.g. directupload.eu). If
-    a direct link cannot be extracted through HTTP, Selenium is used as a
-    fallback to parse the rendered page. If everything fails, the original
-    ``url`` is returned.
-    """
     try:
-        # ------------------------------------------------------------------
-        # 1) Try resolving via plain HTTP request
-        # ------------------------------------------------------------------
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0 Safari/537.36"
-            ),
-            "Referer": url,
-        }
-
-        try:
-            resp = requests.get(url, headers=headers, allow_redirects=True, timeout=10)
+        with requests.Session() as session:
+            resp = session.get(url, headers=headers, allow_redirects=True, timeout=10)
             if resp.ok:
                 final_url = resp.url
-                content_type = resp.headers.get("Content-Type", "")
-
-                # If server already redirected to the raw image, we're done
-                if content_type.startswith("image/") or re.search(
-                    r"\.(?:jpg|jpeg|png|gif|webp|bmp)(?:\?|$)", final_url, re.I
-                ):
+                ctype = resp.headers.get("Content-Type", "")
+                if ctype.startswith("image/"):
                     return final_url
 
-                # Otherwise, inspect the HTML for an <img> tag
                 soup = BeautifulSoup(resp.text, "html.parser")
+                candidates = []
 
-                # --- directupload.eu specific
+                tag = soup.find("meta", attrs={"property": "og:image"}) or soup.find(
+                    "meta", attrs={"name": "og:image"}
+                )
+                if tag and tag.get("content"):
+                    candidates.append(tag["content"])
+
+                link_tag = soup.find("link", rel="image_src")
+                if link_tag and link_tag.get("href"):
+                    candidates.append(link_tag["href"])
+
                 if "directupload" in final_url:
-                    img = soup.select_one("img.image-container__image")
-                    if img and img.get("src"):
-                        return img["src"]
-
-                # --- generic fallback selectors on raw HTML
-                selectors_to_try = [
-                    "img#img",
-                    "img.picture",
-                    "img[src*='thumbs']",
-                    "img[src*='images']",
-                    "img:not([alt*='logo']):not([alt*='banner'])",
-                ]
-
-                for selector in selectors_to_try:
-                    img = soup.select_one(selector)
-                    if img and img.get("src") and img["src"] != url:
-                        return img["src"]
+                    for selector in ["#thepic img", ".image img", "img.image-container__image"]:
+                        img = soup.select_one(selector)
+                        if img and img.get("src"):
+                            candidates.append(img["src"])
+                biggest, biggest_area = "", 0
 
                 for img in soup.find_all("img"):
                     src = img.get("src")
-                    if src and src != url and re.search(
-                        r"\.(jpg|jpeg|png|gif|webp|bmp)(?:\?|$)", src, re.I
-                    ):
-                        return src
-        except Exception as e:
-            logging.debug(f"HTTP image resolution failed for {url}: {e}")
+                    if not src:
+                        continue
+                    w = int(img.get("width") or img.get("data-width") or 0)
+                    h = int(img.get("height") or img.get("data-height") or 0)
+                    area = w * h
+                    if area > biggest_area:
+                        biggest_area = area
+                        biggest = src
+                if biggest:
+                    candidates.append(biggest)
 
-        # ------------------------------------------------------------------
-        # 2) Selenium fallback
-        # ------------------------------------------------------------------
+                for cand in candidates:
+                    cand = urljoin(final_url, cand)
+                    try:
+                        head = session.head(cand, allow_redirects=True, timeout=10)
+                        if head.headers.get("Content-Type", "").startswith("image/"):
+                            return head.url
+                        get_resp = session.get(cand, allow_redirects=True, timeout=10, stream=True)
+                        if get_resp.headers.get("Content-Type", "").startswith("image/"):
+                            return get_resp.url
+                    except Exception:
+                        continue
+    except Exception as e:
+        logging.debug(f"HTTP image resolution failed for {url}: {e}")
+
+    try:
         current_url = driver.current_url
         driver.get(url)
+        WebDriverWait(driver, wait_sec).until(EC.presence_of_element_located((By.TAG_NAME, "img")))
+        best_src, best_area = "", 0
 
-        if "directupload.eu" in driver.current_url:
-            try:
-                image_element = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located(
-                        (By.CSS_SELECTOR, "img.image-container__image")
-                    )
-                )
-                real_image_url = image_element.get_attribute("src")
-                if current_url and current_url != url:
-                    driver.get(current_url)
-                return real_image_url if real_image_url else url
-            except Exception as e:
-                logging.warning(
-                    f"Could not find image on directupload.eu for {url}: {e}"
-                )
-
-        WebDriverWait(driver, wait_sec).until(
-            EC.presence_of_element_located((By.TAG_NAME, "img"))
-        )
-
-        selectors_to_try = [
-            "img#img",
-            "img.picture",
-            "img[src*='thumbs']",
-            "img[src*='images']",
-            "img:not([alt*='logo']):not([alt*='banner'])",
-        ]
         for img in driver.find_elements(By.TAG_NAME, "img"):
-            src = img.get_attribute("src")
-            if src and src != url and any(
-                src.lower().endswith(x) for x in (".jpg", ".jpeg", ".png", ".gif")
-            ):
-                return src
-
-        real_image_url = None
-
-        for selector in selectors_to_try:
+            src = img.get_attribute("src") or ""
+            if not src:
+                continue
             try:
-                img_elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                if img_elements:
-                    real_image_url = img_elements[0].get_attribute("src")
-                    if real_image_url and real_image_url != url:
-                        break
+                w = int(img.get_attribute("naturalWidth") or img.get_attribute("width") or 0)
+                h = int(img.get_attribute("naturalHeight") or img.get_attribute("height") or 0)
+                area = w * h
+                if area > best_area:
+                    best_area = area
+                    best_src = src
             except Exception:
                 continue
 
-        if not real_image_url:
-            all_images = driver.find_elements(By.TAG_NAME, "img")
-            for img in all_images:
-                src = img.get_attribute("src")
-                if src and src != url and any(
-                    ext in src.lower() for ext in [
-                        ".jpg",
-                        ".jpeg",
-                        ".png",
-                        ".gif",
-                        ".webp",
-                        ".bmp",
-                    ]
-                ):
-                    real_image_url = src
-                    break
 
         if current_url and current_url != url:
             driver.get(current_url)
 
-        return real_image_url if real_image_url else url
+        return best_src or url
 
     except Exception as e:
-        logging.warning(
-            f"Could not extract real image URL from {url}: {e}"
-        )
+        logging.warning(f"Could not extract real image URL from {url}: {e}")
         return url
 
 
@@ -4026,6 +3976,7 @@ class ForumBotSelenium:
                             if src:
                                 if src.startswith('//'):
                                     src = 'https:' + src
+                                    src = self._resolve_final_url(src)
                                 bbcode += f'[IMG]{src}[/IMG]'
                         else:
                             href = node.get('href', '')
@@ -4114,6 +4065,9 @@ class ForumBotSelenium:
             
             for text, replacement in replacements.items():
                 bbcode_result = bbcode_result.replace(text, replacement)
+
+            bbcode_result = fix_all_image_tags(self.driver, bbcode_result)
+            bbcode_result = self._enforce_single_image_host_in_bbcode(bbcode_result)
             
             logging.debug(f"Converted megathread post HTML to BBCode ({len(bbcode_result)} chars)")
             return bbcode_result
@@ -4295,53 +4249,6 @@ class ForumBotSelenium:
             # Try parsing a known date format like %d.%m.%Y etc. If fails, just return today.
             # Since original scenario uses "Heute", this is a fallback.
             return today
-
-
-    def convert_post_html_to_bbcode(self, post_element):
-        """
-        Converts the HTML content of a post element into BBCode.
-        Replace known HTML tags with corresponding BBCode equivalents.
-        """
-        import html
-        html_content = str(post_element)
-        bbcode = html_content
-
-        # Line breaks
-        bbcode = re.sub(r'<br\s*/?>', '\n', bbcode, flags=re.IGNORECASE)
-
-        # Bold
-        bbcode = re.sub(r'<b>(.*?)</b>', r'[b]\1[/b]', bbcode, flags=re.IGNORECASE)
-        bbcode = re.sub(r'<strong>(.*?)</strong>', r'[b]\1[/b]', bbcode, flags=re.IGNORECASE)
-
-        # Italic
-        bbcode = re.sub(r'<i>(.*?)</i>', r'[i]\1[/i]', bbcode, flags=re.IGNORECASE)
-        bbcode = re.sub(r'<em>(.*?)</em>', r'[i]\1[/i]', bbcode, flags=re.IGNORECASE)
-
-        # Underline
-        bbcode = re.sub(r'<u>(.*?)</u>', r'[u]\1[/u]', bbcode, flags=re.IGNORECASE)
-
-        # Links
-        bbcode = re.sub(
-            r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
-            lambda match: f"[url={match.group(1)}]{match.group(2)}[/url]", bbcode, flags=re.IGNORECASE
-        )
-
-        # Images
-        bbcode = re.sub(
-            r'<img[^>]+src="([^"]+)"[^>]*>',
-            lambda match: f"[img]{match.group(1)}[/img]", bbcode, flags=re.IGNORECASE
-        )
-
-        # Remove remaining HTML tags
-        bbcode = re.sub(r'<[^>]+>', '', bbcode)
-
-        # Decode HTML entities
-        bbcode = html.unescape(bbcode)
-
-        # Trim
-        bbcode = bbcode.strip()
-
-        return bbcode
 
     def get_megathread_post_id(self, post_element):
         """
@@ -5457,74 +5364,111 @@ class ForumBotSelenium:
             logging.debug(f"Could not parse German datetime '{date_text}': {e}")
             return None
 
-    def _resolve_final_url(self, url, depth=0):
-        """Follow redirects and HTML indirections to resolve the final image URL."""
-        if depth > 3:
-            return url
+    def _root_domain(self, netloc: str) -> str:
         try:
-            with requests.Session() as session:
-                response = session.get(url, allow_redirects=True, timeout=10)
-                final_url = response.url
-                content_type = response.headers.get("Content-Type", "")
-                if "image" in content_type:
-                    return final_url
-                soup = BeautifulSoup(response.text, "html.parser")
-                img = soup.find("img")
-                if img and img.get("src"):
-                    src = img.get("src")
+            netloc = netloc.split(":")[0]
+            parts = netloc.split(".")
+            return ".".join(parts[-2:]) if len(parts) >= 2 else netloc
+        except Exception:
+            return netloc
+
+        def _is_forum_domain(self, netloc: str) -> bool:
+            from urllib.parse import urlparse
+        try:
+            forum_netloc = urlparse(self.forum_url).netloc
+            return self._root_domain(netloc) == self._root_domain(forum_netloc)
+        except Exception:
+            return False
+
+        def _filter_images_same_host(self, urls: list[str]) -> list[str]:
+            """Keep all images from the first non-forum root domain; else keep only the first image."""
+            from urllib.parse import urlparse
+            seen, cleaned = set(), []
+            blacklist = ("smilies", "avatar", "sprite", "icon", "pixel", "spacer", "logo")
+            for u in urls:
+                if not u:
+                    continue
+                lu = u.lower()
+                if any(b in lu for b in blacklist):
+                    continue
+                if u not in seen:
+                    seen.add(u)
+                    cleaned.append(u)
+            if not cleaned:
+                return []
+            primary = None
+            for u in cleaned:
+                rd = self._root_domain(urlparse(u).netloc)
+                if not self._is_forum_domain(urlparse(u).netloc):
+                    primary = rd
+                    break
+            if not primary:
+                return [cleaned[0]]
+            return [u for u in cleaned if self._root_domain(urlparse(u).netloc) == primary] or [cleaned[0]]
+
+        def _extract_image_candidates(self, soup) -> list[str]:
+            """Collect candidates from <img>, <a>, and inline [IMG] tags; return resolved direct URLs."""
+            import re
+            from urllib.parse import urljoin
+            candidates = []
+
+            for img in soup.find_all("img"):
+                src = self._get_direct_image_url(img) or img.get("src") or ""
+                if src:
                     if src.startswith("//"):
                         src = "https:" + src
                     elif src.startswith("/"):
-                        src = urljoin(final_url, src)
-                    return self._resolve_final_url(src, depth + 1)
-                refresh = soup.find("meta", attrs={"http-equiv": "refresh"})
-                if refresh:
-                    match = re.search(r"url=(.+)", refresh.get("content", ""), re.IGNORECASE)
-                    if match:
-                        target = match.group(1).strip('"')
-                        if target.startswith("//"):
-                            target = "https:" + target
-                        elif target.startswith("/"):
-                            target = urljoin(final_url, target)
-                        return self._resolve_final_url(target, depth + 1)
-                return final_url
-        except Exception as e:
-            logging.debug(f"Failed to resolve final URL for {url}: {e}")
-        # Selenium fallback to mimic 'open image in new tab'
+                        src = urljoin(self.forum_url.rstrip("/") + "/", src)
+                    candidates.append(self._resolve_final_url(src))
+
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                if href.startswith("//"):
+                    href = "https:" + href
+                elif href.startswith("/"):
+                    href = urljoin(self.forum_url.rstrip("/") + "/", href)
+                if a.find("img") or re.search(r"\.(?:jpe?g|png|gif|webp|bmp)(?:\?|$)", href, re.I) \
+                        or any(h in href.lower() for h in
+                               ("directupload", "fastpic", "imgur", "postimg", "abload", "imgbox", "ibb.co", "imgbb")):
+                    candidates.append(self._resolve_final_url(href))
+
+            text = soup.get_text(" ")
+            for m in re.findall(r"\[IMG\](https?://[^\]]+)\[/IMG\]", text, re.I):
+                candidates.append(self._resolve_final_url(m))
+
+            seen, uniq = set(), []
+            for u in candidates:
+                if u and u not in seen:
+                    seen.add(u)
+                    uniq.append(u)
+            return uniq
+
+        def _enforce_single_image_host_in_bbcode(self, bbcode: str) -> str:
+            import re
+            urls = re.findall(r"\[IMG\](https?://[^\]]+)\[/IMG\]", bbcode, flags=re.I)
+            if not urls:
+                return bbcode
+            keep = set(self._filter_images_same_host(urls))
+            if not keep:
+                return bbcode
+
+            def repl(m):
+                url = m.group(1)
+                return f"[IMG]{url}[/IMG]" if url in keep else ""
+
+            bbcode = re.sub(r"\[IMG\](https?://[^\]]+)\[/IMG\]", repl, bbcode, flags=re.I)
+            bbcode = re.sub(r"\n{3,}", "\n\n", bbcode)
+            return bbcode
+
+        def _resolve_final_url(self, url: str) -> str:
+            """Return a direct image URL using _get_real_image_url helper."""
+
         try:
-            if hasattr(self, "driver") and self.driver:
-                original = self.driver.current_window_handle
-                src = ""
-                self.driver.execute_script("window.open(arguments[0], '_blank');", url)
-                self.driver.switch_to.window(self.driver.window_handles[-1])
-                try:
-                    WebDriverWait(self.driver, 10).until(lambda d: d.find_elements(By.TAG_NAME, 'img'))
-                    img = self.driver.find_element(By.TAG_NAME, 'img')
-                    src = img.get_attribute('src')
-                finally:
-                    self.driver.close()
-                    self.driver.switch_to.window(original)
-                if src:
-                    return self._resolve_final_url(src, depth + 1)
-        except Exception as e:
-            logging.debug(f"Selenium fallback failed for {url}: {e}")
-        return url
-    def _resolve_final_url(self, url):
-        """Follow redirects to resolve the final image URL."""
-        try:
-            with requests.Session() as session:
-                response = session.head(url, allow_redirects=True, timeout=10)
-                final_url = response.url
-                content_type = response.headers.get("Content-Type", "")
-                if "image" in content_type:
-                    return final_url
-                response = session.get(url, allow_redirects=True, timeout=10, stream=True)
-                return response.url
-        except Exception as e:
-            logging.debug(f"Failed to resolve final URL for {url}: {e}")
+            return _get_real_image_url(self.driver, url) or url
+        except Exception:
             return url
     def _get_direct_image_url(self, img_tag):
-        """Extract final image URL similar to 'open image in new tab'."""
+        """Extract image URL from common attributes without resolving."""
         try:
             candidate = ""
             for attr in ("data-src", "data-original", "data-lazy", "src"):
@@ -5536,12 +5480,11 @@ class ForumBotSelenium:
                 parent = img_tag.parent
                 if parent and parent.name == 'a' and parent.get('href'):
                     candidate = parent.get('href')
-            if candidate:
-                if candidate.startswith('//'):
-                    candidate = 'https:' + candidate
-                elif candidate.startswith('/'):
-                    candidate = self.forum_url.rstrip('/') + candidate
-                return self._resolve_final_url(candidate)
+            if candidate.startswith('//'):
+                candidate = 'https:' + candidate
+            elif candidate.startswith('/'):
+                candidate = self.forum_url.rstrip('/') + candidate
+            return candidate
         except Exception as e:
             logging.debug(f"Could not extract image URL: {e}")
         return ""
@@ -5549,46 +5492,54 @@ class ForumBotSelenium:
     def convert_post_html_to_bbcode(self, post):
         """Convert post HTML content to BBCode with direct image links."""
         import html
+        from bs4 import BeautifulSoup, NavigableString
+        import re
         try:
             if not post:
                 return "[CENTER]No content available.[/CENTER]"
             
-            # Get post content
             soup = BeautifulSoup(str(post), 'html.parser')
+            candidates = self._extract_image_candidates(soup)
+            selected = set(self._filter_images_same_host(candidates))
 
-            # Replace images with BBCode using direct URLs
-            for img in soup.find_all('img'):
-                parent = img.parent
-                src = self._get_direct_image_url(img)
-                if src:
-                    img.replace_with(soup.new_string(f"[IMG]{src}[/IMG]"))
-                    if parent and parent.name == 'a':
-                        parent.unwrap()
+            def traverse(node):
+                if isinstance(node, NavigableString):
+                    return str(node)
+                if not hasattr(node, 'name'):
+                    return ""
+                tag = node.name.lower()
+                if tag in ('b', 'strong'):
+                    return '[B]' + ''.join(traverse(c) for c in node.children) + '[/B]'
+                if tag in ('i', 'em'):
+                    return '[I]' + ''.join(traverse(c) for c in node.children) + '[/I]'
+                if tag == 'u':
+                    return '[U]' + ''.join(traverse(c) for c in node.children) + '[/U]'
+                if tag == 'br':
+                    return '\n'
+                if tag == 'img':
+                    src = self._get_direct_image_url(node)
+                    src = self._resolve_final_url(src) if src else ''
+                    return f'[IMG]{src}[/IMG]' if src in selected else ''
+                if tag == 'a':
+                    href = node.get('href') or ''
+                    img_child = node.find('img')
+                    if img_child:
+                        src = self._get_direct_image_url(img_child) or href
+                        src = self._resolve_final_url(src)
+                        return f'[IMG]{src}[/IMG]' if src in selected else ''
+                    final = self._resolve_final_url(href) if href else ''
+                    text = ''.join(traverse(c) for c in node.children)
+                    if final in selected:
+                        return f'[IMG]{final}[/IMG]'
+                    if href:
+                        return f'[URL={href}]{text}[/URL]' if text.strip() else f'[URL]{href}[/URL]'
+                    return text
+                return ''.join(traverse(c) for c in node.children)
 
-            # Convert anchors to BBCode
-            for a in soup.find_all('a'):
-                href = a.get('href')
-                text = a.get_text(strip=True)
-                if href:
-                    a.replace_with(f"[URL={href}]{text}[/URL]" if text else f"[URL]{href}[/URL]")
-
-            html_text = str(soup)
-
-            # Basic formatting replacements
-            bbcode = re.sub(r'<br\s*/?>', '\n', html_text, flags=re.IGNORECASE)
-            bbcode = re.sub(r'<b>(.*?)</b>', r'[B]\1[/B]', bbcode, flags=re.IGNORECASE)
-            bbcode = re.sub(r'<strong>(.*?)</strong>', r'[B]\1[/B]', bbcode, flags=re.IGNORECASE)
-            bbcode = re.sub(r'<i>(.*?)</i>', r'[I]\1[/I]', bbcode, flags=re.IGNORECASE)
-            bbcode = re.sub(r'<em>(.*?)</em>', r'[I]\1[/I]', bbcode, flags=re.IGNORECASE)
-            bbcode = re.sub(r'<u>(.*?)</u>', r'[U]\1[/U]', bbcode, flags=re.IGNORECASE)
-
-            # Remove remaining HTML tags
-            bbcode = re.sub(r'<[^>]+>', '', bbcode)
-
-            # Decode HTML entities and tidy up
-            bbcode = html.unescape(bbcode)
-            bbcode = re.sub(r'\n\s*\n\s*\n+', '\n\n', bbcode)
-            bbcode = bbcode.strip()
+            bbcode = traverse(soup)
+            bbcode = fix_all_image_tags(self.driver, bbcode)
+            bbcode = self._enforce_single_image_host_in_bbcode(bbcode)
+            bbcode = re.sub(r'\n{3,}', '\n\n', bbcode).strip()
 
             if not bbcode:
                 return "[CENTER]Content processing resulted in empty text.[/CENTER]"
