@@ -6,6 +6,7 @@ from config.config import DATA_DIR
 from utils.utils import sanitize_filename
 import logging
 from dotenv import load_dotenv, find_dotenv
+import re
 
 # ``openai`` is an optional dependency.  Older versions (<1.0) exposed a
 # ``ChatCompletion`` class, while newer releases use an ``OpenAI`` client
@@ -30,6 +31,57 @@ if openai and _OPENAI_KEY:
             _OPENAI_CLIENT = None
     else:  # Legacy <1.0 style
         openai.api_key = _OPENAI_KEY
+
+def _collect_file_sizes(text: str) -> list:
+    """Extract all file sizes from ``text``.
+
+    Recognizes numbers followed by KB, MB or GB (case-insensitive) and returns
+    a list of sizes normalized to megabytes.  Bitrate indicators such as
+    ``kbps`` or ``MB/s`` are ignored.
+    """
+    pattern = re.compile(r"(\d+(?:[.,]\d+)?)\s*(KB|MB|GB)(?!\s*(?:ps|/s))", re.IGNORECASE)
+    sizes = []
+    for num, unit in pattern.findall(text):
+        try:
+            value = float(num.replace(',', '.'))
+            unit = unit.upper()
+            if unit == "KB":
+                value /= 1024
+            elif unit == "GB":
+                value *= 1024
+            sizes.append(value)
+        except Exception:
+            continue
+    return sizes
+
+
+def _inject_total_size(bbcode: str, desc: str) -> str:
+    """Replace the ``Größe:`` line in ``desc`` with the total size from ``bbcode``.
+
+    The total is expressed in megabytes if below one gigabyte, otherwise in
+    gigabytes with one decimal place.  When no file sizes are detected the
+    original description is returned unchanged.
+    """
+    sizes = _collect_file_sizes(bbcode)
+    if not sizes:
+        return desc
+
+    total_mb = sum(sizes)
+    if total_mb >= 1024:
+        total = f"{total_mb / 1024:.1f} GB"
+    else:
+        total = f"{int(round(total_mb))} MB"
+
+    lines = desc.splitlines()
+    out = []
+    replaced = False
+    for line in lines:
+        if not replaced and line.strip().lower().startswith("größe:"):
+            out.append(f"Größe: {total}")
+            replaced = True
+        else:
+            out.append(line)
+    return "\n".join(out)
 def _ensure_dir(sub: str) -> Path:
     base = Path(DATA_DIR)
     path = base / sub
@@ -156,6 +208,7 @@ def parse_bbcode_ai(bbcode: str, prompt: str) -> dict:
         content = getattr(msg, "content", "")
     js = json.loads(content)
     assert all(k in js for k in ("title", "cover", "desc", "body", "links"))
+    js["desc"] = _inject_total_size(bbcode, js["desc"])
     return js
 
 def get_unified_template(category: str) -> str:
