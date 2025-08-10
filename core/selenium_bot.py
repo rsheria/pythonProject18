@@ -5491,54 +5491,66 @@ class ForumBotSelenium:
         except Exception as e:
             logging.error(f"❌ Error uploading image to fastpic.org: {e}")
             return image_url
-    
+
     def process_images_in_content(self, content):
         """
-        Processes BBCode content to upload the first image to fastpic.org and replace it.
-        
+        Processes BBCode/HTML content to upload images to fastpic.org and replace them.
+
         Args:
             content (str): BBCode content containing images
-            
+
         Returns:
-            str: Updated content with first image replaced by fastpic.org URL
+            str: Updated content with image URLs replaced by fastpic.org URLs
         """
         try:
             logging.info("🖼️ Processing images in content for fastpic.org upload")
             logging.info(f"📝 Content length: {len(content)}")
-            logging.info(f"📝 Content preview: {content[:300]}...")  # Show first 300 chars
-            
-            # Find all IMG tags in BBCode format
-            img_pattern = r'\[IMG\](https?://[^\]]+)\[/IMG\]'
-            logging.info(f"🔍 Using regex pattern: {img_pattern}")
-            matches = re.findall(img_pattern, content, re.IGNORECASE)
+            logging.info(f"📝 Content preview: {content[:300]}...")
+
+            # Patterns to find BBCode and HTML <img> tags
+            bbcode_pattern = re.compile(r"\[IMG\](https?://[^\]]+)\[/IMG\]", re.IGNORECASE)
+            html_pattern = re.compile(r"<img[^>]+src=['\"](https?://[^'\"]+)['\"][^>]*>", re.IGNORECASE)
+
+            # Extract all matches
+            bbcode_matches = [m.group(1) for m in bbcode_pattern.finditer(content)]
+            html_matches = [m.group(1) for m in html_pattern.finditer(content)]
+            matches = bbcode_matches + html_matches
+
             logging.info(f"🔍 Found {len(matches)} image matches")
-            
+
             if not matches:
                 logging.info("📋 No images found in content")
                 return content
-            
-            # Get the first image URL
-            first_image_url = matches[0]
-            logging.info(f"🎯 Found first image: {first_image_url}")
-            
-            # Upload to fastpic.org
-            new_image_url = self.upload_image_to_fastpic(first_image_url)
-            
-            # Replace the first image URL with the new one
-            if new_image_url != first_image_url:
-                old_img_tag = f"[IMG]{first_image_url}[/IMG]"
-                new_img_tag = f"[IMG]{new_image_url}[/IMG]"
-                updated_content = content.replace(old_img_tag, new_img_tag, 1)  # Replace only first occurrence
-                
-                logging.info(f"✅ Replaced first image with fastpic.org URL")
-                logging.info(f"📝 Old: {first_image_url}")
-                logging.info(f"📝 New: {new_image_url}")
-                
-                return updated_content
-            else:
-                logging.warning("⚠️ Image upload failed, keeping original content")
-                return content
-                
+
+            processed_count = 0
+            for img_url in matches:
+                logging.info(f"🎯 Processing image: {img_url}")
+                new_image_url = self.upload_image_to_fastpic(img_url)
+                if new_image_url and new_image_url != img_url:
+                    # Replace BBCode image URL
+                    content = re.sub(
+                        rf"\[IMG\]{re.escape(img_url)}\[/IMG\]",
+                        f"[IMG]{new_image_url}[/IMG]",
+                        content,
+                        count=1,
+                        flags=re.IGNORECASE
+                    )
+                    # Replace HTML <img> src URL
+                    content = re.sub(
+                        rf"(<img[^>]+src=['\"]){re.escape(img_url)}(['\"])",
+                        rf"\1{new_image_url}\2",
+                        content,
+                        count=1,
+                        flags=re.IGNORECASE
+                    )
+                    logging.info(f"✅ Reuploaded {img_url} -> {new_image_url}")
+                    processed_count += 1
+                else:
+                    logging.warning(f"⚠️ Image upload failed for {img_url}, keeping original")
+
+            logging.info(f"📦 Total images reuploaded: {processed_count}")
+            return content
+
         except Exception as e:
             logging.error(f"❌ Error processing images in content: {e}")
             return content

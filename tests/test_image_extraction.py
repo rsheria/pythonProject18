@@ -108,3 +108,33 @@ def test_megathread_anchor_image_uses_img_src(monkeypatch):
         "[IMG]https://s1.directupload.eu/images/250715/wtl9hlez.jpg[/IMG]" in bbcode
     )
     assert "https://www.directupload.eu" not in bbcode
+
+
+@pytest.mark.skipif(not BS4_AVAILABLE, reason="bs4 not installed")
+def test_process_images_reuploads_all(monkeypatch):
+    bot = ForumBotSelenium.__new__(ForumBotSelenium)
+    bot.driver = None
+
+    uploads = {}
+
+    def fake_upload(url):
+        new_url = url + "/fastpic"
+        uploads[url] = new_url
+        return new_url
+
+    monkeypatch.setattr(bot, "upload_image_to_fastpic", fake_upload)
+
+    content = (
+        "[IMG]http://example.com/a.jpg[/IMG]"
+        " some text "
+        "[IMG]http://example.com/b.png[/IMG]"
+    )
+
+    result = bot.process_images_in_content(content)
+
+    assert "[IMG]http://example.com/a.jpg/fastpic[/IMG]" in result
+    assert "[IMG]http://example.com/b.png/fastpic[/IMG]" in result
+    assert uploads == {
+        "http://example.com/a.jpg": "http://example.com/a.jpg/fastpic",
+        "http://example.com/b.png": "http://example.com/b.png/fastpic",
+    }
