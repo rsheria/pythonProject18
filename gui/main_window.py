@@ -5078,15 +5078,15 @@ class ForumBotGUI(QMainWindow):
                 self.process_threads[category_name][thread_title]['links'] = {}
                 self.save_process_threads_data()
 
-            msg_box = QMessageBox(self)
+            msg_box = QtMessageBox(self)
             msg_box.setWindowTitle("Replace Links")
             msg_box.setText(
                 f"Replace links for '{thread_title}'.\n\nWhat would you like to do?"
             )
 
-            add_link_btn = msg_box.addButton("Add Manual Link", QMessageBox.ActionRole)
-            create_folder_btn = msg_box.addButton("Create Download Folder", QMessageBox.ActionRole)
-            cancel_btn = msg_box.addButton("Cancel", QMessageBox.RejectRole)
+            add_link_btn = msg_box.addButton("Add Manual Link", QtMessageBox.ActionRole)
+            create_folder_btn = msg_box.addButton("Create Download Folder", QtMessageBox.ActionRole)
+            cancel_btn = msg_box.addButton("Cancel", QtMessageBox.RejectRole)
 
             msg_box.setDefaultButton(add_link_btn)
             msg_box.exec_()
@@ -6344,14 +6344,14 @@ class ForumBotGUI(QMainWindow):
             dialog.exec_()
         else:
             # إضافة خيارات جديدة للـ threads الفاضية
-            msg_box = QMessageBox(self)
+            msg_box = QtMessageBox(self)
             msg_box.setWindowTitle("No Links Found")
             msg_box.setText(f"No links found for '{thread_title}'.\n\nWhat would you like to do?")
             
             # إضافة أزرار مخصصة
-            add_link_btn = msg_box.addButton("Add Manual Link", QMessageBox.ActionRole)
-            create_folder_btn = msg_box.addButton("Create Download Folder", QMessageBox.ActionRole)
-            cancel_btn = msg_box.addButton("Cancel", QMessageBox.RejectRole)
+            add_link_btn = msg_box.addButton("Add Manual Link", QtMessageBox.ActionRole)
+            create_folder_btn = msg_box.addButton("Create Download Folder", QtMessageBox.ActionRole)
+            cancel_btn = msg_box.addButton("Cancel", QtMessageBox.RejectRole)
             
             msg_box.setDefaultButton(add_link_btn)
             msg_box.exec_()
