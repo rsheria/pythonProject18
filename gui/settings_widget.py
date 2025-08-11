@@ -269,12 +269,13 @@ class SettingsWidget(QWidget):
         template_layout = QVBoxLayout(template_group)
         self.template_combo = QComboBox()
         self.template_combo.addItems([f"Template {i+1}" for i in range(len(LINK_TEMPLATE_PRESETS))])
-        self.template_combo.setEnabled(False)
+        self.template_combo.currentIndexChanged.connect(self._on_template_selected)
         template_layout.addWidget(self.template_combo)
         self.links_template_edit = QPlainTextEdit()
         self.links_template_edit.setPlaceholderText("Use placeholders like {LINK_RG} and {PART}")
         self.links_template_edit.setPlainText(LINK_TEMPLATE_PRESETS[0])
-        self.links_template_edit.setReadOnly(True)
+        self.links_template_edit.setReadOnly(False)
+        self.links_template_edit.textChanged.connect(self._save_links_template)
         template_layout.addWidget(self.links_template_edit)
         general_layout.addWidget(template_group)
 
@@ -596,7 +597,24 @@ class SettingsWidget(QWidget):
     def _on_template_selected(self, index: int):
         """Load the selected preset template into the editor."""
         if 0 <= index < len(LINK_TEMPLATE_PRESETS):
+            # Avoid triggering textChanged while programmatically setting text
+            self.links_template_edit.blockSignals(True)
             self.links_template_edit.setPlainText(LINK_TEMPLATE_PRESETS[index])
+            self.links_template_edit.blockSignals(False)
+        self._save_links_template()
+
+    def _save_links_template(self):
+        """Persist the current template text and selected preset."""
+        template_text = self.links_template_edit.toPlainText().strip()
+        index = self.template_combo.currentIndex()
+        if self.user_manager.get_current_user():
+            self.user_manager.set_user_setting('links_template', template_text)
+            self.user_manager.set_user_setting('links_template_index', index)
+            self.config['links_template'] = template_text
+            self.config['links_template_index'] = index
+        else:
+            self.config['links_template'] = template_text
+            self.config['links_template_index'] = index
     def reset_defaults(self):
         """Reset all settings to their default values."""
         try:
@@ -625,8 +643,13 @@ class SettingsWidget(QWidget):
             self.use_backup_rg_checkbox.setChecked(False)
 
             # Reset links template
+            self.template_combo.blockSignals(True)
+            self.links_template_edit.blockSignals(True)
             self.links_template_edit.setPlainText(LINK_TEMPLATE_PRESETS[0])
             self.template_combo.setCurrentIndex(0)
+            self.template_combo.blockSignals(False)
+            self.links_template_edit.blockSignals(False)
+            self._save_links_template()
             
             # Reset priority settings
             self.reset_priority_to_defaults()
@@ -708,12 +731,26 @@ class SettingsWidget(QWidget):
             self.date_filters = list(df)
             self._load_date_filters_into_list()
 
-            template_val = settings_source.get("links_template", LINK_TEMPLATE_PRESETS[0])
+            raw_index = settings_source.get("links_template_index")
+            if raw_index is None:
+                template_val = settings_source.get("links_template", LINK_TEMPLATE_PRESETS[0])
+            else:
+                tmpl_index = int(raw_index)
+                if not 0 <= tmpl_index < len(LINK_TEMPLATE_PRESETS):
+                    tmpl_index = 0
+                template_val = settings_source.get(
+                    "links_template", LINK_TEMPLATE_PRESETS[tmpl_index]
+                )
+            self.template_combo.blockSignals(True)
+            self.links_template_edit.blockSignals(True)
+            self.template_combo.setCurrentIndex(tmpl_index)
             self.links_template_edit.setPlainText(str(template_val))
             try:
                 self.template_combo.setCurrentIndex(LINK_TEMPLATE_PRESETS.index(template_val))
             except ValueError:
                 self.template_combo.setCurrentIndex(0)
+            self.template_combo.blockSignals(False)
+            self.links_template_edit.blockSignals(False)
 
             # --- priority list ---
             if hasattr(self, "load_priority_settings"):
@@ -820,6 +857,7 @@ class SettingsWidget(QWidget):
                 'download_hosts_priority': current_priority,
                 'use_backup_rg': self.use_backup_rg_checkbox.isChecked(),
                 'links_template': self.links_template_edit.toPlainText().strip(),
+                'links_template_index': self.template_combo.currentIndex(),
                 'stats_target': {
                     'daily_downloads': self.target_dl_spin.value(),
                     'daily_revenue': float(self.target_rev_spin.value()),
