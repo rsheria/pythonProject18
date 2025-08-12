@@ -29,9 +29,19 @@ class JDownloaderDownloader(BaseDownloader):
 
     def __init__(self, bot):
         super().__init__(bot)
-        self.email = os.getenv("JDOWNLOADER_EMAIL", "").strip()
-        self.password = os.getenv("JDOWNLOADER_PASSWORD", "").strip()
-        self.app_key = os.getenv("JDOWNLOADER_APP_KEY", "PyForumBot").strip()
+        cfg = getattr(bot, "config", {}) if bot and hasattr(bot, "config") else {}
+        self.email = (
+            cfg.get("myjd_email") or os.getenv("JDOWNLOADER_EMAIL", "")
+        ).strip()
+        self.password = (
+            cfg.get("myjd_password") or os.getenv("JDOWNLOADER_PASSWORD", "")
+        ).strip()
+        self.device_name = (
+            cfg.get("myjd_device") or ""
+        ).strip()
+        self.app_key = (
+            cfg.get("myjd_app_key") or os.getenv("JDOWNLOADER_APP_KEY", "PyForumBot")
+        ).strip()
         self.jd = None
         self.device = None
         self.is_connected = False
@@ -116,12 +126,21 @@ class JDownloaderDownloader(BaseDownloader):
                 logging.error("❌ No JDownloader devices found")
                 self.jd.disconnect()
                 return False
-                
-            # Use first available device
-            self.device = self.jd.get_device(devices[0]['name'])
+
+            # Select device: prefer configured name, fallback to first
+            target_name = self.device_name or devices[0]['name']
+            try:
+                self.device = self.jd.get_device(target_name)
+                if not self.device:
+                    raise ValueError("Device not found")
+            except Exception:
+                logging.warning(
+                    f"⚠️ Specified device '{target_name}' not found, using first available"
+                )
+                self.device = self.jd.get_device(devices[0]['name'])
             self.is_connected = True
-            
-            logging.info(f"✅ Connected to JDownloader device: {devices[0]['name']}")
+
+            logging.info(f"✅ Connected to JDownloader device: {self.device.name}")
             return True
             
         except Exception as e:

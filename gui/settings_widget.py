@@ -926,6 +926,9 @@ class SettingsWidget(QWidget):
                 'stats_target': {
                     'daily_downloads': self.target_dl_spin.value(),
                     'daily_revenue': float(self.target_rev_spin.value()),
+                    'myjd_email': new_myjd_email,
+                    'myjd_password': new_myjd_password,
+                    'myjd_device': new_myjd_device,
                 },
             }
             
@@ -963,6 +966,8 @@ class SettingsWidget(QWidget):
 
                 for key, value in new_settings.items():
                     self.config[key] = value
+                from config.config import save_configuration
+                save_configuration(self.config)
                 logging.info("✅ Settings saved to config")
 
             # Emit updated hosts list so the main window can react immediately
