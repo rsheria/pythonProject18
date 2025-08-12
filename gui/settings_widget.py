@@ -89,9 +89,22 @@ class SettingsWidget(QWidget):
                 date_filters = [{'type': 'relative', 'value': 3, 'unit': 'days'}]
             self.date_filters = list(date_filters)
         else:
-            self.date_filters = list(
-                self.config.get('date_filters', [{'type': 'relative', 'value': 3, 'unit': 'days'}])
+            date_filters = self.config.get(
+                'date_filters', [{'type': 'relative', 'value': 3, 'unit': 'days'}]
             )
+            # Handle case where date_filters might be stored as JSON string
+            if isinstance(date_filters, str):
+                try:
+                    import json
+                    date_filters = json.loads(date_filters)
+                except (json.JSONDecodeError, ValueError):
+                    logging.warning("⚠️ Invalid date_filters format, using default")
+                    date_filters = [{'type': 'relative', 'value': 3, 'unit': 'days'}]
+            # Validate structure
+            if not isinstance(date_filters, list) or not all(isinstance(df, dict) for df in date_filters):
+                logging.warning("⚠️ Invalid date_filters structure, using default")
+                date_filters = [{'type': 'relative', 'value': 3, 'unit': 'days'}]
+            self.date_filters = list(date_filters)
 
         
         self.init_ui()

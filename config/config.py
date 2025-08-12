@@ -37,6 +37,11 @@ def load_configuration(env_path: str = None) -> dict:
         s = v.strip()
         if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
             s = s[1:-1]
+        # Try to decode JSON structures first (dicts/lists)
+        try:
+            return json.loads(s)
+        except (json.JSONDecodeError, TypeError):
+            pass
         if s.lower() in ('true', 'false'):
             return s.lower() == 'true'
         if ',' in s:
@@ -73,8 +78,13 @@ def save_configuration(config: dict, env_path: str = None) -> None:
         if isinstance(val, bool):
             val_str = 'true' if val else 'false'
         elif isinstance(val, (list, tuple)):
-            # simple CSV, no quotes
-            val_str = ','.join(str(x) for x in val)
+            # if the list contains non-primitive types, store as JSON
+            if all(isinstance(x, (str, int, float, bool)) for x in val):
+                val_str = ','.join(str(x) for x in val)
+            else:
+                val_str = json.dumps(val)
+        elif isinstance(val, dict):
+            val_str = json.dumps(val)
         else:
             val_str = str(val)
 

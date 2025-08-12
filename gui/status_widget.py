@@ -69,6 +69,6 @@ class StatusWidget(QWidget):
         if hasattr(worker, "progress_update"):
             worker.progress_update.connect(self.model.upsert)
 
-        def on_cancel_clicked(self) -> None:
+    def on_cancel_clicked(self) -> None:
             """Signal the running worker to cancel."""
             self.cancel_event.set()
