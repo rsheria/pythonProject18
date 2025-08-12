@@ -68,7 +68,8 @@ class JDClient:
             }
             items = self.device.linkgrabberv2.query_links(q) or []
             for it in items:
-                it["url"] = it.get("url") or it.get("contentURL") or it.get("pluginURL")
+                link_url = it.get("url") or it.get("contentURL") or it.get("pluginURL")
+                it["url"] = link_url
             return items
         except Exception:
             return []
