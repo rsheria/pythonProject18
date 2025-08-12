@@ -111,11 +111,18 @@ class LinkCheckWorker(QThread):
                 group,
                 key=lambda it: (host_rank(it.get("host")), availability_rank(it.get("availability")))
             )[0]
+            best_direct_url = best.get("url") or best.get("contentURL") or best.get("pluginURL") or ""
+            container_url = best.get("containerURL") or ""
             availability = (best.get("availability") or "").upper()
             if availability not in ("ONLINE", "OFFLINE"):
                 availability = "UNKNOWN"
             d = {
-                "url": best.get("url") or best.get("contentURL") or best.get("pluginURL") or "",
+                # direct link the user would actually download
+                "url": best_direct_url,
+                # keeplinks/container url (if any). empty for plain direct links
+                "container_url": container_url,
+                # convenience: what to use for row matching/display first
+                "display_url": container_url or best_direct_url,
                 "status": availability,
                 "name": best.get("name") or "",
                 "host": best.get("host") or "",

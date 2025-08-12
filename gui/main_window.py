@@ -3312,18 +3312,25 @@ class ForumBotGUI(QMainWindow):
             self.statusBar().showMessage("تم طلب إلغاء فحص الروابط…")
 
     def _on_link_progress(self, rowdict: dict):
+        # figure out which row to update: prefer container_url (keeplinks) then direct url
+        container_url = (rowdict.get("container_url") or "").strip()
+        direct_url = (rowdict.get("url") or "").strip()
+        display_url = (rowdict.get("display_url") or container_url or direct_url)
+
+        row_idx = self._find_row_for_url([container_url, direct_url])
+        if row_idx < 0:
+            # fallback: try display_url only
+            row_idx = self._find_row_for_url([display_url])
+
+        # If still not found, bail out quietly (don't crash)
+        if row_idx < 0:
+            return
+
         status = rowdict.get("status", "UNKNOWN")
-        row = self.find_row_by_url(rowdict.get("url"))
-        if row is None:
-            row = self.find_row_by_name_host(rowdict.get("name"), rowdict.get("host"))
-        if row is not None:
-            self.update_status_cell(row, status, tooltip=self._format_tooltip(rowdict))
+        self.update_status_cell(row_idx, status, tooltip=self._format_tooltip(rowdict))
 
         try:
             import time
-            url = (rowdict.get("url") or "").strip()
-            if not url:
-                return
             entry = {
                 "status": rowdict.get("status"),
                 "host": rowdict.get("host"),
@@ -3332,7 +3339,7 @@ class ForumBotGUI(QMainWindow):
                 "ts": int(time.time())
             }
 
-            # Prefer per-user settings if available
+            # prefer per-user settings if available
             um = None
             try:
                 from core.user_manager import get_user_manager
@@ -3340,14 +3347,23 @@ class ForumBotGUI(QMainWindow):
             except Exception:
                 pass
 
+            # load existing cache
+            cache = {}
             if um and um.get_current_user():
                 cache = um.get_user_setting("link_check_cache", {}) or {}
-                cache[url] = entry
+            else:
+                cache = self.config.get("link_check_cache", {}) or {}
+
+            # store under both URLs if present
+            if container_url:
+                cache[container_url] = entry
+            if direct_url:
+                cache[direct_url] = entry
+
+            if um and um.get_current_user():
                 um.set_user_setting("link_check_cache", cache)
                 self.config["link_check_cache"] = cache  # mirror
             else:
-                cache = self.config.get("link_check_cache", {}) or {}
-                cache[url] = entry
                 self.config["link_check_cache"] = cache
                 try:
                     from config.config import save_configuration
@@ -3413,6 +3429,41 @@ class ForumBotGUI(QMainWindow):
                 if applied:
                     break
 
+    def _find_row_for_url(self, candidate_urls: list[str]) -> int:
+        """
+        Try to find the table row that contains any of the candidate URLs
+        (exact or substring match) in any text column. Returns row index or -1.
+        """
+        import re
+        rows = self.process_threads_table.rowCount()
+        cols = self.process_threads_table.columnCount()
+        # normalize candidates
+        cands = []
+        for u in (candidate_urls or []):
+            if not u:
+                continue
+            cands.append(u.strip())
+        if not cands:
+            return -1
+
+        for r in range(rows):
+            for c in range(cols):
+                it = self.process_threads_table.item(r, c)
+                if not it:
+                    continue
+                cell = (it.text() or "")
+                if not cell:
+                    continue
+                # quick substring check first, then a relaxed URL token match
+                for u in cands:
+                    if u in cell:
+                        return r
+                    # relaxed: match http(s) tokens trimmed of trailing punctuation
+                    for m in re.findall(r'https?://\S+', cell, flags=re.IGNORECASE):
+                        token = m.strip().strip('.,);]')
+                        if token == u:
+                            return r
+        return -1
     def _load_link_check_cache(self):
         try:
             um = None
