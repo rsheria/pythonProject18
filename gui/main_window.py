@@ -3212,10 +3212,15 @@ class ForumBotGUI(QMainWindow):
         if not urls:
             self.statusBar().showMessage("لا توجد روابط للفحص.")
             return
+        email = self.config.get('myjd_email') or self.config.get('jdownloader_email', '')
+        password = self.config.get('myjd_password') or self.config.get('jdownloader_password', '')
+        device_name = self.config.get('myjd_device') or self.config.get('jdownloader_device', '')
+        app_key = self.config.get('myjd_app_key') or self.config.get('jdownloader_app_key', '')
         jd_client = JDClient(
-            email=self.config.get('myjd_email', ''),
-            password=self.config.get('myjd_password', ''),
-            device_name=self.config.get('myjd_device', '')
+            email=email,
+            password=password,
+            device_name=device_name,
+            app_key=app_key,
         )
         self.link_check_worker = LinkCheckWorker(jd_client, urls, self.link_check_cancel_event)
         self.link_check_worker.progress.connect(self._on_link_progress)
