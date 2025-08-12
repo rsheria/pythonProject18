@@ -3191,42 +3191,112 @@ class ForumBotGUI(QMainWindow):
             table.setRowHidden(row, not (status_ok and text_ok))
 
     def collect_all_candidate_urls_for_selected_threads(self) -> list:
+        import re
+        url_re = re.compile(r'https?://\S+', re.IGNORECASE)
         urls = []
-        rows = {index.row() for index in self.process_threads_table.selectedIndexes()}
+        rows = {idx.row() for idx in self.process_threads_table.selectedIndexes()}
+        if not rows:
+            return urls
+
+        col_count = self.process_threads_table.columnCount()
         for row in rows:
-            for col in (3, 4):
+            for col in range(col_count):
                 item = self.process_threads_table.item(row, col)
                 if not item:
                     continue
-                for url in item.text().splitlines():
-                    url = url.strip()
-                    if url and not any(bad in url.lower() for bad in ("keeplinks", "swistransfer", "forum", "img", "folder")):
-                        urls.append(url)
-        return urls
+                text = (item.text() or "").strip()
+                if not text:
+                    continue
+                for m in url_re.findall(text):
+                    u = m.strip().strip('.,);]')
+                    low = u.lower()
+                    if any(b in low for b in ("swistransfer", "/img", "image", "folder=")):
+                        continue
+                    if "keeplinks" in low:
+                        continue
+                    urls.append(u)
+        # إزالة التكرارات مع الحفاظ على الترتيب
+        seen = set();
+        dedup = []
+        for u in urls:
+            if u not in seen:
+                seen.add(u);
+                dedup.append(u)
+        return dedup
+
+    def _get_myjd_credentials(self):
+        """
+        يرجّع (email, password, device_name, app_key) من:
+        1) الـ Settings widget لو موجودة، وإلا
+        2) config['stats_target']، وإلا
+        3) المفاتيح التوب-ليفل كمحاولة أخيرة
+        """
+        # محاولة من الـ UI لو متاح
+        email = password = device = app_key = ""
+        try:
+            if hasattr(self, "settings_widget"):
+                email = getattr(self.settings_widget, "myjd_email_input", None)
+                password = getattr(self.settings_widget, "myjd_password_input", None)
+                device = getattr(self.settings_widget, "myjd_device_input", None)
+                if email: email = email.text().strip()
+                if password: password = password.text().strip()
+                if device: device = device.text().strip()
+        except Exception:
+            pass
+
+        # من stats_target
+        st = self.config.get("stats_target", {}) or {}
+        email = email or st.get("myjd_email", "")
+        password = password or st.get("myjd_password", "")
+        device = device or st.get("myjd_device", "")
+        app_key = st.get("myjd_app_key", "")
+
+        # من المفاتيح التوب-ليفل أو بدائل قديمة
+        email = email or self.config.get("myjd_email") or self.config.get("jdownloader_email", "")
+        password = password or self.config.get("myjd_password") or self.config.get("jdownloader_password", "")
+        device = device or self.config.get("myjd_device") or self.config.get("jdownloader_device", "")
+        app_key = app_key or self.config.get("myjd_app_key") or self.config.get("jdownloader_app_key") or "PyForumBot"
+
+        return email, password, device, app_key
 
     def on_check_links_clicked(self):
-        if self.link_check_worker and self.link_check_worker.isRunning():
+        # ما تخلّيش الدالة تشتغل لو فيه وركر شغال
+        if getattr(self, "link_check_worker", None) and self.link_check_worker.isRunning():
             return
+
+        # تأكد إن الـ Event موجود
+        if not hasattr(self, "link_check_cancel_event"):
+            from threading import Event
+            self.link_check_cancel_event = Event()
+
         self.link_check_cancel_event.clear()
+
         urls = self.collect_all_candidate_urls_for_selected_threads()
         if not urls:
             self.statusBar().showMessage("لا توجد روابط للفحص.")
             return
-        email = self.config.get('myjd_email') or self.config.get('jdownloader_email', '')
-        password = self.config.get('myjd_password') or self.config.get('jdownloader_password', '')
-        device_name = self.config.get('myjd_device') or self.config.get('jdownloader_device', '')
-        app_key = self.config.get('myjd_app_key') or self.config.get('jdownloader_app_key', '')
+
+        email, password, device_name, app_key = self._get_myjd_credentials()
+        if not email or not password:
+            self.statusBar().showMessage("برجاء ضبط My.JDownloader (الإيميل والباسورد) من الإعدادات أولًا.")
+            return
+
+        from integrations.jd_client import JDClient
+        from workers.link_check_worker import LinkCheckWorker
+
         jd_client = JDClient(
             email=email,
             password=password,
             device_name=device_name,
             app_key=app_key,
         )
-        self.link_check_worker = LinkCheckWorker(jd_client, urls, self.link_check_cancel_event)
+
+        self.link_check_worker = LinkCheckWorker(jd_client, urls, self.link_check_cancel_event, poll_timeout_sec=60)
         self.link_check_worker.progress.connect(self._on_link_progress)
         self.link_check_worker.finished.connect(self._on_link_finished)
-        self.link_check_worker.error.connect(self._on_link_error)
-        ui_notifier.suppress(True)
+        self.link_check_worker.error.connect(lambda msg: self.statusBar().showMessage(msg))
+
+        # الرسالة على الــ StatusBar الصحيح
         self.statusBar().showMessage(f"بدء فحص {len(urls)} رابط…")
         self.link_check_worker.start()
 
