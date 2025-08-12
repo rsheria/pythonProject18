@@ -38,6 +38,7 @@ class UploadWorker(QThread):
             upload_hosts: Optional[List[str]] = None,
             section: str = "Uploads",
             keeplinks_url: Optional[str] = None,
+            cancel_event=None,
     ):
         super().__init__()  # QThread init
         self.bot = bot
@@ -53,7 +54,7 @@ class UploadWorker(QThread):
         self.is_cancelled = False
         self.is_paused = False
         self.lock = Lock()
-
+        self.cancel_event = cancel_event
         # ThreadPool لرفع متوازٍ
         self.thread_pool = ThreadPoolExecutor(max_workers=5)
 
@@ -105,6 +106,8 @@ class UploadWorker(QThread):
     def cancel_uploads(self):
         with self.lock:
             self.is_cancelled = True
+        if self.cancel_event:
+            self.cancel_event.set()
         logging.info("UploadWorker: أُلغي الطلب")
 
     def _check_control(self):
@@ -114,13 +117,13 @@ class UploadWorker(QThread):
         """
         # أولاً: لو مُلغّى، نوقف فوراً
         with self.lock:
-            if self.is_cancelled:
+            if self.is_cancelled or (self.cancel_event and self.cancel_event.is_set()):
                 raise Exception("Upload cancelled by user")
 
         # بعدين: لو متوقّف مؤقتاً، نعمل sleep خارج القفل
         while True:
             with self.lock:
-                if self.is_cancelled:
+                if self.is_cancelled or (self.cancel_event and self.cancel_event.is_set()):
                     raise Exception("Upload cancelled by user")
                 paused = self.is_paused
             if not paused:

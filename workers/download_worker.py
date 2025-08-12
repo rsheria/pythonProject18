@@ -107,7 +107,7 @@ class DownloadWorker(QThread):
     download_error = pyqtSignal(int, str)
     progress_update = pyqtSignal(OperationStatus)
 
-    def __init__(self, bot, file_processor, selected_rows, gui):
+    def __init__(self, bot, file_processor, selected_rows, gui, cancel_event=None):
         super().__init__()
         self.bot = bot
         self.file_processor = file_processor
@@ -116,6 +116,7 @@ class DownloadWorker(QThread):
 
         self.is_cancelled = False
         self.is_paused = False
+        self.cancel_event = cancel_event
         self.base_download_dir = Path(self.bot.download_dir)
         self.max_concurrent    = 4
 
@@ -139,6 +140,8 @@ class DownloadWorker(QThread):
             "DownloadWorker initialized, max_concurrent=%d", self.max_concurrent
         )
 
+    def _is_cancelled(self):
+        return self.is_cancelled or (self.cancel_event and self.cancel_event.is_set())
     def get_download_hosts_priority(self):
         """Get download hosts priority from user settings with fallback to defaults"""
         default_priority = [
@@ -204,7 +207,7 @@ class DownloadWorker(QThread):
             total_threads = len(self.selected_rows)
             processed_threads = 0
 
-            while not self.is_cancelled:
+            while not self._is_cancelled():
                 # 🛡️ Check if worker is still valid
                 try:
                     if not hasattr(self, "active_link_downloads"):
@@ -276,12 +279,12 @@ class DownloadWorker(QThread):
                     break
 
                 # pause
-                while self.is_paused and not self.is_cancelled:
+                while self.is_paused and not self._is_cancelled():
                     time.sleep(0.1)
                 time.sleep(0.1)
 
             # finish up
-            if self.is_cancelled:
+            if self._is_cancelled():
                 self.operation_complete.emit(False, "Operation cancelled.")
             else:
                 self.operation_complete.emit(
@@ -305,6 +308,8 @@ class DownloadWorker(QThread):
     def cancel_downloads(self):
         """✅ Thread-safe cancellation with proper cleanup"""
         self.is_cancelled = True
+        if self.cancel_event:
+            self.cancel_event.set()
         self.status_update.emit("Cancelling downloads...")
         logging.info("DownloadWorker: cancel_downloads invoked")
         
@@ -450,9 +455,9 @@ class DownloadWorker(QThread):
             def progress_cb(cur, tot, fn, *args):
                 """🛡️ Protected progress callback with error handling"""
                 try:
-                    if self.is_cancelled:
+                    if self._is_cancelled():
                         return
-                    while self.is_paused and not self.is_cancelled:
+                    while self.is_paused and not self._is_cancelled():
                         time.sleep(0.1)
                     
                     # 🛡️ Validate inputs
@@ -666,7 +671,7 @@ class DownloadWorker(QThread):
         self.thread_pool.submit(download_job)
 
     def process_thread_files(self, thread_id):
-        if self.is_cancelled:
+        if self._is_cancelled():
             return
         info = self.thread_info_map[thread_id]
         row = info["row"]

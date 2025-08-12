@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import (
     QStyledItemDelegate,
     QStyle,
     QStyleOptionProgressBar,
+    QPushButton,
 )
 
 from .status_model import StatusTableModel
@@ -58,7 +59,13 @@ class StatusWidget(QWidget):
         # Use a progress bar delegate for the Progress column
         self.table.setItemDelegateForColumn(10, ProgressBarDelegate(self.table))
         layout.addWidget(self.table)
-
+        self.cancel_event = threading.Event()
+        self.btn_cancel = QPushButton("Cancel", self)
+        self.btn_cancel.clicked.connect(self.on_cancel_clicked)
+        layout.addWidget(self.btn_cancel)
     def connect_worker(self, worker: QObject) -> None:
         if hasattr(worker, "progress_update"):
             worker.progress_update.connect(self.model.upsert)
+
+        def on_cancel_clicked(self):
+            self.cancel_event.set()

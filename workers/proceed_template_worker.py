@@ -11,7 +11,7 @@ class ProceedTemplateWorker(QThread):
     progress_update = pyqtSignal(OperationStatus)
     finished = pyqtSignal(str, str, str)  # category, title, processed bbcode
 
-    def __init__(self, bot, bot_lock, category, title, raw_bbcode, author, links_block):
+    def __init__(self, bot, bot_lock, category, title, raw_bbcode, author, links_block, cancel_event=None):
         super().__init__()
         self.bot = bot
         self.bot_lock = bot_lock
@@ -20,7 +20,7 @@ class ProceedTemplateWorker(QThread):
         self.raw_bbcode = raw_bbcode
         self.author = author
         self.links_block = links_block
-
+        self.cancel_event = cancel_event
     def run(self):
         status = OperationStatus(
             section="Template",
@@ -32,6 +32,12 @@ class ProceedTemplateWorker(QThread):
             progress=0,
         )
         try:
+            if self.cancel_event and self.cancel_event.is_set():
+                status.stage = OpStage.ERROR
+                status.message = "Cancelled"
+                self.progress_update.emit(status)
+                self.finished.emit(self.category, self.title, "")
+                return
             # Apply template
             bbcode_filled = templab_manager.apply_template(
                 self.raw_bbcode,
@@ -42,6 +48,13 @@ class ProceedTemplateWorker(QThread):
             if "{LINKS}" in bbcode_filled:
                 bbcode_filled = bbcode_filled.replace("{LINKS}", self.links_block)
             self.progress_update.emit(status)
+
+            if self.cancel_event and self.cancel_event.is_set():
+                status.stage = OpStage.ERROR
+                status.message = "Cancelled"
+                self.progress_update.emit(status)
+                self.finished.emit(self.category, self.title, "")
+                return
 
             # Upload image via bot
             status.message = "Uploading image"
