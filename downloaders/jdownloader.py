@@ -30,17 +30,26 @@ class JDownloaderDownloader(BaseDownloader):
     def __init__(self, bot):
         super().__init__(bot)
         cfg = getattr(bot, "config", {}) if bot and hasattr(bot, "config") else {}
+        # Allow credentials to come from config, MYJD_*, or JDOWNLOADER_* env vars
         self.email = (
-            cfg.get("myjd_email") or os.getenv("JDOWNLOADER_EMAIL", "")
+            cfg.get("myjd_email")
+            or os.getenv("MYJD_EMAIL")
+            or os.getenv("JDOWNLOADER_EMAIL", "")
         ).strip()
         self.password = (
-            cfg.get("myjd_password") or os.getenv("JDOWNLOADER_PASSWORD", "")
+            cfg.get("myjd_password")
+            or os.getenv("MYJD_PASSWORD")
+            or os.getenv("JDOWNLOADER_PASSWORD", "")
         ).strip()
         self.device_name = (
-            cfg.get("myjd_device") or ""
+            cfg.get("myjd_device")
+            or os.getenv("MYJD_DEVICE")
+            or ""
         ).strip()
         self.app_key = (
-            cfg.get("myjd_app_key") or os.getenv("JDOWNLOADER_APP_KEY", "PyForumBot")
+            cfg.get("myjd_app_key")
+            or os.getenv("MYJD_APP_KEY")
+            or os.getenv("JDOWNLOADER_APP_KEY", "PyForumBot")
         ).strip()
         self.jd = None
         self.device = None
