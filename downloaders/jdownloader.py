@@ -681,12 +681,16 @@ class JDownloaderDownloader(BaseDownloader):
                     logging.info(f"📁 Found downloaded file: {file_path}")
 
                     # If the file still has a temporary '.part' extension, wait
-                    # briefly for JDownloader to finalize and rename it. This
-                    # prevents moving incomplete files.
+                    # for JDownloader to finish and rename it. Moving a .part
+                    # file results in unusable archives, so we give the API
+                    # ample time to finalize the download before proceeding.
                     if file_path.endswith('.part'):
                         final_path = file_path[:-5]
                         wait_time = 0
-                        while wait_time < 10 and not os.path.exists(final_path):
+                        max_wait = 300  # up to 5 minutes
+                        logging.info(
+                            f"⏳ Waiting for JDownloader to finalize: {file_path}")
+                        while wait_time < max_wait and not os.path.exists(final_path):
                             time.sleep(1)
                             wait_time += 1
 
@@ -694,8 +698,9 @@ class JDownloaderDownloader(BaseDownloader):
                             file_path = final_path
                             logging.info(f"✅ Finalized file detected: {file_path}")
                         else:
-                            logging.warning(
-                                f"⚠️ File remained incomplete after wait: {file_path}")
+                            logging.error(
+                                f"❌ File remained incomplete after {max_wait}s: {file_path}")
+                            continue
 
                     # If target directory is specified and different from current location
                     if target_dir and os.path.dirname(file_path) != target_dir:
@@ -766,7 +771,27 @@ class JDownloaderDownloader(BaseDownloader):
                 for root, dirs, files in os.walk(search_dir):
                     for file in files:
                         file_path = os.path.join(root, file)
-                        
+
+                        # Skip temporary .part files until they finalize
+                        if file.lower().endswith('.part'):
+                            final_path = file_path[:-5]
+                            wait_time = 0
+                            max_wait = 300
+                            logging.info(
+                                f"⏳ Waiting for JDownloader to finalize: {file_path}")
+                            while wait_time < max_wait and not os.path.exists(final_path):
+                                time.sleep(1)
+                                wait_time += 1
+
+                            if os.path.exists(final_path):
+                                file_path = final_path
+                                file = os.path.basename(final_path)
+                                logging.info(
+                                    f"✅ Finalized file detected: {file_path}")
+                            else:
+                                logging.debug(
+                                    f"Skipping incomplete temporary file: {file_path}")
+                                continue
                         # Check if file was created recently (within last 10 minutes)
                         try:
                             file_time = os.path.getctime(file_path)
@@ -856,10 +881,31 @@ class JDownloaderDownloader(BaseDownloader):
                         continue
                     
                     for file in files:
+                        file_path = os.path.join(root, file)
+
+                        # Skip temporary .part files until they finalize
+                        if file.lower().endswith('.part'):
+                            final_path = file_path[:-5]
+                            wait_time = 0
+                            max_wait = 300
+                            logging.info(
+                                f"⏳ Waiting for JDownloader to finalize: {file_path}")
+                            while wait_time < max_wait and not os.path.exists(final_path):
+                                time.sleep(1)
+                                wait_time += 1
+
+                            if os.path.exists(final_path):
+                                file_path = final_path
+                                file = os.path.basename(final_path)
+                                logging.info(
+                                    f"✅ Finalized file detected: {file_path}")
+                            else:
+                                logging.debug(
+                                    f"Skipping incomplete temporary file: {file_path}")
+                                continue
                         # Exact filename match (case insensitive)
                         if file.lower() == filename.lower():
-                            file_path = os.path.join(root, file)
-                            
+
                             # Check if file was created recently (within last 30 minutes)
                             try:
                                 file_time = os.path.getctime(file_path)
@@ -917,11 +963,33 @@ class JDownloaderDownloader(BaseDownloader):
                             
                         for file in files:
                             file_base = os.path.splitext(file)[0].lower()
-                            
+
+                            # Skip temporary .part files until they finalize
+                            file_path = os.path.join(root, file)
+                            if file.lower().endswith('.part'):
+                                final_path = file_path[:-5]
+                                wait_time = 0
+                                max_wait = 300
+                                logging.info(
+                                    f"⏳ Waiting for JDownloader to finalize: {file_path}")
+                                while wait_time < max_wait and not os.path.exists(final_path):
+                                    time.sleep(1)
+                                    wait_time += 1
+
+                                if os.path.exists(final_path):
+                                    file_path = final_path
+                                    file = os.path.basename(final_path)
+                                    file_base = os.path.splitext(file)[0].lower()
+                                    logging.info(
+                                        f"✅ Finalized file detected: {file_path}")
+                                else:
+                                    logging.debug(
+                                        f"Skipping incomplete temporary file: {file_path}")
+                                    continue
+
                             # Check if base names are similar
                             if base_name in file_base or file_base in base_name:
-                                file_path = os.path.join(root, file)
-                                
+
                                 # Check recent creation
                                 try:
                                     file_time = os.path.getctime(file_path)
