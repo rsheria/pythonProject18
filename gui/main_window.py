@@ -277,6 +277,7 @@ class ForumBotGUI(QMainWindow):
         # Link check worker infrastructure
         self.link_check_cancel_event = Event()
         self.link_check_worker = None
+        self._load_link_check_cache()
 
         # Initialize Rapidgator token from config
         self.bot.rapidgator_token = self.config.get('rapidgator_api_token', '')
@@ -3212,8 +3213,6 @@ class ForumBotGUI(QMainWindow):
                     low = u.lower()
                     if any(b in low for b in ("swistransfer", "/img", "image", "folder=")):
                         continue
-                    if "keeplinks" in low:
-                        continue
                     urls.append(u)
         # إزالة التكرارات مع الحفاظ على الترتيب
         seen = set();
@@ -3259,6 +3258,13 @@ class ForumBotGUI(QMainWindow):
 
         return email, password, device, app_key
 
+    def _get_download_host_priority(self) -> list:
+        try:
+            if hasattr(self, "settings_widget") and hasattr(self.settings_widget, "get_current_priority"):
+                return list(self.settings_widget.get_current_priority() or [])
+        except Exception:
+            pass
+        return list(self.config.get("download_hosts_priority", []) or [])
     def on_check_links_clicked(self):
         # ما تخلّيش الدالة تشتغل لو فيه وركر شغال
         if getattr(self, "link_check_worker", None) and self.link_check_worker.isRunning():
@@ -3292,12 +3298,12 @@ class ForumBotGUI(QMainWindow):
         )
 
         self.link_check_worker = LinkCheckWorker(jd_client, urls, self.link_check_cancel_event, poll_timeout_sec=60)
+        host_priority = self._get_download_host_priority()
+        self.link_check_worker.set_host_priority(host_priority)
         self.link_check_worker.progress.connect(self._on_link_progress)
         self.link_check_worker.finished.connect(self._on_link_finished)
         self.link_check_worker.error.connect(lambda msg: self.statusBar().showMessage(msg))
-
-        # الرسالة على الــ StatusBar الصحيح
-        self.statusBar().showMessage(f"بدء فحص {len(urls)} رابط…")
+        self.statusBar().showMessage(f"Starting link check for {len(urls)} URLs…")
         self.link_check_worker.start()
 
     def on_cancel_check_clicked(self):
@@ -3305,17 +3311,51 @@ class ForumBotGUI(QMainWindow):
             self.link_check_cancel_event.set()
             self.statusBar().showMessage("تم طلب إلغاء فحص الروابط…")
 
-    def _on_link_progress(self, info: dict):
-        status = info.get("status", "UNKNOWN")
-        color = {
-            "ONLINE": QColor("#1e9e36"),
-            "OFFLINE": QColor("#c62828"),
-        }.get(status, QColor("#9E9E9E"))
-        row = self.find_row_by_url(info.get("url"))
+    def _on_link_progress(self, rowdict: dict):
+        status = rowdict.get("status", "UNKNOWN")
+        row = self.find_row_by_url(rowdict.get("url"))
         if row is None:
-            row = self.find_row_by_name_host(info.get("name"), info.get("host"))
+            row = self.find_row_by_name_host(rowdict.get("name"), rowdict.get("host"))
         if row is not None:
-            self.set_row_status(row, status, color, tooltip=self._format_tooltip(info))
+            self.update_status_cell(row, status, tooltip=self._format_tooltip(rowdict))
+
+        try:
+            import time
+            url = (rowdict.get("url") or "").strip()
+            if not url:
+                return
+            entry = {
+                "status": rowdict.get("status"),
+                "host": rowdict.get("host"),
+                "name": rowdict.get("name"),
+                "size": rowdict.get("size"),
+                "ts": int(time.time())
+            }
+
+            # Prefer per-user settings if available
+            um = None
+            try:
+                from core.user_manager import get_user_manager
+                um = get_user_manager()
+            except Exception:
+                pass
+
+            if um and um.get_current_user():
+                cache = um.get_user_setting("link_check_cache", {}) or {}
+                cache[url] = entry
+                um.set_user_setting("link_check_cache", cache)
+                self.config["link_check_cache"] = cache  # mirror
+            else:
+                cache = self.config.get("link_check_cache", {}) or {}
+                cache[url] = entry
+                self.config["link_check_cache"] = cache
+                try:
+                    from config.config import save_configuration
+                    save_configuration(self.config)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _on_link_finished(self, results: list):
         ui_notifier.suppress(False)
@@ -3330,6 +3370,91 @@ class ForumBotGUI(QMainWindow):
         self.statusBar().showMessage(msg)
         self.link_check_worker = None
 
+    def _load_link_check_cache(self):
+        try:
+            um = None
+            try:
+                from core.user_manager import get_user_manager
+                um = get_user_manager()
+            except Exception:
+                pass
+            if um and um.get_current_user():
+                self._link_check_cache = um.get_user_setting("link_check_cache", {}) or {}
+                self.config["link_check_cache"] = self._link_check_cache
+            else:
+                self._link_check_cache = self.config.get("link_check_cache", {}) or {}
+        except Exception:
+            self._link_check_cache = {}
+
+    def apply_cached_statuses_to_table(self):
+        self._load_link_check_cache()
+        cache = self._link_check_cache or {}
+        if not cache:
+            return
+        import re
+        rows = self.process_threads_table.rowCount()
+        cols = self.process_threads_table.columnCount()
+        for r in range(rows):
+            applied = False
+            for c in range(cols):
+                it = self.process_threads_table.item(r, c)
+                if not it:
+                    continue
+                text = it.text() or ""
+                for u in re.findall(r'https?://\S+', text, flags=re.IGNORECASE):
+                    u = u.strip().strip('.,);]')
+                    if u in cache:
+                        try:
+                            self.update_status_cell(r, cache[u]["status"])
+                        except Exception:
+                            pass
+                        applied = True
+                        break
+                if applied:
+                    break
+
+    def _load_link_check_cache(self):
+        try:
+            um = None
+            try:
+                from core.user_manager import get_user_manager
+                um = get_user_manager()
+            except Exception:
+                pass
+            if um and um.get_current_user():
+                self._link_check_cache = um.get_user_setting("link_check_cache", {}) or {}
+                self.config["link_check_cache"] = self._link_check_cache
+            else:
+                self._link_check_cache = self.config.get("link_check_cache", {}) or {}
+        except Exception:
+            self._link_check_cache = {}
+
+    def apply_cached_statuses_to_table(self):
+        self._load_link_check_cache()
+        cache = self._link_check_cache or {}
+        if not cache:
+            return
+        import re
+        rows = self.process_threads_table.rowCount()
+        cols = self.process_threads_table.columnCount()
+        for r in range(rows):
+            applied = False
+            for c in range(cols):
+                it = self.process_threads_table.item(r, c)
+                if not it:
+                    continue
+                text = it.text() or ""
+                for u in re.findall(r'https?://\S+', text, flags=re.IGNORECASE):
+                    u = u.strip().strip('.,);]')
+                    if u in cache:
+                        try:
+                            self.update_status_cell(r, cache[u]["status"])
+                        except Exception:
+                            pass
+                        applied = True
+                        break
+                if applied:
+                    break
     def find_row_by_url(self, url):
         table = self.process_threads_table
         for row in range(table.rowCount()):
@@ -3347,6 +3472,18 @@ class ForumBotGUI(QMainWindow):
                     return row
         return None
 
+    def update_status_cell(self, row, status, tooltip=""):
+        color = {
+            "ONLINE": QColor("#1e9e36"),
+            "OFFLINE": QColor("#c62828"),
+        }.get(status, QColor("#9E9E9E"))
+        self.set_row_status(row, status, color, tooltip=tooltip)
+    def update_status_cell(self, row, status, tooltip=""):
+        color = {
+            "ONLINE": QColor("#1e9e36"),
+            "OFFLINE": QColor("#c62828"),
+        }.get(status, QColor("#9E9E9E"))
+        self.set_row_status(row, status, color, tooltip=tooltip)
     def set_row_status(self, row, status, color, tooltip=""):
         item = self.process_threads_table.item(row, self.LINK_STATUS_COL)
         if item is None:
@@ -6060,6 +6197,10 @@ class ForumBotGUI(QMainWindow):
         self.process_threads_table.resizeColumnsToContents()
         self.process_threads_table.resizeRowsToContents()
         logging.info("Process Threads table populated successfully")
+
+        self.apply_cached_statuses_to_table()
+
+        self.apply_cached_statuses_to_table()
 
         if hasattr(self, "stats_widget"):
             try:

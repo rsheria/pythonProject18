@@ -88,6 +88,9 @@ class JDClient:
         self.lg_mode = "none"
 
     def add_links_to_linkgrabber(self, urls: list[str]) -> bool:
+        """
+        Send URLs (including keeplinks) to LinkGrabber with deepDecrypt=True.
+        """
         try:
             if not self.device:
                 logging.error("JD.add_links: device not ready")
@@ -103,10 +106,10 @@ class JDClient:
                 "deepDecrypt": True,
                 "checkAvailability": True,
             }
-            # NOTE: لازم List بالقيم مش dict بالمفاتيح
+            # NOTE: /linkgrabberv2/* expects a LIST of params
             self.device.action("/linkgrabberv2/addLinks", [payload])
             logging.debug("JD.add_links (raw): %d urls sent", len(urls))
-
+            # Try to trigger online check (safe if unsupported)
             try:
                 self.device.action("/linkgrabberv2/startOnlineCheck", [])
             except Exception:
@@ -117,6 +120,9 @@ class JDClient:
             return False
 
     def query_links(self) -> list[dict]:
+        """
+        Query LinkGrabber links after JD expands containers (keeplinks etc.).
+        """
         try:
             if not self.device:
                 logging.error("JD.query_links: device not ready")
@@ -132,58 +138,42 @@ class JDClient:
                 "url": True,
                 "contentURL": True,
                 "pluginURL": True,
+                "packageUUID": True,
+                "packageName": True,
+                "containerURL": True,
                 "startAt": 0,
-                "maxResults": -1
+                "maxResults": -1,
             }
-            # NOTE: List بالقيمة
-            resp = self.device.action("/linkgrabberv2/queryLinks", [q]) or []
-            out = []
+            try:
+                resp = self.device.action("/linkgrabberv2/queryLinks", [q]) or []
+            except Exception:
+                lg = self.lg or getattr(self.device, "linkgrabberv2", None) or getattr(self.device, "linkgrabber", None)
+                if lg and hasattr(lg, "query_links"):
+                    resp = lg.query_links(q) or []
+                else:
+                    raise
             for it in resp:
-                url = it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
-                it["url"] = url
-                out.append(it)
-            logging.debug("JD.query_links (raw): %d items", len(out))
-            return out
+                it["url"] = it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
+            logging.debug("JD.query_links (raw): %d items", len(resp))
+            return resp
         except Exception as e:
             logging.exception("JD.query_links: failed: %s", e)
             return []
 
     def remove_all_from_linkgrabber(self) -> bool:
-        try:
-            if not self.device:
-                logging.error("JD.clear: device not ready")
-                return False
-            items = self.query_links()
-            uuids = [i.get("uuid") for i in items if i.get("uuid")]
-            if not uuids:
-                logging.debug("JD.clear: nothing to remove")
-                return True
-
-            # NOTE: List بالقيمة
-            self.device.action("/linkgrabberv2/removeLinks", [uuids])
-            logging.debug("JD.clear: removed %d items", len(uuids))
-            return True
-        except Exception as e:
-            logging.exception("JD.clear: failed: %s", e)
-            return False
-
-    def remove_all_from_linkgrabber(self) -> bool:
         """
-        يمسح كل اللينكات (وأيضاً يحاول يمسح الباكيدجات) من الـ LinkGrabber.
-        بيفضّل IDs كأرقام، ويجرّب أكتر من فورمات للبارامز لضمان التوافق.
+        Clear LinkGrabber entries. Be tolerant with parameter forms and ID types.
         """
         try:
             if not self.device:
                 logging.error("JD.clear: device not ready")
                 return False
 
-            # 1) هات كل الروابط الحالية
             items = self.query_links()
             if not items:
                 logging.debug("JD.clear: nothing to remove (no items)")
                 return True
 
-            # 2) حضّر الـ IDs كأرقام (مش سترينج)
             link_ids = []
             for i in items:
                 uid = i.get("uuid")
@@ -192,43 +182,40 @@ class JDClient:
                 try:
                     link_ids.append(int(uid))
                 except Exception:
-                    # لو مش رقم، سيبه زي ما هو
                     link_ids.append(uid)
 
             if not link_ids:
                 logging.debug("JD.clear: nothing to remove (no ids)")
                 return True
 
-            # 3) جرّب أكثر من طريقة لمسح الروابط
-
-            # (أ) الشكل المباشر: مصفوفة IDs فقط
+            # Try multiple shapes for compatibility
             try:
                 self.device.action("/linkgrabberv2/removeLinks", [link_ids])
                 logging.debug("JD.clear: removed %d items via [linkIds]", len(link_ids))
                 return True
-            except Exception as e:
-                logging.debug("JD.clear: first attempt failed (%s), trying dict payload", e)
 
-            # (ب) شكل ديكت: {"linkIds":[...]}
+            except Exception:
+                pass
+
             try:
                 self.device.action("/linkgrabberv2/removeLinks", [{"linkIds": link_ids}])
-                logging.debug("JD.clear: removed %d items via {'linkIds': [...]} ", len(link_ids))
+                logging.debug("JD.clear: removed %d items via {'linkIds': [...]}" , len(link_ids))
                 return True
-            except Exception as e:
-                logging.debug("JD.clear: second attempt failed (%s), trying wrapper/fallback", e)
 
-            # (ج) لو فيه wrapper متاح (v1/v2)، خلّيه يحاول
+            except Exception:
+                pass
+
             try:
-                if hasattr(self, "lg") and self.lg and hasattr(self.lg, "remove_links"):
-                    self.lg.remove_links(link_ids)
+                lg = self.lg or getattr(self.device, "linkgrabberv2", None) or getattr(self.device, "linkgrabber", None)
+                if lg and hasattr(lg, "remove_links"):
+                    lg.remove_links(link_ids)
                     logging.debug("JD.clear: removed %d items via wrapper.remove_links", len(link_ids))
                     return True
-            except Exception as e:
-                logging.debug("JD.clear: wrapper attempt failed (%s)", e)
 
-            # 4) كمل تنظيف: امسح الباكيدجات لو لسة فيه بواقي
+            except Exception:
+                pass
+            # As a last resort, try removing packages
             try:
-                # استعلام الباكيدجات، ثم removePackages
                 pkg_query = {
                     "bytesTotal": True,
                     "status": True,
@@ -251,19 +238,15 @@ class JDClient:
                         pkg_ids.append(puid)
 
                 if pkg_ids:
-                    # جرّب الليست مباشرة
                     try:
                         self.device.action("/linkgrabberv2/removePackages", [pkg_ids])
                         logging.debug("JD.clear: removed %d packages via [pkgIds]", len(pkg_ids))
                         return True
                     except Exception:
-                        # جرّب ديكت
-                        try:
-                            self.device.action("/linkgrabberv2/removePackages", [{"packageIds": pkg_ids}])
-                            logging.debug("JD.clear: removed %d packages via {'packageIds': [...]} ", len(pkg_ids))
-                            return True
-                        except Exception:
-                            pass
+
+                        self.device.action("/linkgrabberv2/removePackages", [{"packageIds": pkg_ids}])
+                        logging.debug("JD.clear: removed %d packages via {'packageIds': [...]}" , len(pkg_ids))
+                        return True
             except Exception:
                 pass
 

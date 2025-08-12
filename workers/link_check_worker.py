@@ -14,7 +14,16 @@ class LinkCheckWorker(QThread):
         self.cancel_event = cancel_event
         self.poll_timeout = poll_timeout_sec
         self.poll_interval = poll_interval
+        self.host_priority = []
 
+    def set_host_priority(self, priority_list: list):
+        self.host_priority = []
+        for h in (priority_list or []):
+            if isinstance(h, str):
+                h = h.strip().lower()
+                if h.startswith("www."):
+                    h = h[4:]
+                self.host_priority.append(h)
     def run(self):
         results = []
 
@@ -72,18 +81,49 @@ class LinkCheckWorker(QThread):
             last_count = curr_count
             time.sleep(self.poll_interval)
 
-        items = self.jd.query_links()
+        items = self.jd.query_links() or []
+
+        def host_rank(h: str) -> int:
+            if not self.host_priority:
+                return 10**6
+            h = (h or "").lower()
+            if h.startswith("www."):
+                h = h[4:]
+            for idx, pref in enumerate(self.host_priority):
+                if pref in h:
+                    return idx
+            return 10**6
+
+        def availability_rank(a):
+            a = (a or "").upper()
+            return 0 if a == "ONLINE" else (1 if a == "OFFLINE" else 2)
+
+        # Group by packageUUID so keeplinks expansions are evaluated together
+        groups = {}
+
         for it in items:
-            availability = (it.get("availability") or "").upper()
+            key = it.get("packageUUID") or "all"
+            groups.setdefault(key, []).append(it)
+
+        results = []
+        for key, group in groups.items():
+            best = sorted(
+                group,
+                key=lambda it: (host_rank(it.get("host")), availability_rank(it.get("availability")))
+            )[0]
+            availability = (best.get("availability") or "").upper()
             if availability not in ("ONLINE", "OFFLINE"):
                 availability = "UNKNOWN"
-            name = it.get("name") or ""
-            host = it.get("host") or ""
-            size = it.get("size") or -1
-            link_url = it.get("url") or ""
-            row = {"url": link_url, "status": availability, "name": name, "host": host, "size": size}
-            self.progress.emit(row)
-            results.append(row)
+            d = {
+                "url": best.get("url") or best.get("contentURL") or best.get("pluginURL") or "",
+                "status": availability,
+                "name": best.get("name") or "",
+                "host": best.get("host") or "",
+                "size": best.get("size") or -1,
+                "package": best.get("packageName") or "",
+            }
+            self.progress.emit(d)
+            results.append(d)
 
         self.jd.remove_all_from_linkgrabber()
         self.finished.emit(results)
