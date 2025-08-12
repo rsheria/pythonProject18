@@ -1,4 +1,5 @@
 import time
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -722,20 +723,36 @@ class SettingsWidget(QWidget):
 
             # --- date filters ---
             df = settings_source.get(
-                "date_filters", [
-                    {"type": "relative", "value": 3, "unit": "days"}
-                ]
+                "date_filters",
+                [{"type": "relative", "value": 3, "unit": "days"}],
             )
+            if isinstance(df, str):
+                try:
+                    df = json.loads(df)
+                except Exception:
+                    df = [{"type": "relative", "value": 3, "unit": "days"}]
+            if isinstance(df, dict):
+                df = [df]
             if not isinstance(df, list):
                 df = [{"type": "relative", "value": 3, "unit": "days"}]
             self.date_filters = list(df)
             self._load_date_filters_into_list()
 
             raw_index = settings_source.get("links_template_index")
+            tmpl_index = 0
             if raw_index is None:
-                template_val = settings_source.get("links_template", LINK_TEMPLATE_PRESETS[0])
+                template_val = settings_source.get(
+                    "links_template", LINK_TEMPLATE_PRESETS[tmpl_index]
+                )
+                try:
+                    tmpl_index = LINK_TEMPLATE_PRESETS.index(template_val)
+                except ValueError:
+                    tmpl_index = 0
             else:
-                tmpl_index = int(raw_index)
+                try:
+                    tmpl_index = int(raw_index)
+                except (TypeError, ValueError):
+                    tmpl_index = 0
                 if not 0 <= tmpl_index < len(LINK_TEMPLATE_PRESETS):
                     tmpl_index = 0
                 template_val = settings_source.get(
