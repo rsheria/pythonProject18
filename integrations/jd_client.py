@@ -1,0 +1,61 @@
+from myjdapi import Myjdapi
+
+class JDClient:
+    def __init__(self, email, password, device_name):
+        self.api = Myjdapi()
+        self.email = email
+        self.password = password
+        self.device_name = device_name
+        self.device = None
+
+    def connect(self):
+        try:
+            self.api.connect(self.email, self.password)
+            self.api.update_devices()
+            self.device = self.api.get_device(self.device_name)
+            return self.device is not None
+        except Exception:
+            return False
+
+    def add_links_to_linkgrabber(self, urls):
+        if not urls:
+            return True
+        try:
+            self.device.linkgrabberv2.add_links({
+                "autostart": False,
+                "links": "\n".join(urls),
+                "deepDecrypt": True
+            })
+            return True
+        except Exception:
+            return False
+
+    def query_links(self):
+        try:
+            q = {
+                "packageUUIDs": None,
+                "linkUUIDs": None,
+                "startAt": 0,
+                "maxResults": -1,
+                "bytesTotal": True,
+                "availableOfflineCount": True,
+                "availableOnlineCount": True,
+                "status": True,
+                "host": True,
+                "name": True,
+                "availability": True,
+                "size": True
+            }
+            return self.device.linkgrabberv2.query_links(q) or []
+        except Exception:
+            return []
+
+    def remove_all_from_linkgrabber(self):
+        try:
+            links = self.query_links()
+            uuids = [l.get("uuid") for l in links if l.get("uuid")]
+            if uuids:
+                self.device.linkgrabberv2.remove_links(uuids)
+            return True
+        except Exception:
+            return False

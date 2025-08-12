@@ -76,7 +76,9 @@ from models.operation_status import OperationStatus, OpStage, OpType
 from utils import sanitize_filename
 from utils.paths import get_data_folder
 from workers.login_thread import LoginThread
-
+from integrations.jd_client import JDClient
+from workers.link_check_worker import LinkCheckWorker
+from threading import Event
 from .advanced_bbcode_editor import AdvancedBBCodeEditor
 # Import modern UI components
 from .components import (ModernCard, ModernContentContainer, ModernScrollArea,
@@ -225,7 +227,7 @@ class ForumBotGUI(QMainWindow):
     ARCHIVE_EXTENSIONS = ('.rar', '.zip')
     WINDOWS_FILE_EXTENSIONS = ('.pdf', '.epub', '.docx', '.xlsx', '.pptx', '.txt')  # Add more as needed
     OTHER_ENV_FILE_EXTENSIONS = ('.dmg', '.deb', '.apk', '.exe', '.bin')  # Add more as needed
-
+    LINK_STATUS_COL = 8
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -272,6 +274,9 @@ class ForumBotGUI(QMainWindow):
         self.auto_thread_pool = QThreadPool()
         # Flag to auto retry uploads during auto process
         self.auto_retry_mode = False
+        # Link check worker infrastructure
+        self.link_check_cancel_event = Event()
+        self.link_check_worker = None
 
         # Initialize Rapidgator token from config
         self.bot.rapidgator_token = self.config.get('rapidgator_api_token', '')
@@ -3045,12 +3050,21 @@ class ForumBotGUI(QMainWindow):
         self.cancel_auto_button.clicked.connect(self.cancel_auto_process)
         actions_layout.addWidget(self.cancel_auto_button)
 
+        # Link check buttons
+        self.btn_check_links = QPushButton("Check Links")
+        self.btn_check_links.clicked.connect(self.on_check_links_clicked)
+        actions_layout.addWidget(self.btn_check_links)
+
+        self.btn_cancel_check = QPushButton("Cancel Link Check")
+        self.btn_cancel_check.clicked.connect(self.on_cancel_check_clicked)
+        actions_layout.addWidget(self.btn_cancel_check)
+
         threads_management_layout.addWidget(actions_bar)
 
         # --- Threads Table ----------------------------------------------------
         self.process_threads_table = QTableWidget()
         self.process_threads_table.setAlternatingRowColors(True)
-        self.process_threads_table.setColumnCount(8)
+        self.process_threads_table.setColumnCount(9)
         self.process_threads_table.setHorizontalHeaderLabels([
             "Thread Title",
             "Category",
@@ -3060,6 +3074,7 @@ class ForumBotGUI(QMainWindow):
             "Keeplinks Link",
             "Password",
             "Author",
+            "Status",
         ])
 
         # Table appearance & behavior
@@ -3076,11 +3091,11 @@ class ForumBotGUI(QMainWindow):
         header.setFixedHeight(30)
 
         # Column widths and resize modes
-        widths = {0: 300, 1: 150, 2: 100, 3: 200, 4: 200, 5: 200, 6: 120, 7: 150}
+        widths = {0: 300, 1: 150, 2: 100, 3: 200, 4: 200, 5: 200, 6: 120, 7: 150, 8: 100}
         for col, w in widths.items():
             self.process_threads_table.setColumnWidth(col, w)
         header.setSectionResizeMode(0, QHeaderView.Stretch)
-        for col in (1, 2, 3, 4, 5, 6, 7):
+        for col in (1, 2, 3, 4, 5, 6, 7, 8):
             header.setSectionResizeMode(col, QHeaderView.Interactive)
 
         # Sorting & delegate & context menu
@@ -3175,6 +3190,99 @@ class ForumBotGUI(QMainWindow):
             # C) Show row only if both status and text match
             table.setRowHidden(row, not (status_ok and text_ok))
 
+    def collect_all_candidate_urls_for_selected_threads(self) -> list:
+        urls = []
+        rows = {index.row() for index in self.process_threads_table.selectedIndexes()}
+        for row in rows:
+            for col in (3, 4):
+                item = self.process_threads_table.item(row, col)
+                if not item:
+                    continue
+                for url in item.text().splitlines():
+                    url = url.strip()
+                    if url and not any(bad in url.lower() for bad in ("keeplinks", "swistransfer", "forum", "img", "folder")):
+                        urls.append(url)
+        return urls
+
+    def on_check_links_clicked(self):
+        if self.link_check_worker and self.link_check_worker.isRunning():
+            return
+        self.link_check_cancel_event.clear()
+        urls = self.collect_all_candidate_urls_for_selected_threads()
+        if not urls:
+            self.statusBar().showMessage("لا توجد روابط للفحص.")
+            return
+        jd_client = JDClient(
+            email=self.config.get('myjd_email', ''),
+            password=self.config.get('myjd_password', ''),
+            device_name=self.config.get('myjd_device', '')
+        )
+        self.link_check_worker = LinkCheckWorker(jd_client, urls, self.link_check_cancel_event)
+        self.link_check_worker.progress.connect(self._on_link_progress)
+        self.link_check_worker.finished.connect(self._on_link_finished)
+        self.link_check_worker.error.connect(self._on_link_error)
+        ui_notifier.suppress(True)
+        self.statusBar().showMessage(f"بدء فحص {len(urls)} رابط…")
+        self.link_check_worker.start()
+
+    def on_cancel_check_clicked(self):
+        if self.link_check_worker and self.link_check_worker.isRunning():
+            self.link_check_cancel_event.set()
+            self.statusBar().showMessage("تم طلب إلغاء فحص الروابط…")
+
+    def _on_link_progress(self, info: dict):
+        status = info.get("status", "UNKNOWN")
+        color = {
+            "ONLINE": QColor("#1e9e36"),
+            "OFFLINE": QColor("#c62828"),
+        }.get(status, QColor("#9E9E9E"))
+        row = self.find_row_by_name_host(info.get("name"), info.get("host"))
+        if row is not None:
+            self.set_row_status(row, status, color, tooltip=self._format_tooltip(info))
+
+    def _on_link_finished(self, results: list):
+        ui_notifier.suppress(False)
+        online = sum(1 for r in results if r.get("status") == "ONLINE")
+        offline = sum(1 for r in results if r.get("status") == "OFFLINE")
+        unknown = sum(1 for r in results if r.get("status") == "UNKNOWN")
+        self.statusBar().showMessage(f"انتهى الفحص: Online={online}, Offline={offline}, Unknown={unknown}")
+        self.link_check_worker = None
+
+    def _on_link_error(self, msg: str):
+        ui_notifier.suppress(False)
+        self.statusBar().showMessage(msg)
+        self.link_check_worker = None
+
+    def find_row_by_name_host(self, name, host):
+        table = self.process_threads_table
+        for row in range(table.rowCount()):
+            for col in (3, 4):
+                item = table.item(row, col)
+                if item and host and host in item.text():
+                    return row
+        return None
+
+    def set_row_status(self, row, status, color, tooltip=""):
+        item = self.process_threads_table.item(row, self.LINK_STATUS_COL)
+        if item is None:
+            item = QTableWidgetItem()
+            self.process_threads_table.setItem(row, self.LINK_STATUS_COL, item)
+        item.setText(status)
+        item.setBackground(color)
+        item.setToolTip(tooltip)
+
+    def _format_tooltip(self, info):
+        name = info.get("name") or ""
+        host = info.get("host") or ""
+        size = info.get("size") or 0
+        if size and size > 0:
+            from math import log2
+            units = ["B", "KB", "MB", "GB", "TB"]
+            i = min(int(log2(size)/10), len(units)-1)
+            human = f"{size/(1024**i):.1f} {units[i]}"
+        else:
+            human = "N/A"
+        return f"{name}\nHost: {host}\nSize: {human}"
     def on_bbcode_content_changed(self, content):
         """Handle BBCode content changes and save to data structure"""
         try:
@@ -5691,11 +5799,11 @@ class ForumBotGUI(QMainWindow):
         # Sort threads by date if available (descending)
         flat_threads.sort(key=lambda x: x['thread_date'], reverse=True)
 
-        self.process_threads_table.setColumnCount(8)
+        self.process_threads_table.setColumnCount(9)
         self.process_threads_table.setHorizontalHeaderLabels([
             "Thread Title", "Category", "Thread ID",
             "Rapidgator Links", "RG Backup Link", "Keeplinks Link",
-            "Password", "Author"
+            "Password", "Author", "Status"
         ])
 
         for thread in flat_threads:
@@ -5858,6 +5966,11 @@ class ForumBotGUI(QMainWindow):
             author_item.setData(Qt.UserRole, status_str)
             author_item.setData(Qt.UserRole + 1, status_class)
             self.process_threads_table.setItem(row_position, 7, author_item)
+
+            # Status column placeholder
+            status_item = QTableWidgetItem("")
+            self.process_threads_table.setItem(row_position, 8, status_item)
+
 
         self.process_threads_table.resizeColumnsToContents()
         self.process_threads_table.resizeRowsToContents()

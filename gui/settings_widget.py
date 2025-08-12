@@ -178,6 +178,27 @@ class SettingsWidget(QWidget):
         winrar_layout.addWidget(self.winrar_exe_label)
         general_layout.addWidget(winrar_group)
 
+        # My.JDownloader credentials
+        jd_group = QGroupBox("My.JDownloader")
+        jd_layout = QVBoxLayout(jd_group)
+        jd_email_row = QHBoxLayout()
+        jd_email_row.addWidget(QLabel("Email:"))
+        self.myjd_email_input = QLineEdit()
+        jd_email_row.addWidget(self.myjd_email_input)
+        jd_layout.addLayout(jd_email_row)
+        jd_pass_row = QHBoxLayout()
+        jd_pass_row.addWidget(QLabel("Password:"))
+        self.myjd_password_input = QLineEdit()
+        self.myjd_password_input.setEchoMode(QLineEdit.Password)
+        jd_pass_row.addWidget(self.myjd_password_input)
+        jd_layout.addLayout(jd_pass_row)
+        jd_dev_row = QHBoxLayout()
+        jd_dev_row.addWidget(QLabel("Device Name:"))
+        self.myjd_device_input = QLineEdit()
+        jd_dev_row.addWidget(self.myjd_device_input)
+        jd_layout.addLayout(jd_dev_row)
+        general_layout.addWidget(jd_group)
+
         # Rapidgator credentials + token
         rg_group = QGroupBox("Rapidgator")
         rg_layout = QVBoxLayout(rg_group)
@@ -734,6 +755,16 @@ class SettingsWidget(QWidget):
                 bool(settings_source.get("use_backup_rg", False)) if current_user else False
             )
 
+            # --- My.JDownloader credentials ---
+            if current_user:
+                self.myjd_email_input.setText(settings_source.get("myjd_email", ""))
+                self.myjd_password_input.setText(settings_source.get("myjd_password", ""))
+                self.myjd_device_input.setText(settings_source.get("myjd_device", ""))
+            else:
+                self.myjd_email_input.setText(self.config.get("myjd_email", ""))
+                self.myjd_password_input.setText(self.config.get("myjd_password", ""))
+                self.myjd_device_input.setText(self.config.get("myjd_device", ""))
+
             # --- date filters ---
             df = settings_source.get(
                 "date_filters",
@@ -867,6 +898,10 @@ class SettingsWidget(QWidget):
             new_to = self.page_to_spin.value()
 
             new_rapidgator_token = self.rapidgator_token_input.text().strip()
+
+            new_myjd_email = self.myjd_email_input.text().strip()
+            new_myjd_password = self.myjd_password_input.text().strip()
+            new_myjd_device = self.myjd_device_input.text().strip()
             
             # Validate page range
             if new_from > new_to:
