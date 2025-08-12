@@ -15,6 +15,7 @@ from workers.megathreads_worker import MegaThreadsWorkerThread
 from workers.upload_worker import UploadWorker
 from workers.worker_thread import WorkerThread
 from workers.proceed_template_worker import ProceedTemplateWorker
+from ui_notifier import ui_notifier, suppress_popups
 
 from .themes import style_manager, theme_manager
 logging.basicConfig(level=logging.INFO, filename="forum_bot.log",
@@ -3399,11 +3400,9 @@ class ForumBotGUI(QMainWindow):
         """
         # 🔒 Prevent concurrent download sessions - CRITICAL FOR STABILITY
         if hasattr(self, '_download_in_progress') and self._download_in_progress:
-            QMessageBox.warning(
-                self, 
-                "Download In Progress", 
-                "⚠️ Another download is already running!\n\n"
-                "Please wait for the current download to complete or cancel it first."
+            ui_notifier.warn(
+                "Download In Progress",
+                "⚠️ Another download is already running!\n\nPlease wait for the current download to complete or cancel it first.",
             )
             return
             
@@ -3473,10 +3472,9 @@ class ForumBotGUI(QMainWindow):
         except Exception as e:
             # 😱 Critical error during download setup
             logging.error(f"⚠️ Critical error in download setup: {e}")
-            QMessageBox.critical(
-                self,
-                "Download Setup Error", 
-                f"Failed to start download operation:\n{str(e)}"
+            ui_notifier.error(
+                "Download Setup Error",
+                f"Failed to start download operation:\n{str(e)}",
             )
             # 🔓 Release lock on critical error
             self._download_in_progress = False
@@ -3503,7 +3501,7 @@ class ForumBotGUI(QMainWindow):
         """🔒 Handle download completion and release session lock"""
 
         if success:
-            QMessageBox.information(self, "Download Complete", message)
+            ui_notifier.info("Download Complete", message)
             
             # 🎯 Update thread status for completed downloads
             if hasattr(self, '_current_download_threads') and self._current_download_threads:
@@ -3516,7 +3514,7 @@ class ForumBotGUI(QMainWindow):
                 self.populate_process_threads_table(self.process_threads)
                 logging.info("🔄 Process threads table refreshed to show download status")
         else:
-            QMessageBox.warning(self, "Download Status", message)
+            ui_notifier.warn("Download Status", message)
 
         self.statusBar().showMessage(message)
         if self.download_worker:
@@ -3589,7 +3587,7 @@ class ForumBotGUI(QMainWindow):
         self.upload_progress_bar.setVisible(False)  # Hide the progress bar
         self.upload_button.setEnabled(True)  # Re-enable the upload button
         if success:
-            QMessageBox.information(self, "Upload Complete", message)
+            ui_notifier.info("Upload Complete", message)
             logging.info(message)
 
             # 🎯 Update thread status for completed upload
@@ -3609,7 +3607,7 @@ class ForumBotGUI(QMainWindow):
             self.populate_process_threads_table(self.process_threads)
             logging.info("🔄 Process threads table refreshed to show upload status")
         else:
-            QMessageBox.critical(self, "Upload Failed", message)
+            ui_notifier.error("Upload Failed", message)
             logging.error(message)
 
 # ... (rest of the code remains the same)
@@ -3717,7 +3715,7 @@ class ForumBotGUI(QMainWindow):
             # الحصول على الصفوف المحددة في جدول Process Threads
             selected_items = self.process_threads_table.selectedItems()
             if not selected_items:
-                QMessageBox.warning(self, "تحذير", "يرجى اختيار موضوع واحد على الأقل للرفع.")
+                ui_notifier.warn("تحذير", "يرجى اختيار موضوع واحد على الأقل للرفع.")
                 return
             selected_rows = sorted(set(item.row() for item in selected_items))
             self.pending_uploads = len(selected_rows)
@@ -3735,16 +3733,17 @@ class ForumBotGUI(QMainWindow):
 
                 # التحقق من وجود المجلد
                 if not os.path.isdir(thread_dir):
-                    QMessageBox.warning(self, "خطأ", f"لم يتم العثور على مجلد للموضوع '{thread_title}'.")
+                    ui_notifier.warn("خطأ", f"لم يتم العثور على مجلد للموضوع '{thread_title}'.")
                     continue
 
                 # التحقق من وجود ملفات داخل المجلد
                 files_in_dir = [f for f in os.listdir(thread_dir)
                                 if os.path.isfile(os.path.join(thread_dir, f))]
                 if not files_in_dir:
-                    QMessageBox.warning(
-                        self, "خطأ",
-                        f"لا توجد ملفات في المجلد للموضوع '{thread_title}'."
+                    ui_notifier.warn(
+                        "خطأ",
+                        f"لا توجد ملفات في المجلد للموضوع '{thread_title}'.",
+
                     )
                     continue
 
@@ -3778,7 +3777,7 @@ class ForumBotGUI(QMainWindow):
 
         except Exception as e:
             logging.error(f"Error starting upload: {e}", exc_info=True)
-            QMessageBox.critical(self, "خطأ", f"فشل بدء الرفع: {e}")
+            ui_notifier.error("خطأ", f"فشل بدء الرفع: {e}")
             self.process_upload_button.setEnabled(True)
 
     def handle_upload_complete(self, row, urls_dict):
@@ -3877,7 +3876,7 @@ class ForumBotGUI(QMainWindow):
                 logging.warning(f"Thread '{thread_title}' not found in category '{category_name}' after upload.")
         except Exception as e:
             logging.error(f"Error in handle_upload_complete: {e}", exc_info=True)
-            QMessageBox.critical(self, "Upload Error", str(e))
+            ui_notifier.error("Upload Error", str(e))
 
     def _on_upload_worker_complete(self):
         """Track completed upload workers and close dialog when done."""
@@ -3961,7 +3960,7 @@ class ForumBotGUI(QMainWindow):
         """Start Auto‑Process pipeline for selected threads."""
         selected_rows = sorted(set(index.row() for index in self.process_threads_table.selectedIndexes()))
         if not selected_rows:
-            QMessageBox.warning(self, "Warning", "Please select at least one thread.")
+            ui_notifier.warn("Warning", "Please select at least one thread.")
             return
 
         for row in selected_rows:
@@ -3993,18 +3992,26 @@ class ForumBotGUI(QMainWindow):
         """Run auto process using the same logic as manual buttons."""
         selected_rows = sorted(set(index.row() for index in self.process_threads_table.selectedIndexes()))
         if not selected_rows:
-            QMessageBox.warning(self, "Warning", "Please select at least one thread.")
+            ui_notifier.warn("Warning", "Please select at least one thread.")
             return
         self._auto_process_queue = list(selected_rows)
         # enable automatic retry for uploads while this queue is processed
         self.auto_retry_mode = True
         if hasattr(self, "cancel_auto_button"):
             self.cancel_auto_button.setEnabled(True)
-        self._process_next_auto_thread()
+        def _sink(level, title, text):
+            self.statusBar().showMessage(f"[{level}] {title}: {text}")
+
+        ui_notifier.set_sink(_sink)
+        try:
+            with suppress_popups():
+                self._process_next_auto_thread()
+        finally:
+            ui_notifier.set_sink(None)
 
     def _process_next_auto_thread(self):
         if not getattr(self, "_auto_process_queue", []):
-            QMessageBox.information(self, "Auto Process", "All threads processed.")
+            ui_notifier.info("Auto Process", "All threads processed.")
             # disable auto retry when processing queue is empty
             self.auto_retry_mode = False
             if hasattr(self, "cancel_auto_button"):
@@ -4464,10 +4471,12 @@ class ForumBotGUI(QMainWindow):
                         )
 
                 # Show success message
-                QMessageBox.information(self, "Upload Complete",
-                                        f"Successfully uploaded {len(results)} threads\n{message}")
+                ui_notifier.info(
+                    "Upload Complete",
+                    f"Successfully uploaded {len(results)} threads\n{message}",
+                )
             else:
-                QMessageBox.warning(self, "Upload Status", message)
+                ui_notifier.warn("Upload Status", message)
 
             self.statusBar().showMessage(message)
 
@@ -4476,7 +4485,7 @@ class ForumBotGUI(QMainWindow):
 
         except Exception as e:
             logging.error(f"Error handling upload completion: {str(e)}")
-            QMessageBox.critical(self, "Error", f"Error completing upload: {str(e)}")
+            ui_notifier.error("Error", f"Error completing upload: {str(e)}")
             self.process_upload_button.setEnabled(True)
 
     def cleanup_upload_columns(self):
@@ -4593,22 +4602,20 @@ class ForumBotGUI(QMainWindow):
                     all_uploaded_urls,
                     keeplinks_url,
                 )
-                QMessageBox.information(
-                    self,
+                ui_notifier.info(
                     "Upload Complete",
                     f"Successfully uploaded files for thread '{thread_title}'"
                 )
             else:
-                QMessageBox.warning(
-                    self,
+                ui_notifier.warn(
                     "Upload Failed",
-                    f"No files were successfully uploaded for thread '{thread_title}'"
+                    f"No files were successfully uploaded for thread '{thread_title}'",
                 )
 
         except Exception as e:
             error_msg = f"Error uploading files: {str(e)}"
             logging.error(error_msg, exc_info=True)
-            QMessageBox.critical(self, "Upload Error", error_msg)
+            ui_notifier.error("Upload Error", error_msg)
 
     def on_upload_row_success(self, row: int):
         """Color the row BLUE on upload success."""
@@ -7826,12 +7833,12 @@ class ForumBotGUI(QMainWindow):
     def on_proceed_template_clicked(self):
         row = self.process_threads_table.currentRow()
         if row < 0:
-            QMessageBox.information(self, "Proceed Template", "Please select a thread.")
+            ui_notifier.info("Proceed Template", "Please select a thread.")
             return
         title_item = self.process_threads_table.item(row, 0)
         category_item = self.process_threads_table.item(row, 1)
         if not title_item or not category_item:
-            QMessageBox.information(self, "Proceed Template", "Invalid selection.")
+            ui_notifier.info("Proceed Template", "Invalid selection.")
             return
         title = title_item.text()
         category = category_item.text()
@@ -7846,7 +7853,7 @@ class ForumBotGUI(QMainWindow):
             return
         raw_bbcode = thread.get("bbcode_original") or thread.get("bbcode_content", "")
         if not raw_bbcode:
-            QMessageBox.information(self, "Proceed Template", "No BBCode available.")
+            ui_notifier.info("Proceed Template", "No BBCode available.")
             return
 
         links_block = self.build_links_block(category, title)
@@ -7888,14 +7895,14 @@ class ForumBotGUI(QMainWindow):
     def on_proceed_template_finished(self, row, thread, category, title, bbcode_filled):
         """Handle completion of the proceed template worker."""
         if not bbcode_filled:
-            QMessageBox.information(self, "Proceed Template", "Template processing failed.")
+            ui_notifier.info("Proceed Template", "Template processing failed.")
             return
 
         self.process_bbcode_editor.set_text(bbcode_filled)
         thread["bbcode_content"] = bbcode_filled
         self.current_post_data = thread
         self.save_process_threads_data()
-        QMessageBox.information(self, "Proceed Template", "Template applied & image uploaded")
+        ui_notifier.info("Proceed Template", "Template applied & image uploaded")
 
         logging.info(f"Proceed Template updated: {category}/{title}, len={len(bbcode_filled)}")
         status_item = self.process_threads_table.item(row, 0)
