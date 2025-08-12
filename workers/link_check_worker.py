@@ -29,6 +29,9 @@ class LinkCheckWorker(QThread):
             self.finished.emit(results)
             return
 
+        self.jd.remove_all_from_linkgrabber()
+
+
         if not self.jd.add_links_to_linkgrabber(self.urls):
             self.error.emit("Failed to add links to LinkGrabber.")
             self.finished.emit(results)

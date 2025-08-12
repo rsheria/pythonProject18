@@ -76,6 +76,8 @@ class JDClient:
 
     def remove_all_from_linkgrabber(self):
         try:
+            if not self.device:
+                return False
             links = self.query_links()
             uuids = [l.get("uuid") for l in links if l.get("uuid")]
             if uuids:
