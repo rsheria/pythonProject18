@@ -3241,7 +3241,9 @@ class ForumBotGUI(QMainWindow):
             "ONLINE": QColor("#1e9e36"),
             "OFFLINE": QColor("#c62828"),
         }.get(status, QColor("#9E9E9E"))
-        row = self.find_row_by_name_host(info.get("name"), info.get("host"))
+        row = self.find_row_by_url(info.get("url"))
+        if row is None:
+            row = self.find_row_by_name_host(info.get("name"), info.get("host"))
         if row is not None:
             self.set_row_status(row, status, color, tooltip=self._format_tooltip(info))
 
@@ -3258,6 +3260,14 @@ class ForumBotGUI(QMainWindow):
         self.statusBar().showMessage(msg)
         self.link_check_worker = None
 
+    def find_row_by_url(self, url):
+        table = self.process_threads_table
+        for row in range(table.rowCount()):
+            for col in (3, 4):
+                item = table.item(row, col)
+                if item and url and item.text() == url:
+                    return row
+        return None
     def find_row_by_name_host(self, name, host):
         table = self.process_threads_table
         for row in range(table.rowCount()):
