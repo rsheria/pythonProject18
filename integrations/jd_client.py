@@ -61,9 +61,15 @@ class JDClient:
                 "host": True,
                 "name": True,
                 "availability": True,
-                "size": True
+                "size": True,
+                "url": True,
+                "contentURL": True,
+                "pluginURL": True
             }
-            return self.device.linkgrabberv2.query_links(q) or []
+            items = self.device.linkgrabberv2.query_links(q) or []
+            for it in items:
+                it["url"] = it.get("url") or it.get("contentURL") or it.get("pluginURL")
+            return items
         except Exception:
             return []
 

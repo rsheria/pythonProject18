@@ -55,7 +55,8 @@ class LinkCheckWorker(QThread):
             name = it.get("name") or ""
             host = it.get("host") or ""
             size = it.get("size") or -1
-            d = {"url": "", "status": availability, "name": name, "host": host, "size": size}
+            url = it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
+            d = {"url": url, "status": availability, "name": name, "host": host, "size": size}
             self.progress.emit(d)
             results.append(d)
 
