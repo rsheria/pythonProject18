@@ -233,6 +233,7 @@ class ForumBotGUI(QMainWindow):
         super().__init__()
         self.config = config
         self.user_manager = get_user_manager()
+        self.log = logging.getLogger(__name__)
         # Ensure no previously restored session leaks into the new UI
         if self.user_manager.get_current_user():
             logging.info(
@@ -3319,36 +3320,57 @@ class ForumBotGUI(QMainWindow):
     def _on_link_progress(self, rowdict: dict):
         gui_url = (rowdict.get("gui_url") or rowdict.get("url") or "").strip()
         final_url = (rowdict.get("final_url") or "").strip()
+        status = (rowdict.get("status") or "OFFLINE").upper()
+        replace = bool(rowdict.get("replace") and final_url)
 
         row_idx = self._find_row_by_url(gui_url)
         if row_idx < 0:
+
+            self.log.debug("Row not found for URL: %s", gui_url)
+            sample = []
+            rows = self.process_threads_table.rowCount()
+            for r in range(min(rows, 3)):
+                row_urls = []
+                for c in (3, 4, 5):
+                    it = self.process_threads_table.item(r, c)
+                    if it:
+                        row_urls.append((it.text() or "").strip())
+                if row_urls:
+                    sample.append(row_urls)
+            if sample:
+                self.log.debug("Sample table URLs: %s", sample)
             return
-        if rowdict.get("replace") and final_url:
-            self._replace_url_in_row(row_idx, gui_url, final_url)
-        status = rowdict.get("status", "UNKNOWN")
-        self.update_status_cell(row_idx, status, tooltip=self._format_tooltip(rowdict))
+        else:
+            self.log.debug("Row %d found for %s", row_idx, gui_url)
 
-        try:
-            import time
-            entry = {
-                "status": rowdict.get("status"),
-                "host": rowdict.get("host"),
-                "name": rowdict.get("name"),
-                "size": rowdict.get("size"),
-                "final_url": final_url or gui_url,
-                "ts": int(time.time()),
-            }
-
-            if not hasattr(self, "_link_check_cache") or self._link_check_cache is None:
+            cache = getattr(self, "_link_check_cache", None)
+            if cache is None:
                 self._load_link_check_cache()
+                cache = getattr(self, "_link_check_cache", {})
 
-            cache = self._link_check_cache
-            old = cache.pop(gui_url, {})
-            old.update(entry)
-            cache[final_url or gui_url] = old
-            self._save_link_check_cache()
-        except Exception:
-            pass
+        if replace:
+            self._replace_url_in_row(row_idx, gui_url, final_url)
+            self.update_status_cell(row_idx, status, tooltip=self._format_tooltip(rowdict))
+            model = self.process_threads_table.model()
+            sidx = model.index(row_idx, self.LINK_STATUS_COL)
+            model.dataChanged.emit(sidx, sidx, [Qt.DisplayRole])
+
+            old_key = gui_url
+            new_key = final_url
+            data = cache.get(old_key, {})
+            if data:
+                cache.pop(old_key, None)
+                cache[new_key] = data
+            cache.setdefault(new_key, {})["status"] = status
+            self.user_manager.save_user_data(self.LINK_STATUS_FILE, cache)
+            self.log.debug("REPLACED in GUI: %s -> %s (%s)", gui_url, final_url, status)
+        else:
+            self.update_status_cell(row_idx, status, tooltip=self._format_tooltip(rowdict))
+            model = self.process_threads_table.model()
+            sidx = model.index(row_idx, self.LINK_STATUS_COL)
+            model.dataChanged.emit(sidx, sidx, [Qt.DisplayRole])
+            cache.setdefault(gui_url, {})["status"] = status
+            self.user_manager.save_user_data(self.LINK_STATUS_FILE, cache)
 
     def _on_link_finished(self, results: list):
         ui_notifier.suppress(False)
@@ -3451,11 +3473,31 @@ class ForumBotGUI(QMainWindow):
         return -1
 
     def _find_row_by_url(self, url: str) -> int:
-        return self._find_row_for_url([url])
+        if not url:
+            return -1
+        table = self.process_threads_table
+        target = url.strip()
+        rows = table.rowCount()
+        cols = table.columnCount()
+        for r in range(rows):
+            for c in range(cols):
+                item = table.item(r, c)
+                if not item:
+                    continue
+                cell = (item.text() or "").strip()
+                if cell == target:
+                    return r
+                for role in (Qt.UserRole, Qt.UserRole + 1, Qt.UserRole + 2):
+                    data = item.data(role)
+                    if isinstance(data, str) and data.strip() == target:
+                        return r
+        return -1
 
-    def _replace_url_in_row(self, row_idx: int, old_url: str, new_url: str):
+    def _replace_url_in_row(self, row_idx: int, old_url: str, new_url: str) -> list:
         table = self.process_threads_table
         cols = table.columnCount()
+        changed = []
+        model = table.model()
         for c in range(cols):
             item = table.item(row_idx, c)
             if not item:
@@ -3463,6 +3505,10 @@ class ForumBotGUI(QMainWindow):
             text = item.text() or ""
             if old_url in text:
                 item.setText(text.replace(old_url, new_url))
+                idx = model.index(row_idx, c)
+                model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
+                changed.append(c)
+        return changed
     def find_row_by_url(self, url):
         table = self.process_threads_table
         for row in range(table.rowCount()):

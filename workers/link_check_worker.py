@@ -113,7 +113,7 @@ class LinkCheckWorker(QThread):
                 or ""
             )
             groups.setdefault(key, []).append(it)
-
+        log = logging.getLogger(__name__)
         results = []
         for key, group in groups.items():
             priority_list = self.host_priority or default_priority
@@ -126,22 +126,39 @@ class LinkCheckWorker(QThread):
             if best is None:
                 best = group[0]
             gui_url = key
-            final_url = best.get("url") or best.get("contentURL") or best.get("pluginURL") or ""
+            final_url = (
+                best.get("url")
+                or best.get("contentURL")
+                or best.get("pluginURL")
+                or None
+            )
             availability = (best.get("availability") or "").upper()
             if availability not in ("ONLINE", "OFFLINE"):
                 availability = "UNKNOWN"
-            d = {
+                replace = bool(final_url and final_url != gui_url)
+
+                payload = {
+                "type": "progress",
                 "gui_url": gui_url,
+                "url": gui_url,
                 "final_url": final_url,
-                "status": availability,
-                "name": best.get("name") or "",
-                "host": best.get("host") or "",
-                "size": best.get("size") or -1,
-                "replace": True,
+                "status": availability if availability in ("ONLINE", "OFFLINE") else "OFFLINE",
+                "replace": replace,
             }
-            d["url"] = d["gui_url"]
-            self.progress.emit(d)
-            results.append(d)
+            alias = best.get("name") or best.get("host")
+            if alias:
+                payload["alias"] = alias
+
+            if replace:
+                log.debug(
+                    "EMIT replace: gui_url=%s -> final_url=%s status=%s",
+                    gui_url,
+                    final_url,
+                    payload["status"],
+                )
+
+            self.progress.emit(payload)
+            results.append(payload)
 
         self.jd.remove_all_from_linkgrabber()
         self.finished.emit(results)
