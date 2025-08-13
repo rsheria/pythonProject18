@@ -3407,31 +3407,37 @@ class ForumBotGUI(QMainWindow):
         return ""
 
     def rebuild_row_index(self):
+        """Rebuild lookup dictionaries for all URLs in the table."""
+        import re
         self.by_raw_url = {}
         self.by_canonical = {}
         self.by_host_id = {}
         rows = self.process_threads_table.rowCount()
+        cols = self.process_threads_table.columnCount()
         for r in range(rows):
-            cell = self.process_threads_table.item(r, 0)
-            if not cell:
-                continue
-            links = [u.strip() for u in (cell.text() or "").splitlines() if u.strip()]
-            for url in links:
-                canon = self.canonical_url(url)
-                hid = self.host_id_key(url)
-                self.by_raw_url[url] = r
-                if canon:
-                    self.by_canonical[canon] = r
-                if hid:
-                    self.by_host_id[hid] = r
-                self.log.debug(
-                    "Index add | raw=%s canonical=%s host-id=%s -> row=%s",
-                    url,
-                    canon,
-                    hid,
-                    r,
-                )
-
+            for c in range(cols):
+                cell = self.process_threads_table.item(r, c)
+                if not cell:
+                    continue
+                text = (cell.text() or "").strip()
+                if not text:
+                    continue
+                for m in url_re.findall(text):
+                    url = m.strip().strip('.,);]')
+                    canon = self.canonical_url(url)
+                    hid = self.host_id_key(url)
+                    self.by_raw_url[url] = r
+                    if canon:
+                        self.by_canonical[canon] = r
+                    if hid:
+                        self.by_host_id[hid] = r
+                    self.log.debug(
+                        "Index add | raw=%s canonical=%s host-id=%s -> row=%s",
+                        url,
+                        canon,
+                        hid,
+                        r,
+                    )
     def find_row(self, url: str):
         if not url:
             return None
@@ -3447,24 +3453,32 @@ class ForumBotGUI(QMainWindow):
             return row
 
         sample = []
-        rows = self.process_threads_table.rowCount()
-        for r in range(rows):
-            cell = self.process_threads_table.item(r, 0)
-            if not cell:
-                continue
-            links = [u.strip() for u in (cell.text() or "").splitlines() if u.strip()]
-            for raw in links:
-                c = self.canonical_url(raw)
-                h = self.host_id_key(raw)
-                sample.append([raw, c])
-                if c == canon or h == hid:
-                    self.by_raw_url[raw] = r
-                    if c:
-                        self.by_canonical[c] = r
-                    if h:
-                        self.by_host_id[h] = r
-                    return r
+        import re
 
+        url_re = re.compile(r"https?://\S+", re.IGNORECASE)
+        rows = self.process_threads_table.rowCount()
+        cols = self.process_threads_table.columnCount()
+        for r in range(rows):
+
+            for c in range(cols):
+                cell = self.process_threads_table.item(r, c)
+                if not cell:
+                    continue
+                text = (cell.text() or "").strip()
+                if not text:
+                    continue
+                for raw in url_re.findall(text):
+                    raw = raw.strip().strip('.,);]')
+                    c = self.canonical_url(raw)
+                    h = self.host_id_key(raw)
+                    sample.append([raw, c])
+                    if c == canon or h == hid:
+                        self.by_raw_url[raw] = r
+                        if c:
+                            self.by_canonical[c] = r
+                        if h:
+                            self.by_host_id[h] = r
+                        return r
         self.log.debug(
             "ROW NOT FOUND | looking_for=%s sample_norm=%s",
             canon or url,
@@ -3662,6 +3676,7 @@ class ForumBotGUI(QMainWindow):
         if not url:
             return -1
         table = self.process_threads_table
+        cols = table.columnCount()
         target = url.strip()
         rows = table.rowCount()
         cols = table.columnCount()
@@ -3697,16 +3712,18 @@ class ForumBotGUI(QMainWindow):
         return changed
     def find_row_by_url(self, url):
         table = self.process_threads_table
+        cols = table.columnCount()
         for row in range(table.rowCount()):
-            for col in (3, 4):
+            for col in range(cols):
                 item = table.item(row, col)
                 if item and url and item.text() == url:
                     return row
         return None
     def find_row_by_name_host(self, name, host):
         table = self.process_threads_table
+        cols = table.columnCount()
         for row in range(table.rowCount()):
-            for col in (3, 4):
+            for col in range(cols):
                 item = table.item(row, col)
                 if item and host and host in item.text():
                     return row
