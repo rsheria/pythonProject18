@@ -85,28 +85,20 @@ class LinkCheckWorker(QThread):
 
         items = self.jd.query_links() or []
 
-        default_priority = [
-            "rapidgator",
-            "ddownload",
-            "nitroflare",
-            "mega",
-            "1fichier",
-            "gofile",
-            "uploaded",
-            "mediafire",
-        ]
+        def _clean_host(h):
+            h = (h or "").lower().strip()
+            return h[4:] if h.startswith("www.") else h
 
-        def availability_rank(a):
-            a = (a or "").upper()
-            return 0 if a == "ONLINE" else (1 if a == "OFFLINE" else 2)
+        def _availability(it):
+            a = (it.get("availability") or "").upper()
+            return a if a in ("ONLINE", "OFFLINE") else "OFFLINE"
 
-        # Group items by container key: prefer containerURL > contentURL > origin/pluginURL > url
+        # Group items by container key: prefer containerURL > origin > pluginURL > url
         groups = {}
 
         for it in items:
             key = (
                     it.get("containerURL")
-                    or it.get("contentURL")
                     or it.get("origin")
                     or it.get("pluginURL")
                     or it.get("url")
@@ -118,15 +110,20 @@ class LinkCheckWorker(QThread):
         results = []
 
         for key, group in groups.items():
-            priority_list = self.host_priority or default_priority
             best = None
-            for pref in priority_list:
-                matches = [it for it in group if pref in (it.get("host") or "").lower()]
-                if matches:
-                    best = sorted(matches, key=lambda it: availability_rank(it.get("availability")))[0]
-                    break
+            if self.host_priority:
+                for pref in self.host_priority:
+                    matches = [
+                        it for it in group
+                        if pref in _clean_host(it.get("host"))
+                    ]
+                    if matches:
+                        online = [it for it in matches if _availability(it) == "ONLINE"]
+                        best = online[0] if online else matches[0]
+                        break
             if best is None:
-                best = group[0]
+                online_all = [it for it in group if _availability(it) == "ONLINE"]
+                best = online_all[0] if online_all else group[0]
 
             gui_url = key
             final_url = (
@@ -136,33 +133,27 @@ class LinkCheckWorker(QThread):
                     or None
             )
 
-            availability = (best.get("availability") or "").upper()
-            if availability not in ("ONLINE", "OFFLINE"):
-                availability = "UNKNOWN"
-
-            replace = bool(final_url and final_url != gui_url)
-            status_value = availability if availability in ("ONLINE", "OFFLINE") else "OFFLINE"
+            availability = _availability(best)
 
             payload = {
                 "type": "progress",
                 "gui_url": gui_url,
                 "url": gui_url,
                 "final_url": final_url,
-                "status": status_value,
-                "replace": replace,
+                "status": availability,
+                "replace": True,
             }
 
             alias = best.get("name") or best.get("host")
             if alias:
                 payload["alias"] = alias
 
-            if replace:
-                log.debug(
-                    "EMIT replace: gui_url=%s -> final_url=%s status=%s",
-                    gui_url,
-                    final_url,
-                    payload["status"],
-                )
+            log.debug(
+                "EMIT replace gui=%s final=%s status=%s",
+                gui_url,
+                final_url,
+                availability,
+            )
 
             self.progress.emit(payload)
             results.append(payload)

@@ -3411,80 +3411,86 @@ class ForumBotGUI(QMainWindow):
     def _on_link_progress(self, rowdict: dict):
         gui_url = (rowdict.get("gui_url") or rowdict.get("url") or "").strip()
         final_url = (rowdict.get("final_url") or "").strip()
-        status = (rowdict.get("status") or "OFFLINE").upper()
+        status = (rowdict.get("status") or "").upper()
         replace = bool(rowdict.get("replace"))
-        alias = rowdict.get("alias")
 
-        row_idx = self.row_index_by_url.get(self.canonical_url(gui_url))
+        def _norm(u: str) -> str:
+            if not u:
+                return ""
+            try:
+                sp = urlsplit(u.strip())
+                host = _clean_host(sp.hostname or "")
+                path = sp.path or ""
+                if path.endswith("/"):
+                    path = path[:-1]
+                if path.endswith(".html"):
+                    path = path[:-5]
+                if host.endswith("rapidgator.net"):
+                    m = RG_RE.match(path)
+                    if m:
+                        path = f"/file/{m.group(1)}"
+                elif host.endswith("nitroflare.com"):
+                    m = NF_RE.match(path)
+                    if m:
+                        path = f"/view/{m.group(1)}"
+                return host + path
+            except Exception:
+                return u.strip().lower().rstrip("/").removesuffix(".html")
+
+        row_idx = None
+        rows = self.process_threads_table.rowCount()
+        for r in range(rows):
+            cell = self.process_threads_table.item(r, 0)
+            if cell and cell.text() == gui_url:
+                row_idx = r
+                break
+
         if row_idx is None:
-            hid = self.host_id_key(gui_url)
-            if hid:
-                row_idx = self.row_index_by_hostid.get(hid)
-
-        if row_idx is None and final_url:
-            row_idx = self.row_index_by_url.get(self.canonical_url(final_url))
-        if row_idx is None and final_url:
-            hid2 = self.host_id_key(final_url)
-            if hid2:
-                row_idx = self.row_index_by_hostid.get(hid2)
-
-        if row_idx is None:
-            wanted1 = self.canonical_url(gui_url)
-            wanted2 = self.canonical_url(final_url) if final_url else ""
-            rows = self.process_threads_table.rowCount()
+            wanted = _norm(gui_url)
             for r in range(rows):
                 cell = self.process_threads_table.item(r, 0)
-                if not cell:
-                    continue
-                c_can = self.canonical_url(cell.text())
-                if c_can == wanted1 or (wanted2 and c_can == wanted2):
+                if cell and _norm(cell.text()) == wanted:
                     row_idx = r
                     break
             if row_idx is None:
-                logging.debug("Row not found | gui=%s final=%s", gui_url, final_url)
+                self.log.debug("Row not found | gui=%s final=%s", gui_url, final_url)
                 return
 
         cache = getattr(self, "_link_check_cache", None)
         if cache is None:
             self._load_link_check_cache()
             cache = getattr(self, "_link_check_cache", {})
-
-        self.update_status_cell(row_idx, status, tooltip=self._format_tooltip(rowdict))
-        model = self.process_threads_table.model()
-        sidx = model.index(row_idx, self.LINK_STATUS_COL)
-        model.dataChanged.emit(sidx, sidx, [Qt.DisplayRole])
+        if status:
+            self.update_status_cell(row_idx, status, tooltip=self._format_tooltip(rowdict))
+            model = self.process_threads_table.model()
+            sidx = model.index(row_idx, self.LINK_STATUS_COL)
+            model.dataChanged.emit(sidx, sidx, [Qt.DisplayRole])
 
         if replace and final_url:
             cell = self.process_threads_table.item(row_idx, 0)
-            old_text = cell.text() if cell else ""
+
             if cell:
                 cell.setText(final_url)
-                idx = model.index(row_idx, 0)
-                model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
 
-            old_can = self.canonical_url(old_text)
-            old_hid = self.host_id_key(old_text)
-            self.row_index_by_url.pop(old_can, None)
-            if old_hid:
-                self.row_index_by_hostid.pop(old_hid, None)
-            new_can = self.canonical_url(final_url)
-            new_hid = self.host_id_key(final_url)
-            self.row_index_by_url[new_can] = row_idx
-            if new_hid:
-                self.row_index_by_hostid[new_hid] = row_idx
-            if alias and "://" in str(alias):
-                self.row_index_by_url[self.canonical_url(alias)] = row_idx
-                hid_a = self.host_id_key(alias)
-                if hid_a:
-                    self.row_index_by_hostid[hid_a] = row_idx
-            data = cache.pop(old_text or gui_url, {})
-            cache.setdefault(final_url, data).update({"status": status})
+                idx = self.process_threads_table.model().index(row_idx, 0)
+                self.process_threads_table.model().dataChanged.emit(idx, idx, [Qt.DisplayRole])
+            self.row_index_by_url.pop(gui_url, None)
+            self.row_index_by_url[final_url] = row_idx
+            cache.pop(gui_url, None)
+            cache.setdefault(final_url, {}).update({"status": status})
+            self.log.debug(
+                "REPLACED row=%d gui=%s -> final=%s status=%s",
+                row_idx,
+                gui_url,
+                final_url,
+                status,
+            )
         else:
             cache.setdefault(gui_url, {}).update({"status": status})
         try:
             self.user_manager.save_user_data(self.LINK_STATUS_FILE, cache)
         except Exception as e:
-            logging.warning("Failed to persist link_status.json: %s", e)
+            self.log.warning("Failed to persist link_status.json: %s", e)
 
     def _on_link_finished(self, results: list):
         ui_notifier.suppress(False)
