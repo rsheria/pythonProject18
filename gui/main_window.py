@@ -227,6 +227,7 @@ class ForumBotGUI(QMainWindow):
     ARCHIVE_EXTENSIONS = ('.rar', '.zip')
     WINDOWS_FILE_EXTENSIONS = ('.pdf', '.epub', '.docx', '.xlsx', '.pptx', '.txt')  # Add more as needed
     OTHER_ENV_FILE_EXTENSIONS = ('.dmg', '.deb', '.apk', '.exe', '.bin')  # Add more as needed
+    LINK_STATUS_FILE = "link_status.json"
     LINK_STATUS_COL = 8
     def __init__(self, config):
         super().__init__()
@@ -277,6 +278,7 @@ class ForumBotGUI(QMainWindow):
         # Link check worker infrastructure
         self.link_check_cancel_event = Event()
         self.link_check_worker = None
+        self._link_check_cache = {}
         self._load_link_check_cache()
 
         # Initialize Rapidgator token from config
@@ -2566,7 +2568,10 @@ class ForumBotGUI(QMainWindow):
             
             # Migrate legacy data if needed
             self.user_manager.migrate_legacy_data(username)
-            
+
+            # Load any cached link status results for this user
+            self._load_link_check_cache()
+
             # Update bot file paths to use user-specific folders
             if hasattr(self, 'bot') and self.bot:
                 self.bot.update_user_file_paths()
@@ -3339,37 +3344,14 @@ class ForumBotGUI(QMainWindow):
                 "ts": int(time.time())
             }
 
-            # prefer per-user settings if available
-            um = None
-            try:
-                from core.user_manager import get_user_manager
-                um = get_user_manager()
-            except Exception:
-                pass
+            if not hasattr(self, "_link_check_cache") or self._link_check_cache is None:
+                self._load_link_check_cache()
 
-            # load existing cache
-            cache = {}
-            if um and um.get_current_user():
-                cache = um.get_user_setting("link_check_cache", {}) or {}
-            else:
-                cache = self.config.get("link_check_cache", {}) or {}
-
-            # store under both URLs if present
             if container_url:
-                cache[container_url] = entry
+                self._link_check_cache[container_url] = entry
             if direct_url:
-                cache[direct_url] = entry
 
-            if um and um.get_current_user():
-                um.set_user_setting("link_check_cache", cache)
-                self.config["link_check_cache"] = cache  # mirror
-            else:
-                self.config["link_check_cache"] = cache
-                try:
-                    from config.config import save_configuration
-                    save_configuration(self.config)
-                except Exception:
-                    pass
+                self._link_check_cache[direct_url] = entry
         except Exception:
             pass
 
@@ -3379,6 +3361,10 @@ class ForumBotGUI(QMainWindow):
         offline = sum(1 for r in results if r.get("status") == "OFFLINE")
         unknown = sum(1 for r in results if r.get("status") == "UNKNOWN")
         self.statusBar().showMessage(f"انتهى الفحص: Online={online}, Offline={offline}, Unknown={unknown}")
+        try:
+            self._save_link_check_cache()
+        except Exception:
+            pass
         self.link_check_worker = None
 
     def _on_link_error(self, msg: str):
@@ -3388,19 +3374,23 @@ class ForumBotGUI(QMainWindow):
 
     def _load_link_check_cache(self):
         try:
-            um = None
-            try:
-                from core.user_manager import get_user_manager
-                um = get_user_manager()
-            except Exception:
-                pass
+            from core.user_manager import get_user_manager
+            um = get_user_manager()
             if um and um.get_current_user():
-                self._link_check_cache = um.get_user_setting("link_check_cache", {}) or {}
-                self.config["link_check_cache"] = self._link_check_cache
+                self._link_check_cache = um.load_user_data(self.LINK_STATUS_FILE, {}) or {}
             else:
-                self._link_check_cache = self.config.get("link_check_cache", {}) or {}
+                self._link_check_cache = {}
         except Exception:
             self._link_check_cache = {}
+
+    def _save_link_check_cache(self):
+        try:
+            from core.user_manager import get_user_manager
+            um = get_user_manager()
+            if um and um.get_current_user():
+                um.save_user_data(self.LINK_STATUS_FILE, self._link_check_cache)
+        except Exception as e:
+            logging.error(f"Failed to save link status cache: {e}")
 
     def apply_cached_statuses_to_table(self):
         self._load_link_check_cache()
@@ -3464,48 +3454,7 @@ class ForumBotGUI(QMainWindow):
                         if token == u:
                             return r
         return -1
-    def _load_link_check_cache(self):
-        try:
-            um = None
-            try:
-                from core.user_manager import get_user_manager
-                um = get_user_manager()
-            except Exception:
-                pass
-            if um and um.get_current_user():
-                self._link_check_cache = um.get_user_setting("link_check_cache", {}) or {}
-                self.config["link_check_cache"] = self._link_check_cache
-            else:
-                self._link_check_cache = self.config.get("link_check_cache", {}) or {}
-        except Exception:
-            self._link_check_cache = {}
 
-    def apply_cached_statuses_to_table(self):
-        self._load_link_check_cache()
-        cache = self._link_check_cache or {}
-        if not cache:
-            return
-        import re
-        rows = self.process_threads_table.rowCount()
-        cols = self.process_threads_table.columnCount()
-        for r in range(rows):
-            applied = False
-            for c in range(cols):
-                it = self.process_threads_table.item(r, c)
-                if not it:
-                    continue
-                text = it.text() or ""
-                for u in re.findall(r'https?://\S+', text, flags=re.IGNORECASE):
-                    u = u.strip().strip('.,);]')
-                    if u in cache:
-                        try:
-                            self.update_status_cell(r, cache[u]["status"])
-                        except Exception:
-                            pass
-                        applied = True
-                        break
-                if applied:
-                    break
     def find_row_by_url(self, url):
         table = self.process_threads_table
         for row in range(table.rowCount()):
