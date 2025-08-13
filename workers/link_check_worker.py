@@ -16,12 +16,11 @@ CONTAINER_HOSTS = {
     "shorteners",
 }
 
-
 class LinkCheckWorker(QtCore.QThread):
     progress = QtCore.pyqtSignal(dict)
     finished = QtCore.pyqtSignal(dict)
     error = QtCore.pyqtSignal(str)
-    gui_ack = QtCore.pyqtSignal(str, str)  # (session_id, container_key)
+
 
     def __init__(self, jd_client, urls, cancel_event, poll_timeout_sec=120, poll_interval=1.0):
         super().__init__()
@@ -34,7 +33,6 @@ class LinkCheckWorker(QtCore.QThread):
         self.session_id = None
         self.pending_containers: dict[str, dict] = {}
         self._group_uuids = defaultdict(list)
-        self.gui_ack.connect(self.on_gui_ack, QtCore.Qt.QueuedConnection)
 
     def set_host_priority(self, priority_list: list):
         self.host_priority = []
@@ -46,25 +44,26 @@ class LinkCheckWorker(QtCore.QThread):
                 self.host_priority.append(h)
 
     @QtCore.pyqtSlot(str, str)
-    def on_gui_ack(self, session_id: str, container_key: str):
+    def ack_container_updated(self, container_url: str, session_id: str):
         if session_id != self.session_id:
             return
-        info = self.pending_containers.get(container_key)
+        info = self.pending_containers.get(container_url)
         if not info:
             return
         info["acked"] = True
-        uuids = self._group_uuids.get(container_key, [])
+        uuids = self._group_uuids.get(container_url, [])
         if uuids:
             try:
                 self.jd.remove_links(uuids)
                 logging.getLogger(__name__).debug(
-                    "JD.removeLinks container=%s done", container_key
+                    "ACK from GUI | container=%s -> removing from JD", container_url
+
                 )
             except Exception as e:
                 logging.getLogger(__name__).warning(
-                    "remove_links failed for %s: %s", container_key, e
+                    "remove_links failed for %s: %s", container_url, e
                 )
-        self.pending_containers.pop(container_key, None)
+        self.pending_containers.pop(container_url, None)
 
     def run(self):
         log = logging.getLogger(__name__)
@@ -185,22 +184,21 @@ class LinkCheckWorker(QtCore.QThread):
         for it in items:
             item_url = it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
             container_url = it.get("containerURL") or ""
-            chost = _clean_host(urlsplit(container_url).hostname or "")
-            is_container = chost in CONTAINER_HOSTS
+            chost = _clean_host(urlsplit(container_url or item_url).hostname or "")
+            is_container = bool(container_url) or chost in CONTAINER_HOSTS
+            key = container_url if container_url else item_url
             if is_container:
-                groups.setdefault(container_url, []).append(it)
+                groups.setdefault(key, []).append(it)
             else:
                 availability = _availability(it)
                 payload = {
                     "type": "progress",
+                    "mode": "direct",
                     "session": self.session_id,
-                    "gui_url": item_url,
+                    "url": item_url,
                     "status": availability,
-                    "replace": False,
                 }
-                log.debug(
-                    "EMIT status-only url=%s status=%s", item_url, availability
-                )
+
                 self.progress.emit(payload)
 
         for container_key, gitems in groups.items():
@@ -218,70 +216,36 @@ class LinkCheckWorker(QtCore.QThread):
             self._group_uuids[container_key] = [
                 it.get("uuid") for it in gitems if it.get("uuid")
             ]
-            best_final = (
-                selected[0].get("url")
-                or selected[0].get("contentURL")
-                or selected[0].get("pluginURL")
-                or ""
-            ) if selected else ""
+            final_urls = []
+            status_map = {}
+            for it in selected:
+                furl = it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
+                final_urls.append(furl)
+                status_map[furl] = _availability(it)
             self.pending_containers[container_key] = {
                 "session": self.session_id,
-                "chosen_final": best_final,
+                "final_urls": final_urls[:],
+                "status_map": status_map,
                 "acked": False,
             }
 
-            total = len(selected) or 1
-            if not selected:
-                selected = [
-                    {"url": None, "availability": "OFFLINE", "name": "", "host": ""}
-                ]
-
+            payload = {
+                "type": "progress",
+                "mode": "container",
+                "session": self.session_id,
+                "container_url": container_key,
+                "final_urls": final_urls,
+                "status_map": status_map,
+                "replace": True,
+            }
+            self.progress.emit(payload)
             log.debug(
-                "Best host=%s availability=%s",
-                chosen_host,
-                _availability(selected[0]) if selected else "UNKNOWN",
+                "EMIT container replace | container=%s finals=%s",
+                container_key,
+                final_urls,
             )
-
-            for idx, it in enumerate(selected, start=1):
-                final_url = (
-                    it.get("url")
-                    or it.get("contentURL")
-                    or it.get("pluginURL")
-                    or ""
-                )
-                availability = _availability(it)
-                replace = bool(
-                    final_url and canonical_url(final_url) != canonical_url(container_key)
-                )
-                payload = {
-                    "type": "progress",
-                    "session": self.session_id,
-                    "gui_url": container_key,
-                    "final_url": final_url,
-                    "status": availability,
-                    "host": it.get("host") or "",
-                    "alias": it.get("name") or "",
-                    "name": it.get("name") or "",
-                    "replace": replace,
-                    "idx": idx,
-                    "total": total,
-                    "is_last": (idx == total),
-                }
-                if replace:
-                    log.debug(
-                        "EMIT replace gui=%s final=%s status=%s idx=%s/%s",
-                        container_key,
-                        final_url,
-                        availability,
-                        idx,
-                        total,
-                    )
-                else:
-                    log.debug(
-                        "EMIT status-only url=%s status=%s",
-                        container_key,
-                        availability,
-                    )
-                self.progress.emit(payload)
+        for ck, info in self.pending_containers.items():
+            if not info.get("acked"):
+                log.debug("No ACK | container=%s -> keeping in JD", ck)
 
         self.finished.emit({"session": self.session_id})

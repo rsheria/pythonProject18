@@ -313,8 +313,12 @@ class ForumBotGUI(QMainWindow):
         self.link_check_worker = None
         self._link_check_cache = {}
         self._load_link_check_cache()
-        self.row_index_by_url = {}
-        self.row_index_by_hostid = {}
+        self.by_raw_url = {}
+        self.by_canonical = {}
+        self.by_host_id = {}
+        # Backward-compatibility aliases
+        self.row_index_by_url = self.by_canonical
+        self.row_index_by_hostid = self.by_host_id
 
         # Initialize Rapidgator token from config
         self.bot.rapidgator_token = self.config.get('rapidgator_api_token', '')
@@ -3318,7 +3322,11 @@ class ForumBotGUI(QMainWindow):
         self.link_check_cancel_event.clear()
         self._lc_expanded = {}
         self._lc_counts = {"ONLINE": 0, "OFFLINE": 0, "UNKNOWN": 0}
-
+        self._lc_stats = {
+            "containers_replaced": 0,
+            "direct_updated": 0,
+            "rows_not_found": 0,
+        }
         urls = self.collect_all_candidate_urls_for_selected_threads()
         if not urls:
             self.statusBar().showMessage("لا توجد روابط للفحص.")
@@ -3352,6 +3360,7 @@ class ForumBotGUI(QMainWindow):
         self.link_check_worker.progress.connect(self._on_link_progress)
         self.link_check_worker.finished.connect(self._on_link_finished)
         self.link_check_worker.error.connect(lambda msg: self.statusBar().showMessage(msg))
+        self.rebuild_row_index()
         self.statusBar().showMessage(f"Starting link check for {len(urls)} URLs…")
         self.link_check_worker.start()
 
@@ -3388,182 +3397,121 @@ class ForumBotGUI(QMainWindow):
         except Exception:
             pass
         return ""
-    def normalize_url(self, s: str) -> str:
-        if not s:
-            return ""
-        try:
-            from urllib.parse import urlsplit, urlunsplit
-            sp = urlsplit(s.strip())
-            host = (sp.hostname or "").lower()
-            if host.startswith("www."):
-                host = host[4:]
-            path = sp.path or ""
-            if path.endswith("/"):
-                path = path[:-1]
-            if path.endswith(".html"):
-                path = path[:-5]
-            return urlunsplit((sp.scheme.lower(), host, path, "", ""))
-        except Exception:
-            return s.strip().lower().rstrip("/").removesuffix(".html")
 
-    def find_row_by_container(self, container: str):
-        expanded = getattr(self, "_lc_expanded", {})
-        norm = self.canonical_url(container)
-        if norm in expanded:
-            return expanded[norm]["row"]
-        row = self.row_index_by_url.get(norm)
-        if row is not None:
-            cell = self.process_threads_table.item(row, 0)
-            if cell and self.canonical_url(cell.text()) == norm:
-                return row
+    def rebuild_row_index(self):
+        self.by_raw_url = {}
+        self.by_canonical = {}
+        self.by_host_id = {}
         rows = self.process_threads_table.rowCount()
         for r in range(rows):
             cell = self.process_threads_table.item(r, 0)
-            if cell and self.canonical_url(cell.text()) == norm:
-                self.row_index_by_url[norm] = r
-                return r
-        return None
+            if not cell:
+                continue
+            url = (cell.text() or "").strip()
+            canon = self.canonical_url(url)
+            hid = self.host_id_key(url)
+            self.by_raw_url[url] = r
+            if canon:
+                self.by_canonical[canon] = r
+            if hid:
+                self.by_host_id[hid] = r
+            self.log.debug(
+                "Index add | raw=%s canonical=%s host-id=%s -> row=%s",
+                url,
+                canon,
+                hid,
+                r,
+            )
+
+    def find_row(self, url: str):
+        if not url:
+            return None
+        if url in self.by_raw_url:
+            return self.by_raw_url[url]
+        canon = self.canonical_url(url)
+        row = self.by_canonical.get(canon)
+        if row is not None:
+            return row
+        hid = self.host_id_key(url)
+        return self.by_host_id.get(hid)
     def on_cancel_check_clicked(self):
         if self.link_check_worker and self.link_check_worker.isRunning():
             self.link_check_cancel_event.set()
             self.statusBar().showMessage("تم طلب إلغاء فحص الروابط…")
 
-    def _on_link_progress(self, rowdict: dict):
-        gui_url = (rowdict.get("gui_url") or "").strip()
-        final_url = (rowdict.get("final_url") or "").strip()
-        status = (rowdict.get("status") or "").upper()
-
-        replace = bool(rowdict.get("replace"))
-        session = rowdict.get("session") or ""
-        is_last = bool(rowdict.get("is_last"))
-
-        gk = self.canonical_url(gui_url)
-
+    def _on_link_progress(self, payload: dict):
+        mode = payload.get("mode")
         cache = getattr(self, "_link_check_cache", None)
         if cache is None:
             self._load_link_check_cache()
             cache = getattr(self, "_link_check_cache", {})
 
-        if replace:
-            row_idx = self.find_row_by_container(gui_url)
+        if mode == "direct":
+            url = (payload.get("url") or "").strip()
+            status = (payload.get("status") or "UNKNOWN").upper()
+            row_idx = self.find_row(url)
             if row_idx is None:
-                self.log.debug(
-                    "Row not found for container=%s (final=%s)", gui_url, final_url
-                )
+                self.log.debug("status-only row not found | %s", url)
+                self._lc_stats["rows_not_found"] += 1
                 return
-            expanded = self._lc_expanded
-            try:
-                info = expanded.get(gk)
-                if info is None:
-                    cell = self.process_threads_table.item(row_idx, 0)
-                    if final_url:
-                        cell.setText(final_url)
-                        idx = self.process_threads_table.model().index(row_idx, 0)
-                        self.process_threads_table.model().dataChanged.emit(
-                            idx, idx, [Qt.DisplayRole]
-                        )
-                        norm_final = self.canonical_url(final_url)
-                        if norm_final:
-                            self.row_index_by_url[norm_final] = row_idx
-                            hid = self.host_id_key(final_url)
-                            if hid:
-                                self.row_index_by_hostid[hid] = row_idx
-                    self.row_index_by_url.pop(gk, None)
-                    hid = self.host_id_key(gui_url)
-                    if hid:
-                        self.row_index_by_hostid.pop(hid, None)
-                    self.update_status_cell(
-                        row_idx, status, tooltip=self._format_tooltip(rowdict)
-                    )
-                    sidx = self.process_threads_table.model().index(
-                        row_idx, self.LINK_STATUS_COL
-                    )
-                    self.process_threads_table.model().dataChanged.emit(
-                        sidx, sidx, [Qt.DisplayRole]
-                    )
-                    expanded[gk] = {"row": row_idx, "inserted": 0}
-                    self.log.debug(
-                        "GUI replace OK row=%s url=%s status=%s",
-                        row_idx,
-                        final_url,
-                        status,
-                    )
-                else:
-                    base_row = info["row"]
-                    insert_at = base_row + info["inserted"] + 1
-                    self.process_threads_table.insertRow(insert_at)
-                    for k, v in list(self.row_index_by_url.items()):
-                        if v >= insert_at:
-                            self.row_index_by_url[k] = v + 1
-                    for k, v in expanded.items():
-                        if v["row"] >= insert_at:
-                            v["row"] += 1
-                    item = QTableWidgetItem(final_url)
-                    self.process_threads_table.setItem(insert_at, 0, item)
-                    self.update_status_cell(
-                        insert_at, status, tooltip=self._format_tooltip(rowdict)
-                    )
-                    norm_final = self.canonical_url(final_url)
-                    if norm_final:
-                        self.row_index_by_url[norm_final] = insert_at
-                        hid = self.host_id_key(final_url)
-                        if hid:
-                            self.row_index_by_hostid[hid] = insert_at
-                    info["inserted"] += 1
-                    self.log.debug(
-                        "INSERTED sibling for container=%s url=%s status=%s",
-                        gui_url,
-                        final_url,
-                        status,
-                    )
-                key = final_url or gui_url
-                cache.setdefault(key, {}).update({"status": status})
-                try:
-                    self.user_manager.save_user_data(self.LINK_STATUS_FILE, cache)
-                except Exception as e:
-                    self.log.warning("Failed to persist link_status.json: %s", e)
-                self._lc_counts[status] = self._lc_counts.get(status, 0) + 1
-            except Exception as e:
-                self.log.warning(
-                    "Failed to update row for container=%s: %s", gui_url, e
-                )
-
-            if is_last:
-                QtCore.QMetaObject.invokeMethod(
-                    self.link_check_worker,
-                    "on_gui_ack",
-                    QtCore.Qt.QueuedConnection,
-                    QtCore.Q_ARG(str, session),
-                    QtCore.Q_ARG(str, gui_url),
-                )
-                self.log.debug(
-                    "ACK sent session=%s container=%s", session, gui_url
-                )
-        else:
-            row_idx = self.row_index_by_url.get(gk)
-            if row_idx is None:
-                hid = self.host_id_key(gui_url)
-                if hid:
-                    row_idx = self.row_index_by_hostid.get(hid)
-            if row_idx is None:
-                self.log.debug("status-only row not found %s", gk)
-                return
-            self.update_status_cell(
-                row_idx, status, tooltip=self._format_tooltip(rowdict)
-            )
-            sidx = self.process_threads_table.model().index(
-                row_idx, self.LINK_STATUS_COL
-            )
-            self.process_threads_table.model().dataChanged.emit(
-                sidx, sidx, [Qt.DisplayRole]
-            )
-            key = gui_url
-            cache.setdefault(key, {}).update({"status": status})
+            self.update_status_cell(row_idx, status)
+            cache.setdefault(url, {}).update({"status": status})
             try:
                 self.user_manager.save_user_data(self.LINK_STATUS_FILE, cache)
             except Exception as e:
                 self.log.warning("Failed to persist link_status.json: %s", e)
             self._lc_counts[status] = self._lc_counts.get(status, 0) + 1
+            self._lc_stats["direct_updated"] += 1
+            self.log.debug(
+                "status-only row updated | url=%s status=%s", url, status
+            )
+            return
+        if mode == "container":
+            container_url = (payload.get("container_url") or "").strip()
+            final_urls = payload.get("final_urls") or []
+            status_map = payload.get("status_map") or {}
+            session = payload.get("session") or ""
+
+            row_idx = self.find_row(container_url)
+            if row_idx is None:
+                self.log.debug("Row not found | container=%s", container_url)
+                self._lc_stats["rows_not_found"] += 1
+                return
+            self.log.debug(
+                "GUI replacing container | row=%s container=%s -> finals=%s",
+                row_idx,
+                container_url,
+                final_urls,
+            )
+
+            self.process_threads_table.removeRow(row_idx)
+            offset = 0
+            for url in final_urls:
+                self.process_threads_table.insertRow(row_idx + offset)
+                item = QTableWidgetItem(url)
+                self.process_threads_table.setItem(row_idx + offset, 0, item)
+                stat = (status_map.get(url) or "UNKNOWN").upper()
+                self.update_status_cell(row_idx + offset, stat)
+                cache.setdefault(url, {}).update({"status": stat})
+                self._lc_counts[stat] = self._lc_counts.get(stat, 0) + 1
+                offset += 1
+
+            try:
+                self.user_manager.save_user_data(self.LINK_STATUS_FILE, cache)
+            except Exception as e:
+                self.log.warning("Failed to persist link_status.json: %s", e)
+
+            self.rebuild_row_index()
+
+            QtCore.QMetaObject.invokeMethod(
+                self.link_check_worker,
+                "ack_container_updated",
+                QtCore.Qt.QueuedConnection,
+                QtCore.Q_ARG(str, container_url),
+                QtCore.Q_ARG(str, session),
+            )
+            self.log.debug("GUI ack sent | container=%s", container_url)
+            self._lc_stats["containers_replaced"] += 1
 
     def _on_link_finished(self, info: dict):
         ui_notifier.suppress(False)
@@ -3571,7 +3519,6 @@ class ForumBotGUI(QMainWindow):
         online = counts.get("ONLINE", 0)
         offline = counts.get("OFFLINE", 0)
         unknown = counts.get("UNKNOWN", 0)
-        self.statusBar().showMessage(f"انتهى الفحص: Online={online}, Offline={offline}, Unknown={unknown}")
         try:
             self._save_link_check_cache()
         except Exception:
@@ -6228,8 +6175,6 @@ class ForumBotGUI(QMainWindow):
     def populate_process_threads_table(self, process_threads):
         """Populate the Process Threads table."""
         self.process_threads_table.setRowCount(0)
-        self.row_index_by_url = {}
-        self.row_index_by_hostid = {}
 
         # Flatten threads to a list for sorting
         flat_threads = []
