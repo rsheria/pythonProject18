@@ -1,11 +1,12 @@
 import uuid
 from collections import defaultdict
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
+
 
 from PyQt5 import QtCore
 import logging
 import time
-
+import re
 
 CONTAINER_HOSTS = {
     "keeplinks.org",
@@ -16,6 +17,63 @@ CONTAINER_HOSTS = {
     "shorteners",
 }
 
+RG_RE = re.compile(r"^/file/([A-Za-z0-9]+)")
+NF_RE = re.compile(r"^/view/([A-Za-z0-9]+)")
+DD_RE = re.compile(r"^/(?:f|file)/([A-Za-z0-9]+)")
+TB_RE = re.compile(r"^/([A-Za-z0-9]+)")
+
+
+def _clean_host(h: str) -> str:
+    h = (h or "").lower().strip()
+    return h[4:] if h.startswith("www.") else h
+
+
+def canonical_url(s: str) -> str:
+    if not s:
+        return ""
+    try:
+        sp = urlsplit(s.strip())
+        host = _clean_host(sp.hostname or "")
+        path = sp.path or ""
+        if path.endswith("/"):
+            path = path[:-1]
+        if path.endswith(".html"):
+            path = path[:-5]
+        if host.endswith("rapidgator.net"):
+            m = RG_RE.match(path)
+            if m:
+                path = f"/file/{m.group(1)}"
+        elif host.endswith("nitroflare.com"):
+            m = NF_RE.match(path)
+            if m:
+                path = f"/view/{m.group(1)}"
+        elif host.endswith("ddownload.com"):
+            m = DD_RE.match(path)
+            if m:
+                path = f"/{m.group(1)}"
+        elif host.endswith("turbobit.net"):
+            m = TB_RE.match(path)
+            if m:
+                path = f"/{m.group(1)}"
+        return urlunsplit((sp.scheme.lower(), host, path, "", ""))
+    except Exception:
+        return (s or "").strip().lower().rstrip("/").removesuffix(".html")
+
+
+def host_id_key(s: str) -> str:
+    if not s:
+        return ""
+    try:
+        sp = urlsplit(s.strip())
+        host = _clean_host(sp.hostname or "")
+        path = sp.path or ""
+        for regex in (RG_RE, NF_RE, DD_RE, TB_RE):
+            m = regex.match(path)
+            if m:
+                return f"{host}|{m.group(1)}"
+    except Exception:
+        pass
+    return ""
 class LinkCheckWorker(QtCore.QThread):
     progress = QtCore.pyqtSignal(dict)
     finished = QtCore.pyqtSignal(dict)
@@ -31,8 +89,9 @@ class LinkCheckWorker(QtCore.QThread):
         self.poll_interval = poll_interval
         self.host_priority = []
         self.session_id = None
-        self.pending_containers: dict[str, dict] = {}
-        self._group_uuids = defaultdict(list)
+        self.awaiting_ack: dict[str, list] = {}
+        self._eligible_ids: list = []
+        self._direct_ids: list = []
 
     def set_host_priority(self, priority_list: list):
         self.host_priority = []
@@ -47,29 +106,20 @@ class LinkCheckWorker(QtCore.QThread):
     def ack_container_updated(self, container_url: str, session_id: str):
         if session_id != self.session_id:
             return
-        info = self.pending_containers.get(container_url)
-        if not info:
-            return
-        info["acked"] = True
-        uuids = self._group_uuids.get(container_url, [])
-        if uuids:
-            try:
-                self.jd.remove_links(uuids)
-                logging.getLogger(__name__).debug(
-                    "ACK from GUI | container=%s -> removing from JD", container_url
 
-                )
-            except Exception as e:
-                logging.getLogger(__name__).warning(
-                    "remove_links failed for %s: %s", container_url, e
-                )
-        self.pending_containers.pop(container_url, None)
+        ids = self.awaiting_ack.pop(container_url, [])
+        if ids:
+            self._eligible_ids.extend(ids)
+            logging.getLogger(__name__).debug(
+                "ACK from GUI | container=%s", canonical_url(container_url)
+            )
 
     def run(self):
         log = logging.getLogger(__name__)
         self.session_id = uuid.uuid4().hex
-        self.pending_containers.clear()
-        self._group_uuids.clear()
+        self.awaiting_ack.clear()
+        self._eligible_ids.clear()
+        self._direct_ids.clear()
 
         if not self.urls:
             msg = "No URLs to check."
@@ -151,33 +201,6 @@ class LinkCheckWorker(QtCore.QThread):
                     return h
             return next(iter(hosts.keys()), "")
 
-        def canonical_url(s: str) -> str:
-            if not s:
-                return ""
-            try:
-                sp = urlsplit(s.strip())
-                host = _clean_host(sp.hostname or "")
-                path = sp.path or ""
-                if path.endswith("/"):
-                    path = path[:-1]
-                if path.endswith(".html"):
-                    path = path[:-5]
-                if host.endswith("rapidgator.net") and path.startswith("/file/"):
-                    path = "/file/" + path.split("/")[2]
-                elif host.endswith("nitroflare.com") and path.startswith("/view/"):
-                    path = "/view/" + path.split("/")[2]
-                elif host.endswith("ddownload.com") and (
-                    path.startswith("/f/") or path.startswith("/file/")
-                ):
-                    parts = path.split("/")
-                    if len(parts) > 2:
-                        path = f"/f/{parts[2]}"
-                return urlsplit(
-                    f"{sp.scheme.lower()}://{host}{path}"
-                ).geturl()
-            except Exception:
-                return (s or "").strip().lower().rstrip("/").removesuffix(".html")
-
         groups = {}
         priority = self.host_priority or []
 
@@ -191,15 +214,23 @@ class LinkCheckWorker(QtCore.QThread):
                 groups.setdefault(key, []).append(it)
             else:
                 availability = _availability(it)
+                uid = it.get("uuid")
+                if uid:
+                    self._direct_ids.append(uid)
                 payload = {
                     "type": "progress",
-                    "mode": "direct",
                     "session": self.session_id,
                     "url": item_url,
                     "status": availability,
                 }
 
                 self.progress.emit(payload)
+
+                log.debug(
+                    "EMIT status-only | url=%s status=%s",
+                    canonical_url(item_url),
+                    availability,
+                )
 
         for container_key, gitems in groups.items():
             log.debug(
@@ -213,45 +244,67 @@ class LinkCheckWorker(QtCore.QThread):
                 key=lambda it: {"ONLINE": 0, "OFFLINE": 1, "UNKNOWN": 2}[_availability(it)]
             )
 
-            self._group_uuids[container_key] = [
-                it.get("uuid") for it in gitems if it.get("uuid")
-            ]
-            final_urls = []
-            status_map = {}
-            for it in selected:
-                furl = it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
-                final_urls.append(furl)
-                status_map[furl] = _availability(it)
-            self.pending_containers[container_key] = {
-                "session": self.session_id,
-                "final_urls": final_urls[:],
-                "status_map": status_map,
-                "acked": False,
-            }
+            jd_ids = [it.get("uuid") for it in gitems if it.get("uuid")]
+            self.awaiting_ack[container_key] = jd_ids
 
+            final = selected[0]
+            final_url = final.get("url") or final.get("contentURL") or final.get("pluginURL") or ""
+            status_first = _availability(final)
+            siblings = []
+            status_map = {final_url: status_first}
+            for it in selected[1:]:
+
+                furl = it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
+                siblings.append(furl)
+                status_map[furl] = _availability(it)
             payload = {
                 "type": "progress",
-                "mode": "container",
                 "session": self.session_id,
                 "container_url": container_key,
-                "final_urls": final_urls,
-                "status_map": status_map,
+                "final_url": final_url,
+                "status": status_first,
                 "replace": True,
+                "host": chosen_host,
+                "siblings": siblings,
+                "status_map": status_map,
             }
             self.progress.emit(payload)
             log.debug(
-                "EMIT container replace | container=%s finals=%s",
-                container_key,
-                final_urls,
+                "EMIT replace | container=%s final=%s status=%s siblings=%d session=%s",
+                canonical_url(container_key),
+                canonical_url(final_url),
+                status_first,
+                len(siblings),
+                self.session_id,
             )
-        for ck, info in self.pending_containers.items():
-            if not info.get("acked"):
-                log.debug("No ACK | container=%s -> keeping in JD", ck)
+        # wait for ACKs
+        wait_deadline = time.time() + 5.0
+        while self.awaiting_ack and not self.cancel_event.is_set() and time.time() < wait_deadline:
+            QtCore.QCoreApplication.processEvents()
+            time.sleep(0.1)
 
-        # تنظيف LinkGrabber بعد انتهاء الفحص
-        try:
-            self.jd.remove_all_from_linkgrabber()
-        except Exception as e:
-            log.warning("Failed to clear JD LinkGrabber: %s", e)
+        remove_ids = self._eligible_ids + self._direct_ids
+        removed = 0
+        if remove_ids:
+            for attempt in range(2):
+                try:
+                    if self.jd.remove_links(remove_ids):
+                        removed = len(remove_ids)
+                        break
+                except Exception as e:
+                    if "400" in str(e) and attempt == 0:
+                        time.sleep(0.5)
+                        continue
+                    log.warning("remove_links failed: %s", e)
+                    break
+                time.sleep(0.5)
+            log.debug(
+                "JD.clear: acknowledged, removed %d items for session=%s",
+                removed,
+                self.session_id,
+            )
+
+        for ck in self.awaiting_ack.keys():
+            log.debug("No ACK | container=%s -> keeping in JD", ck)
 
         self.finished.emit({"session": self.session_id})
