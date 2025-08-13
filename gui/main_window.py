@@ -83,7 +83,7 @@ RG_RE = re.compile(r"^/file/([A-Za-z0-9]+)(?:/.*)?$")
 NF_RE = re.compile(r"^/view/([A-Za-z0-9]+)(?:/.*)?$")
 DD_RE = re.compile(r"^/(?:f|file)/([A-Za-z0-9]+)(?:/.*)?$")
 TB_RE = re.compile(r"^/([A-Za-z0-9]+)(?:\.html)?(?:/.*)?$")
-
+URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 def _clean_host(host: str) -> str:
     host = (host or "").lower()
     return host[4:] if host.startswith("www.") else host
@@ -3240,8 +3240,6 @@ class ForumBotGUI(QMainWindow):
             table.setRowHidden(row, not (status_ok and text_ok))
 
     def collect_all_candidate_urls_for_selected_threads(self) -> list:
-        import re
-        url_re = re.compile(r'https?://\S+', re.IGNORECASE)
         urls = []
         rows = {idx.row() for idx in self.process_threads_table.selectedIndexes()}
         if not rows:
@@ -3256,7 +3254,7 @@ class ForumBotGUI(QMainWindow):
                 text = (item.text() or "").strip()
                 if not text:
                     continue
-                for m in url_re.findall(text):
+                for m in URL_RE.findall(text):
                     u = m.strip().strip('.,);]')
                     low = u.lower()
                     if any(b in low for b in ("swistransfer", "/img", "image", "folder=")):
@@ -3408,7 +3406,6 @@ class ForumBotGUI(QMainWindow):
 
     def rebuild_row_index(self):
         """Rebuild lookup dictionaries for all URLs in the table."""
-        import re
         self.by_raw_url = {}
         self.by_canonical = {}
         self.by_host_id = {}
@@ -3422,7 +3419,7 @@ class ForumBotGUI(QMainWindow):
                 text = (cell.text() or "").strip()
                 if not text:
                     continue
-                for m in url_re.findall(text):
+                for m in URL_RE.findall(text):
                     url = m.strip().strip('.,);]')
                     canon = self.canonical_url(url)
                     hid = self.host_id_key(url)
@@ -3453,9 +3450,6 @@ class ForumBotGUI(QMainWindow):
             return row
 
         sample = []
-        import re
-
-        url_re = re.compile(r"https?://\S+", re.IGNORECASE)
         rows = self.process_threads_table.rowCount()
         cols = self.process_threads_table.columnCount()
         for r in range(rows):
@@ -3467,7 +3461,7 @@ class ForumBotGUI(QMainWindow):
                 text = (cell.text() or "").strip()
                 if not text:
                     continue
-                for raw in url_re.findall(text):
+                for raw in URL_RE.findall(text):
                     raw = raw.strip().strip('.,);]')
                     c = self.canonical_url(raw)
                     h = self.host_id_key(raw)
