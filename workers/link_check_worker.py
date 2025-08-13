@@ -85,28 +85,28 @@ class LinkCheckWorker(QThread):
 
         items = self.jd.query_links() or []
 
-        def host_rank(h: str) -> int:
-            if not self.host_priority:
-                return 10**6
-            h = (h or "").lower()
-            if h.startswith("www."):
-                h = h[4:]
-            for idx, pref in enumerate(self.host_priority):
-                if pref in h:
-                    return idx
-            return 10**6
+        default_priority = [
+            "rapidgator",
+            "ddownload",
+            "nitroflare",
+            "mega",
+            "1fichier",
+            "gofile",
+            "uploaded",
+            "mediafire",
+        ]
 
         def availability_rank(a):
             a = (a or "").upper()
             return 0 if a == "ONLINE" else (1 if a == "OFFLINE" else 2)
 
-        # Group items by container key: prefer contentURL > containerURL > origin/pluginURL > url
+        # Group items by container key: prefer containerURL > contentURL > origin/pluginURL > url
         groups = {}
 
         for it in items:
             key = (
-                it.get("contentURL")
-                or it.get("containerURL")
+                it.get("containerURL")
+                or it.get("contentURL")
                 or it.get("origin")
                 or it.get("pluginURL")
                 or it.get("url")
@@ -116,10 +116,15 @@ class LinkCheckWorker(QThread):
 
         results = []
         for key, group in groups.items():
-            best = sorted(
-                group,
-                key=lambda it: (host_rank(it.get("host")), availability_rank(it.get("availability")))
-            )[0]
+            priority_list = self.host_priority or default_priority
+            best = None
+            for pref in priority_list:
+                matches = [it for it in group if pref in (it.get("host") or "").lower()]
+                if matches:
+                    best = sorted(matches, key=lambda it: availability_rank(it.get("availability")))[0]
+                    break
+            if best is None:
+                best = group[0]
             gui_url = key
             final_url = best.get("url") or best.get("contentURL") or best.get("pluginURL") or ""
             availability = (best.get("availability") or "").upper()
@@ -132,8 +137,9 @@ class LinkCheckWorker(QThread):
                 "name": best.get("name") or "",
                 "host": best.get("host") or "",
                 "size": best.get("size") or -1,
-                "replace": gui_url != final_url,
+                "replace": True,
             }
+            d["url"] = d["gui_url"]
             self.progress.emit(d)
             results.append(d)
 

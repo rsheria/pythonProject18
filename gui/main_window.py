@@ -3317,7 +3317,7 @@ class ForumBotGUI(QMainWindow):
             self.statusBar().showMessage("تم طلب إلغاء فحص الروابط…")
 
     def _on_link_progress(self, rowdict: dict):
-        gui_url = (rowdict.get("gui_url") or "").strip()
+        gui_url = (rowdict.get("gui_url") or rowdict.get("url") or "").strip()
         final_url = (rowdict.get("final_url") or "").strip()
 
         row_idx = self._find_row_by_url(gui_url)
