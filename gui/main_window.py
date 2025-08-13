@@ -3303,7 +3303,14 @@ class ForumBotGUI(QMainWindow):
             app_key=app_key,
         )
 
-        self.link_check_worker = LinkCheckWorker(jd_client, urls, self.link_check_cancel_event, poll_timeout_sec=60)
+        # Extend the polling timeout so manual captcha resolution has ample time
+        # before the worker gives up and returns no results.
+        self.link_check_worker = LinkCheckWorker(
+            jd_client,
+            urls,
+            self.link_check_cancel_event,
+            poll_timeout_sec=600,
+        )
         host_priority = self._get_download_host_priority()
         self.link_check_worker.set_host_priority(host_priority)
         self.link_check_worker.progress.connect(self._on_link_progress)

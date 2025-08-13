@@ -105,16 +105,18 @@ class LinkCheckWorker(QThread):
 
         for it in items:
             key = (
-                it.get("containerURL")
-                or it.get("contentURL")
-                or it.get("origin")
-                or it.get("pluginURL")
-                or it.get("url")
-                or ""
+                    it.get("containerURL")
+                    or it.get("contentURL")
+                    or it.get("origin")
+                    or it.get("pluginURL")
+                    or it.get("url")
+                    or ""
             )
             groups.setdefault(key, []).append(it)
+
         log = logging.getLogger(__name__)
         results = []
+
         for key, group in groups.items():
             priority_list = self.host_priority or default_priority
             best = None
@@ -125,26 +127,31 @@ class LinkCheckWorker(QThread):
                     break
             if best is None:
                 best = group[0]
+
             gui_url = key
             final_url = (
-                best.get("url")
-                or best.get("contentURL")
-                or best.get("pluginURL")
-                or None
+                    best.get("url")
+                    or best.get("contentURL")
+                    or best.get("pluginURL")
+                    or None
             )
+
             availability = (best.get("availability") or "").upper()
             if availability not in ("ONLINE", "OFFLINE"):
                 availability = "UNKNOWN"
-                replace = bool(final_url and final_url != gui_url)
 
-                payload = {
+            replace = bool(final_url and final_url != gui_url)
+            status_value = availability if availability in ("ONLINE", "OFFLINE") else "OFFLINE"
+
+            payload = {
                 "type": "progress",
                 "gui_url": gui_url,
                 "url": gui_url,
                 "final_url": final_url,
-                "status": availability if availability in ("ONLINE", "OFFLINE") else "OFFLINE",
+                "status": status_value,
                 "replace": replace,
             }
+
             alias = best.get("name") or best.get("host")
             if alias:
                 payload["alias"] = alias
