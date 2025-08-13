@@ -3408,9 +3408,9 @@ class ForumBotGUI(QMainWindow):
 
     def find_row_by_container(self, container: str):
         expanded = getattr(self, "_lc_expanded", {})
-        if container in expanded:
-            return expanded[container]["row"]
         norm = self.canonical_url(container)
+        if norm in expanded:
+            return expanded[norm]["row"]
         row = self.row_index_by_url.get(norm)
         if row is not None:
             cell = self.process_threads_table.item(row, 0)
@@ -3428,85 +3428,142 @@ class ForumBotGUI(QMainWindow):
             self.link_check_cancel_event.set()
             self.statusBar().showMessage("تم طلب إلغاء فحص الروابط…")
 
-
     def _on_link_progress(self, rowdict: dict):
-        container = (rowdict.get("gui_url") or "").strip()
+        gui_url = (rowdict.get("gui_url") or "").strip()
         final_url = (rowdict.get("final_url") or "").strip()
         status = (rowdict.get("status") or "").upper()
 
+        replace = bool(rowdict.get("replace"))
         session = rowdict.get("session") or ""
         is_last = bool(rowdict.get("is_last"))
 
-        row_idx = self.find_row_by_container(container)
-
-        if row_idx is None:
-
-            self.log.debug("Row not found for container=%s (final=%s)", container, final_url)
-            return
+        gk = self.canonical_url(gui_url)
 
         cache = getattr(self, "_link_check_cache", None)
         if cache is None:
             self._load_link_check_cache()
             cache = getattr(self, "_link_check_cache", {})
 
-        updated = False
-        expanded = self._lc_expanded
-        try:
-            info = expanded.get(container)
-            if info is None:
-                cell = self.process_threads_table.item(row_idx, 0)
-                if final_url:
-                    cell.setText(final_url)
-                    idx = self.process_threads_table.model().index(row_idx, 0)
-                    self.process_threads_table.model().dataChanged.emit(idx, idx, [Qt.DisplayRole])
+        if replace:
+            row_idx = self.find_row_by_container(gui_url)
+            if row_idx is None:
+                self.log.debug(
+                    "Row not found for container=%s (final=%s)", gui_url, final_url
+                )
+                return
+            expanded = self._lc_expanded
+            try:
+                info = expanded.get(gk)
+                if info is None:
+                    cell = self.process_threads_table.item(row_idx, 0)
+                    if final_url:
+                        cell.setText(final_url)
+                        idx = self.process_threads_table.model().index(row_idx, 0)
+                        self.process_threads_table.model().dataChanged.emit(
+                            idx, idx, [Qt.DisplayRole]
+                        )
+                        norm_final = self.canonical_url(final_url)
+                        if norm_final:
+                            self.row_index_by_url[norm_final] = row_idx
+                            hid = self.host_id_key(final_url)
+                            if hid:
+                                self.row_index_by_hostid[hid] = row_idx
+                    self.row_index_by_url.pop(gk, None)
+                    hid = self.host_id_key(gui_url)
+                    if hid:
+                        self.row_index_by_hostid.pop(hid, None)
+                    self.update_status_cell(
+                        row_idx, status, tooltip=self._format_tooltip(rowdict)
+                    )
+                    sidx = self.process_threads_table.model().index(
+                        row_idx, self.LINK_STATUS_COL
+                    )
+                    self.process_threads_table.model().dataChanged.emit(
+                        sidx, sidx, [Qt.DisplayRole]
+                    )
+                    expanded[gk] = {"row": row_idx, "inserted": 0}
+                    self.log.debug(
+                        "GUI replace OK row=%s url=%s status=%s",
+                        row_idx,
+                        final_url,
+                        status,
+                    )
+                else:
+                    base_row = info["row"]
+                    insert_at = base_row + info["inserted"] + 1
+                    self.process_threads_table.insertRow(insert_at)
+                    for k, v in list(self.row_index_by_url.items()):
+                        if v >= insert_at:
+                            self.row_index_by_url[k] = v + 1
+                    for k, v in expanded.items():
+                        if v["row"] >= insert_at:
+                            v["row"] += 1
+                    item = QTableWidgetItem(final_url)
+                    self.process_threads_table.setItem(insert_at, 0, item)
+                    self.update_status_cell(
+                        insert_at, status, tooltip=self._format_tooltip(rowdict)
+                    )
                     norm_final = self.canonical_url(final_url)
                     if norm_final:
-                        self.row_index_by_url[norm_final] = row_idx
-                norm_container = self.canonical_url(container)
-                self.row_index_by_url.pop(norm_container, None)
-                self.update_status_cell(row_idx, status, tooltip=self._format_tooltip(rowdict))
-                sidx = self.process_threads_table.model().index(row_idx, self.LINK_STATUS_COL)
-                self.process_threads_table.model().dataChanged.emit(sidx, sidx, [Qt.DisplayRole])
-                expanded[container] = {"row": row_idx, "inserted": 0}
-                self.log.debug("REPLACED container=%s -> %s status=%s", container, final_url, status)
-            else:
-                base_row = info["row"]
-                insert_at = base_row + info["inserted"] + 1
-                self.process_threads_table.insertRow(insert_at)
-                for k, v in list(self.row_index_by_url.items()):
-                    if v >= insert_at:
-                        self.row_index_by_url[k] = v + 1
-                for k, v in expanded.items():
-                    if v["row"] >= insert_at:
-                        v["row"] += 1
-                item = QTableWidgetItem(final_url)
-                self.process_threads_table.setItem(insert_at, 0, item)
-                self.update_status_cell(insert_at, status, tooltip=self._format_tooltip(rowdict))
-                norm_final = self.canonical_url(final_url)
-                if norm_final:
-                    self.row_index_by_url[norm_final] = insert_at
-                info["inserted"] += 1
-                self.log.debug("INSERTED sibling for container=%s url=%s status=%s", container, final_url, status)
-            key = final_url or container
+                        self.row_index_by_url[norm_final] = insert_at
+                        hid = self.host_id_key(final_url)
+                        if hid:
+                            self.row_index_by_hostid[hid] = insert_at
+                    info["inserted"] += 1
+                    self.log.debug(
+                        "INSERTED sibling for container=%s url=%s status=%s",
+                        gui_url,
+                        final_url,
+                        status,
+                    )
+                key = final_url or gui_url
+                cache.setdefault(key, {}).update({"status": status})
+                try:
+                    self.user_manager.save_user_data(self.LINK_STATUS_FILE, cache)
+                except Exception as e:
+                    self.log.warning("Failed to persist link_status.json: %s", e)
+                self._lc_counts[status] = self._lc_counts.get(status, 0) + 1
+            except Exception as e:
+                self.log.warning(
+                    "Failed to update row for container=%s: %s", gui_url, e
+                )
+
+            if is_last:
+                QtCore.QMetaObject.invokeMethod(
+                    self.link_check_worker,
+                    "on_gui_ack",
+                    QtCore.Qt.QueuedConnection,
+                    QtCore.Q_ARG(str, session),
+                    QtCore.Q_ARG(str, gui_url),
+                )
+                self.log.debug(
+                    "ACK sent session=%s container=%s", session, gui_url
+                )
+        else:
+            row_idx = self.row_index_by_url.get(gk)
+            if row_idx is None:
+                hid = self.host_id_key(gui_url)
+                if hid:
+                    row_idx = self.row_index_by_hostid.get(hid)
+            if row_idx is None:
+                self.log.debug("status-only row not found %s", gk)
+                return
+            self.update_status_cell(
+                row_idx, status, tooltip=self._format_tooltip(rowdict)
+            )
+            sidx = self.process_threads_table.model().index(
+                row_idx, self.LINK_STATUS_COL
+            )
+            self.process_threads_table.model().dataChanged.emit(
+                sidx, sidx, [Qt.DisplayRole]
+            )
+            key = gui_url
             cache.setdefault(key, {}).update({"status": status})
             try:
                 self.user_manager.save_user_data(self.LINK_STATUS_FILE, cache)
             except Exception as e:
                 self.log.warning("Failed to persist link_status.json: %s", e)
             self._lc_counts[status] = self._lc_counts.get(status, 0) + 1
-            updated = True
-        except Exception as e:
-            self.log.warning("Failed to update row for container=%s: %s", container, e)
-
-        if updated and is_last:
-            QtCore.QMetaObject.invokeMethod(
-                self.link_check_worker,
-                "on_gui_ack",
-                QtCore.Qt.QueuedConnection,
-                QtCore.Q_ARG(str, session),
-                QtCore.Q_ARG(str, container),
-            )
-            self.log.debug("ACK container=%s session=%s", container, session)
 
     def _on_link_finished(self, info: dict):
         ui_notifier.suppress(False)
@@ -3667,6 +3724,7 @@ class ForumBotGUI(QMainWindow):
         color = {
             "ONLINE": QColor("#1e9e36"),
             "OFFLINE": QColor("#c62828"),
+            "UNKNOWN": QColor("#c62828"),
         }.get(status, QColor("#9E9E9E"))
         display = "Online" if status == "ONLINE" else "Offline"
         self.set_row_status(row, display, color, tooltip=tooltip)
@@ -3674,6 +3732,7 @@ class ForumBotGUI(QMainWindow):
         color = {
             "ONLINE": QColor("#1e9e36"),
             "OFFLINE": QColor("#c62828"),
+            "UNKNOWN": QColor("#c62828"),
         }.get(status, QColor("#9E9E9E"))
         display = "Online" if status == "ONLINE" else "Offline"
         self.set_row_status(row, display, color, tooltip=tooltip)
