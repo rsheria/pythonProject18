@@ -7,7 +7,7 @@ class LinkCheckWorker(QThread):
     finished = pyqtSignal(list)  # كل النتائج
     error = pyqtSignal(str)
 
-    def __init__(self, jd_client, urls, cancel_event, poll_timeout_sec=60, poll_interval=1.0):
+    def __init__(self, jd_client, urls, cancel_event, poll_timeout_sec=120, poll_interval=1.0):
         super().__init__()
         self.jd = jd_client
         self.urls = urls or []
@@ -67,6 +67,8 @@ class LinkCheckWorker(QThread):
             items = self.jd.query_links()
             curr_count = len(items)
 
+            all_resolved = curr_count > 0 and all((it.get("availability") or "").upper() in ("ONLINE", "OFFLINE") for it in items)
+
             if curr_count > 0 and curr_count == last_count:
                 stable_hits += 1
             else:
@@ -75,7 +77,7 @@ class LinkCheckWorker(QThread):
             logging.debug("LinkCheckWorker: poll count=%d (stable=%d)", curr_count, stable_hits)
 
             # اعتبرها استقرت لما تثبت مرتين
-            if curr_count > 0 and stable_hits >= 2:
+            if all_resolved:
                 break
 
             last_count = curr_count
