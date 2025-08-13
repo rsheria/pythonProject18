@@ -138,7 +138,12 @@ class JDClient:
                 "url": True,
                 "contentURL": True,
                 "pluginURL": True,
+                # طلب الحقول المحتملة التي تعيد رابط الحاوية/المصدر
                 "containerURL": True,
+                "originURL": True,
+                "originUrl": True,
+                "sourceURL": True,
+                "referrerURL": True,
                 "packageUUID": True,
                 "packageName": True,
                 "startAt": 0,
@@ -153,14 +158,71 @@ class JDClient:
                 else:
                     raise
             for it in resp:
-                it["url"] = it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
-                it["containerURL"] = it.get("containerURL") or ""
+                it["url"] = (
+                    it.get("url")
+                    or it.get("contentURL")
+                    or it.get("pluginURL")
+                    or ""
+                )
+                container = (
+                    it.get("containerURL")
+                    or it.get("originURL")
+                    or it.get("originUrl")
+                    or it.get("sourceURL")
+                    or it.get("referrerURL")
+                    or ""
+                )
+                it["containerURL"] = container
             logging.debug("JD.query_links (raw): %d items", len(resp))
             return resp
         except Exception as e:
             logging.exception("JD.query_links: failed: %s", e)
             return []
 
+    def remove_links(self, link_ids) -> bool:
+        """Remove specific LinkGrabber entries by their UUIDs."""
+        try:
+            if not self.device:
+                logging.error("JD.remove_links: device not ready")
+                return False
+            ids = []
+            for uid in link_ids or []:
+                if uid is None:
+                    continue
+                try:
+                    ids.append(int(uid))
+                except Exception:
+                    ids.append(uid)
+            if not ids:
+                return True
+
+            try:
+                self.device.action("/linkgrabberv2/removeLinks", [ids])
+                logging.debug("JD.remove_links: removed %d items via [ids]", len(ids))
+                return True
+            except Exception:
+                pass
+
+            try:
+                self.device.action("/linkgrabberv2/removeLinks", [{"linkIds": ids}])
+                logging.debug("JD.remove_links: removed %d items via {'linkIds': [...]}" , len(ids))
+                return True
+            except Exception:
+                pass
+
+            lg = self.lg or getattr(self.device, "linkgrabberv2", None) or getattr(self.device, "linkgrabber", None)
+            if lg and hasattr(lg, "remove_links"):
+                try:
+                    lg.remove_links(ids)
+                    logging.debug("JD.remove_links: removed %d items via wrapper.remove_links", len(ids))
+                    return True
+                except Exception:
+                    pass
+            logging.error("JD.remove_links: all removal attempts failed")
+            return False
+        except Exception as e:
+            logging.exception("JD.remove_links: failed: %s", e)
+            return False
     def remove_all_from_linkgrabber(self) -> bool:
         """
         Clear LinkGrabber entries. Be tolerant with parameter forms and ID types.

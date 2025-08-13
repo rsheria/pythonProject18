@@ -248,4 +248,10 @@ class LinkCheckWorker(QtCore.QThread):
             if not info.get("acked"):
                 log.debug("No ACK | container=%s -> keeping in JD", ck)
 
+        # تنظيف LinkGrabber بعد انتهاء الفحص
+        try:
+            self.jd.remove_all_from_linkgrabber()
+        except Exception as e:
+            log.warning("Failed to clear JD LinkGrabber: %s", e)
+
         self.finished.emit({"session": self.session_id})
