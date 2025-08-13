@@ -281,6 +281,7 @@ class ForumBotGUI(QMainWindow):
         self.link_check_worker = None
         self._link_check_cache = {}
         self._load_link_check_cache()
+        self.row_index_by_url = {}
 
         # Initialize Rapidgator token from config
         self.bot.rapidgator_token = self.config.get('rapidgator_api_token', '')
@@ -3319,65 +3320,97 @@ class ForumBotGUI(QMainWindow):
         self.statusBar().showMessage(f"Starting link check for {len(urls)} URLs…")
         self.link_check_worker.start()
 
+    def normalize_url(self, s: str) -> str:
+        if not s:
+            return ""
+        try:
+            from urllib.parse import urlsplit, urlunsplit
+            sp = urlsplit(s.strip())
+            host = (sp.hostname or "").lower()
+            if host.startswith("www."):
+                host = host[4:]
+            path = sp.path or ""
+            if path.endswith("/"):
+                path = path[:-1]
+            if path.endswith(".html"):
+                path = path[:-5]
+            return urlunsplit((sp.scheme.lower(), host, path, "", ""))
+        except Exception:
+            return s.strip().lower().rstrip("/").removesuffix(".html")
     def on_cancel_check_clicked(self):
         if self.link_check_worker and self.link_check_worker.isRunning():
             self.link_check_cancel_event.set()
             self.statusBar().showMessage("تم طلب إلغاء فحص الروابط…")
 
+
     def _on_link_progress(self, rowdict: dict):
         gui_url = (rowdict.get("gui_url") or rowdict.get("url") or "").strip()
         final_url = (rowdict.get("final_url") or "").strip()
         status = (rowdict.get("status") or "OFFLINE").upper()
-        replace = bool(rowdict.get("replace") and final_url)
+        replace = bool(rowdict.get("replace"))
+        alias = rowdict.get("alias")
 
-        row_idx = self._find_row_by_url(gui_url)
-        if row_idx < 0:
+        key = self.normalize_url(gui_url)
+        row_idx = self.row_index_by_url.get(key)
 
-            self.log.debug("Row not found for URL: %s", gui_url)
-            sample = []
+        if row_idx is None and final_url:
+            row_idx = self.row_index_by_url.get(self.normalize_url(final_url))
+
+        if row_idx is None:
             rows = self.process_threads_table.rowCount()
-            for r in range(min(rows, 3)):
-                row_urls = []
+            key_no_html = key[:-5] if key.endswith(".html") else key
+            for r in range(rows):
+                found = False
                 for c in (3, 4, 5):
                     it = self.process_threads_table.item(r, c)
-                    if it:
-                        row_urls.append((it.text() or "").strip())
-                if row_urls:
-                    sample.append(row_urls)
-            if sample:
-                self.log.debug("Sample table URLs: %s", sample)
-            return
-        else:
-            self.log.debug("Row %d found for %s", row_idx, gui_url)
+                    if not it:
+                        continue
+                    for part in (it.text() or "").split():
+                        n = self.normalize_url(part.strip())
+                        if n == key or n.startswith(key_no_html):
+                            row_idx = r
+                            found = True
+                            break
+                    if found:
+                        break
+                if found:
+                    break
+            if row_idx is None:
+                sample = []
+                for r in range(min(rows, 3)):
+                    cell = self.process_threads_table.item(r, 3)
+                    if cell:
+                        text = (cell.text() or "").strip().splitlines()[0] if cell.text() else ""
+                        sample.append([text, self.normalize_url(text)])
+                logging.debug("Row not found | gui_url=%s final_url=%s sample_norm=%s", gui_url, final_url, sample)
+                return
 
-            cache = getattr(self, "_link_check_cache", None)
-            if cache is None:
-                self._load_link_check_cache()
-                cache = getattr(self, "_link_check_cache", {})
+        cache = getattr(self, "_link_check_cache", None)
+        if cache is None:
+            self._load_link_check_cache()
+            cache = getattr(self, "_link_check_cache", {})
 
-        if replace:
+        self.update_status_cell(row_idx, status, tooltip=self._format_tooltip(rowdict))
+        model = self.process_threads_table.model()
+        sidx = model.index(row_idx, self.LINK_STATUS_COL)
+        model.dataChanged.emit(sidx, sidx, [Qt.DisplayRole])
+
+        if replace and final_url:
             self._replace_url_in_row(row_idx, gui_url, final_url)
-            self.update_status_cell(row_idx, status, tooltip=self._format_tooltip(rowdict))
-            model = self.process_threads_table.model()
-            sidx = model.index(row_idx, self.LINK_STATUS_COL)
-            model.dataChanged.emit(sidx, sidx, [Qt.DisplayRole])
-
-            old_key = gui_url
-            new_key = final_url
-            data = cache.get(old_key, {})
-            if data:
-                cache.pop(old_key, None)
-                cache[new_key] = data
-            cache.setdefault(new_key, {})["status"] = status
-            self.user_manager.save_user_data(self.LINK_STATUS_FILE, cache)
-            self.log.debug("REPLACED in GUI: %s -> %s (%s)", gui_url, final_url, status)
+            old_norm = key
+            self.row_index_by_url.pop(old_norm, None)
+            new_norm = self.normalize_url(final_url)
+            self.row_index_by_url[new_norm] = row_idx
+            if alias and "://" in str(alias):
+                self.row_index_by_url[self.normalize_url(alias)] = row_idx
+            data = cache.pop(gui_url, {})
+            cache.setdefault(final_url, data).update({"status": status})
         else:
-            self.update_status_cell(row_idx, status, tooltip=self._format_tooltip(rowdict))
-            model = self.process_threads_table.model()
-            sidx = model.index(row_idx, self.LINK_STATUS_COL)
-            model.dataChanged.emit(sidx, sidx, [Qt.DisplayRole])
-            cache.setdefault(gui_url, {})["status"] = status
+            cache.setdefault(gui_url, {}).update({"status": status})
+        try:
             self.user_manager.save_user_data(self.LINK_STATUS_FILE, cache)
+        except Exception as e:
+            logging.warning("Failed to persist link_status.json: %s", e)
 
     def _on_link_finished(self, results: list):
         ui_notifier.suppress(False)
@@ -3538,13 +3571,15 @@ class ForumBotGUI(QMainWindow):
             "ONLINE": QColor("#1e9e36"),
             "OFFLINE": QColor("#c62828"),
         }.get(status, QColor("#9E9E9E"))
-        self.set_row_status(row, status, color, tooltip=tooltip)
+        display = "Online" if status == "ONLINE" else "Offline"
+        self.set_row_status(row, display, color, tooltip=tooltip)
     def update_status_cell(self, row, status, tooltip=""):
         color = {
             "ONLINE": QColor("#1e9e36"),
             "OFFLINE": QColor("#c62828"),
         }.get(status, QColor("#9E9E9E"))
-        self.set_row_status(row, status, color, tooltip=tooltip)
+        display = "Online" if status == "ONLINE" else "Offline"
+        self.set_row_status(row, display, color, tooltip=tooltip)
     def set_row_status(self, row, status, color, tooltip=""):
         item = self.process_threads_table.item(row, self.LINK_STATUS_COL)
         if item is None:
@@ -6037,6 +6072,7 @@ class ForumBotGUI(QMainWindow):
     def populate_process_threads_table(self, process_threads):
         """Populate the Process Threads table."""
         self.process_threads_table.setRowCount(0)
+        self.row_index_by_url = {}
 
         # Flatten threads to a list for sorting
         flat_threads = []
@@ -6212,6 +6248,11 @@ class ForumBotGUI(QMainWindow):
             primary_item.setData(Qt.UserRole + 1, status_class)
             self.process_threads_table.setItem(row_position, 3, primary_item)
 
+            for link in primary_links:
+                norm = self.normalize_url(link)
+                if norm:
+                    self.row_index_by_url[norm] = row_position
+
             # Rapidgator Backup Link
             rg_backup_links = links.get('rapidgator-backup', [])
             flat_backup = []
@@ -6227,6 +6268,11 @@ class ForumBotGUI(QMainWindow):
 
             self.process_threads_table.setItem(row_position, 4, rg_backup_item)
 
+            for link in flat_backup:
+                norm = self.normalize_url(link)
+                if norm:
+                    self.row_index_by_url[norm] = row_position
+
             # Keeplinks Link
             keeplinks_link = links.get('keeplinks', '')
             if isinstance(keeplinks_link, list):
@@ -6235,6 +6281,11 @@ class ForumBotGUI(QMainWindow):
             keeplinks_item.setData(Qt.UserRole, status_str)
             keeplinks_item.setData(Qt.UserRole + 1, status_class)
             self.process_threads_table.setItem(row_position, 5, keeplinks_item)
+
+            for link in keeplinks_link.splitlines():
+                norm = self.normalize_url(link.strip())
+                if norm:
+                    self.row_index_by_url[norm] = row_position
 
             # Password column
             password_text = thread.get('password', '')
