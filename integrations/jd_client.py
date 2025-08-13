@@ -138,9 +138,9 @@ class JDClient:
                 "url": True,
                 "contentURL": True,
                 "pluginURL": True,
+                "containerURL": True,
                 "packageUUID": True,
                 "packageName": True,
-                "containerURL": True,
                 "startAt": 0,
                 "maxResults": -1,
             }
@@ -154,6 +154,7 @@ class JDClient:
                     raise
             for it in resp:
                 it["url"] = it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
+                it["containerURL"] = it.get("containerURL") or ""
             logging.debug("JD.query_links (raw): %d items", len(resp))
             return resp
         except Exception as e:
