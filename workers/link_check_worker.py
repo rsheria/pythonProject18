@@ -87,11 +87,11 @@ class LinkCheckWorker(QtCore.QThread):
         self.cancel_event = cancel_event
         self.poll_timeout = poll_timeout_sec
         self.poll_interval = poll_interval
-        self.host_priority = []
-        self.session_id = None
-        self.awaiting_ack: dict[str, list] = {}
-        self._eligible_ids: list = []
-        self._direct_ids: list = []
+        self.host_priority: list[str] = []
+        self.session_id: str | None = None
+        # {(session_id, group_id): {"container_url": str, "ids": [jd_ids]}}
+        self.awaiting_ack: dict[tuple[str, str], dict] = {}
+        self._direct_ids: list[str] = []
 
     def set_host_priority(self, priority_list: list):
         self.host_priority = []
@@ -102,46 +102,56 @@ class LinkCheckWorker(QtCore.QThread):
                     h = h[4:]
                 self.host_priority.append(h)
 
-    @QtCore.pyqtSlot(str, str)
-    def ack_container_updated(self, container_url: str, session_id: str):
+    @QtCore.pyqtSlot(str, str, str)
+    def ack_replaced(self, container_url: str, session_id: str, group_id: str):
+        """Ack from GUI that container_url has been replaced in the table."""
         if session_id != self.session_id:
             return
 
-        ids = self.awaiting_ack.pop(container_url, [])
+        key = (session_id, group_id)
+        info = self.awaiting_ack.pop(key, None)
+        if not info:
+            return
+        ids = info.get("ids", [])
         if ids:
-            self._eligible_ids.extend(ids)
-            logging.getLogger(__name__).debug(
-                "ACK from GUI | container=%s", canonical_url(container_url)
-            )
+            try:
+                self.jd.remove_links(ids)
+                logging.getLogger(__name__).debug(
+                    "ACK container | container_url=%s -> remove JD",
+                    canonical_url(container_url),
+                )
+            except Exception as e:
+                logging.getLogger(__name__).warning(
+                    "JD remove failed for container=%s: %s", container_url, e
+                )
 
     def run(self):
         log = logging.getLogger(__name__)
         self.session_id = uuid.uuid4().hex
         self.awaiting_ack.clear()
-        self._eligible_ids.clear()
         self._direct_ids.clear()
 
         if not self.urls:
             msg = "No URLs to check."
             log.error("LinkCheckWorker: %s", msg)
             self.error.emit(msg)
-            self.finished.emit({"session": self.session_id})
+            self.finished.emit({"session_id": self.session_id})
             return
 
         if self.cancel_event.is_set():
-            self.finished.emit({"session": self.session_id})
+            self.finished.emit({"session_id": self.session_id})
             return
 
         if not self.jd.connect():
             self.error.emit("JDownloader connection failed.")
-            self.finished.emit({"session": self.session_id})
+            self.finished.emit({"session_id": self.session_id})
             return
 
 
 
         if not self.jd.add_links_to_linkgrabber(self.urls):
             self.error.emit("Failed to add links to LinkGrabber.")
-            self.finished.emit({"session": self.session_id})
+            self.finished.emit({"session_id": self.session_id})
             return
 
         time.sleep(2)
@@ -152,7 +162,7 @@ class LinkCheckWorker(QtCore.QThread):
 
         while time.time() - t0 < self.poll_timeout:
             if self.cancel_event.is_set():
-                self.finished.emit({"session": self.session_id})
+                self.finished.emit({"session_id": self.session_id})
                 return
 
             items = self.jd.query_links()
@@ -178,10 +188,6 @@ class LinkCheckWorker(QtCore.QThread):
 
         items = self.jd.query_links() or []
 
-        def _clean_host(h):
-            h = (h or "").lower().strip()
-            return h[4:] if h.startswith("www.") else h
-
         def _availability(it):
             a = (it.get("availability") or "").upper()
             return a if a in ("ONLINE", "OFFLINE") else "UNKNOWN"
@@ -189,37 +195,49 @@ class LinkCheckWorker(QtCore.QThread):
         def _host_of(it):
             return _clean_host(it.get("host"))
 
-        def pick_host(items, priority):
-            hosts = {}
+        def pick_best(items, priority):
+            hosts = defaultdict(list)
+
             for it in items:
-                hosts.setdefault(_host_of(it), []).append(it)
-            for p in priority:
-                if p in hosts:
-                    return p
+                hosts[_host_of(it)].append(it)
+            priority_map = {h: i for i, h in enumerate(priority or [])}
+            online_hosts = []
+            offline_hosts = []
             for h, lst in hosts.items():
+                idx = priority_map.get(h, len(priority_map))
                 if any(_availability(x) == "ONLINE" for x in lst):
-                    return h
-            return next(iter(hosts.keys()), "")
+                    online_hosts.append((idx, h, lst))
+                else:
+                    offline_hosts.append((idx, h, lst))
+                if online_hosts:
+                    idx, host, lst = sorted(online_hosts, key=lambda x: x[0])[0]
+                else:
+                    idx, host, lst = sorted(offline_hosts, key=lambda x: x[0])[0]
+                lst.sort(key=lambda it: {"ONLINE": 0, "OFFLINE": 1, "UNKNOWN": 2}[_availability(it)])
+                return host, lst
 
-        groups = {}
-        priority = self.host_priority or []
-
+        groups: dict[str, list] = defaultdict(list)
         for it in items:
             item_url = it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
-            container_url = it.get("containerURL") or ""
+            container_url = (
+                it.get("containerURL")
+                or it.get("origin")
+                or it.get("pluginURL")
+                or it.get("url")
+                or ""
+            )
             chost = _clean_host(urlsplit(container_url or item_url).hostname or "")
-            is_container = bool(container_url) or chost in CONTAINER_HOSTS
-            key = container_url if container_url else item_url
+            is_container = chost in CONTAINER_HOSTS or bool(it.get("containerURL"))
             if is_container:
-                groups.setdefault(key, []).append(it)
+                groups[container_url].append(it)
             else:
                 availability = _availability(it)
                 uid = it.get("uuid")
                 if uid:
                     self._direct_ids.append(uid)
                 payload = {
-                    "type": "progress",
-                    "session": self.session_id,
+                    "type": "status",
+                    "session_id": self.session_id,
                     "url": item_url,
                     "status": availability,
                 }
@@ -232,79 +250,73 @@ class LinkCheckWorker(QtCore.QThread):
                     availability,
                 )
 
-        for container_key, gitems in groups.items():
-            log.debug(
-                "Group for container=%s candidates=%d", container_key, len(gitems)
-            )
-            chosen_host = pick_host(gitems, priority)
-            selected = [it for it in gitems if _host_of(it) == chosen_host]
-            if not selected:
-                selected = gitems[:]
-            selected.sort(
-                key=lambda it: {"ONLINE": 0, "OFFLINE": 1, "UNKNOWN": 2}[_availability(it)]
-            )
+        total_groups = len(groups)
+        for idx, (container_key, gitems) in enumerate(groups.items(), start=1):
+            host, ordered = pick_best(gitems, self.host_priority)
 
             jd_ids = [it.get("uuid") for it in gitems if it.get("uuid")]
-            self.awaiting_ack[container_key] = jd_ids
-
-            final = selected[0]
-            final_url = final.get("url") or final.get("contentURL") or final.get("pluginURL") or ""
-            status_first = _availability(final)
-            siblings = []
-            status_map = {final_url: status_first}
-            for it in selected[1:]:
-
-                furl = it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
-                siblings.append(furl)
-                status_map[furl] = _availability(it)
-            payload = {
-                "type": "progress",
-                "session": self.session_id,
+            group_id = uuid.uuid4().hex
+            self.awaiting_ack[(self.session_id, group_id)] = {
                 "container_url": container_key,
-                "final_url": final_url,
-                "status": status_first,
-                "replace": True,
-                "host": chosen_host,
-                "siblings": siblings,
-                "status_map": status_map,
+                "ids": jd_ids,
             }
+
+            chosen = ordered[0]
+            chosen_url = (
+                chosen.get("url")
+                or chosen.get("contentURL")
+                or chosen.get("pluginURL")
+                or ""
+            )
+            chosen_status = _availability(chosen)
+            chosen_alias = chosen.get("name")
+
+            siblings = []
+            for alt in ordered[1:]:
+                aurl = (
+                    alt.get("url")
+                    or alt.get("contentURL")
+                    or alt.get("pluginURL")
+                    or ""
+                )
+                siblings.append({"url": aurl, "status": _availability(alt)})
+
+            payload = {
+                "type": "container",
+                "container_url": container_key,
+                "chosen": {
+                    "url": chosen_url,
+                    "status": chosen_status,
+                    "host": host,
+                },
+                "siblings": siblings,
+                "replace": True,
+                "session_id": self.session_id,
+                "group_id": group_id,
+                "total_groups": total_groups,
+                "idx": idx,
+            }
+            if chosen_alias:
+                payload["chosen"]["alias"] = chosen_alias
             self.progress.emit(payload)
             log.debug(
-                "EMIT replace | container=%s final=%s status=%s siblings=%d session=%s",
+                "EMIT container | container_url=%s chosen=%s/%s idx=%d/%d",
                 canonical_url(container_key),
-                canonical_url(final_url),
-                status_first,
-                len(siblings),
-                self.session_id,
-            )
-        # wait for ACKs
-        wait_deadline = time.time() + 5.0
-        while self.awaiting_ack and not self.cancel_event.is_set() and time.time() < wait_deadline:
-            QtCore.QCoreApplication.processEvents()
-            time.sleep(0.1)
-
-        remove_ids = self._eligible_ids + self._direct_ids
-        removed = 0
-        if remove_ids:
-            for attempt in range(2):
-                try:
-                    if self.jd.remove_links(remove_ids):
-                        removed = len(remove_ids)
-                        break
-                except Exception as e:
-                    if "400" in str(e) and attempt == 0:
-                        time.sleep(0.5)
-                        continue
-                    log.warning("remove_links failed: %s", e)
-                    break
-                time.sleep(0.5)
-            log.debug(
-                "JD.clear: acknowledged, removed %d items for session=%s",
-                removed,
-                self.session_id,
+                host,
+                chosen_status,
+                idx,
+                total_groups,
             )
 
-        for ck in self.awaiting_ack.keys():
-            log.debug("No ACK | container=%s -> keeping in JD", ck)
+        if self._direct_ids:
+            try:
+                self.jd.remove_links(self._direct_ids)
+            except Exception as e:
+                log.warning("remove direct links failed: %s", e)
 
-        self.finished.emit({"session": self.session_id})
+        for info in self.awaiting_ack.values():
+            log.warning(
+                "No ACK | container=%s -> keeping in JD", info.get("container_url")
+            )
+
+        self.finished.emit({"session_id": self.session_id})

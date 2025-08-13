@@ -3325,10 +3325,11 @@ class ForumBotGUI(QMainWindow):
         self._lc_expanded = {}
         self._lc_counts = {"ONLINE": 0, "OFFLINE": 0, "UNKNOWN": 0}
         self._lc_stats = {
-            "containers_replaced": 0,
-            "direct_updated": 0,
+            "replaced": 0,
+            "status_updates": 0,
             "rows_not_found": 0,
         }
+        self._lc_total_groups = 0
         urls = self.collect_all_candidate_urls_for_selected_threads()
         if not urls:
             self.statusBar().showMessage("لا توجد روابط للفحص.")
@@ -3405,36 +3406,37 @@ class ForumBotGUI(QMainWindow):
         return ""
 
     def rebuild_row_index(self):
-        """Rebuild lookup dictionaries for all URLs in the table."""
-        self.by_raw_url = {}
-        self.by_canonical = {}
-        self.by_host_id = {}
+        """Rebuild lookup dictionaries for container and direct URLs."""
+        self.row_by_container = {}
+        self.row_by_direct = {}
         rows = self.process_threads_table.rowCount()
         cols = self.process_threads_table.columnCount()
         for r in range(rows):
+            # Column 3 (index 2) is used for container replacement
+            container_cell = self.process_threads_table.item(r, 2)
+            if container_cell:
+                text = container_cell.text() or ""
+                for raw in URL_RE.findall(text):
+                    raw = raw.strip().strip('.,);]')
+                    canon = self.canonical_url(raw)
+                    self.row_by_container[raw] = r
+                    if canon:
+                        self.row_by_container[canon] = r
             for c in range(cols):
                 cell = self.process_threads_table.item(r, c)
                 if not cell:
                     continue
-                text = (cell.text() or "").strip()
+                text = cell.text() or ""
                 if not text:
                     continue
-                for m in URL_RE.findall(text):
-                    url = m.strip().strip('.,);]')
-                    canon = self.canonical_url(url)
-                    hid = self.host_id_key(url)
-                    self.by_raw_url[url] = r
+                for raw in URL_RE.findall(text):
+                    raw = raw.strip().strip('.,);]')
+                    canon = self.canonical_url(raw)
+                    hid = self.host_id_key(raw)
                     if canon:
-                        self.by_canonical[canon] = r
+                        self.row_by_direct[canon] = r
                     if hid:
-                        self.by_host_id[hid] = r
-                    self.log.debug(
-                        "Index add | raw=%s canonical=%s host-id=%s -> row=%s",
-                        url,
-                        canon,
-                        hid,
-                        r,
-                    )
+                        self.row_by_direct[hid] = r
     def find_row(self, url: str):
         if not url:
             return None
@@ -3490,32 +3492,40 @@ class ForumBotGUI(QMainWindow):
             self._load_link_check_cache()
             cache = getattr(self, "_link_check_cache", {})
 
-        if payload.get("replace") and payload.get("container_url"):
+        ptype = payload.get("type")
+        if ptype == "container":
+            self._lc_total_groups = max(
+                self._lc_total_groups, payload.get("total_groups", 0)
+            )
             container_url = (payload.get("container_url") or "").strip()
-            final_url = (payload.get("final_url") or "").strip()
-            siblings = payload.get("siblings") or []
-            status_map = payload.get("status_map") or {
-                final_url: (payload.get("status") or "UNKNOWN").upper()
-            }
-            session = payload.get("session") or ""
-
-            row_idx = self.find_row(container_url)
+            row_idx = self.row_by_container.get(container_url)
             if row_idx is None:
+                canon = self.canonical_url(container_url)
+                row_idx = self.row_by_container.get(canon)
+            if row_idx is None:
+                self.log.debug(
+                    "ROW NOT FOUND (container) | container=%s",
+                    self.canonical_url(container_url),
+                )
                 self._lc_stats["rows_not_found"] += 1
                 return
-            urls_to_insert = [final_url] + [s for s in siblings if s and s != final_url]
-            self.process_threads_table.removeRow(row_idx)
-            offset = 0
-            for url in urls_to_insert:
-                self.process_threads_table.insertRow(row_idx + offset)
-                item = QTableWidgetItem(url)
-                self.process_threads_table.setItem(row_idx + offset, 0, item)
-                stat = (status_map.get(url) or payload.get("status") or "UNKNOWN").upper()
-                self.update_status_cell(row_idx + offset, stat)
-                cache.setdefault(url, {}).update({"status": stat})
-                self._lc_counts[stat] = self._lc_counts.get(stat, 0) + 1
-                offset += 1
+            chosen = payload.get("chosen", {})
+            chosen_url = chosen.get("url", "")
+            status = (chosen.get("status") or "UNKNOWN").upper()
+            siblings = payload.get("siblings") or []
+            links = [chosen_url] + [s.get("url") for s in siblings if s.get("url")]
+            cell = self.process_threads_table.item(row_idx, 2)
+            if cell is None:
+                cell = QTableWidgetItem()
+                self.process_threads_table.setItem(row_idx, 2, cell)
+            cell.setText("\n".join(links))
 
+            display_status = "OFFLINE" if status == "UNKNOWN" else status
+            self.update_status_cell(row_idx, display_status)
+
+            for entry in links:
+                if entry:
+                    cache.setdefault(entry, {}).update({"status": status})
             try:
                 self.user_manager.save_user_data(self.LINK_STATUS_FILE, cache)
             except Exception as e:
@@ -3525,57 +3535,61 @@ class ForumBotGUI(QMainWindow):
 
             QtCore.QMetaObject.invokeMethod(
                 self.link_check_worker,
-                "ack_container_updated",
+                "ack_replaced",
                 QtCore.Qt.QueuedConnection,
                 QtCore.Q_ARG(str, container_url),
-                QtCore.Q_ARG(str, session),
+                QtCore.Q_ARG(str, payload.get("session_id") or ""),
+                QtCore.Q_ARG(str, payload.get("group_id") or ""),
             )
             self.log.debug(
-                "GUI ACK | session=%s container=%s",
-                session,
+                "GUI REPLACED | container=%s \u2192 direct=%s | status=%s (ack sent)",
                 self.canonical_url(container_url),
+                self.canonical_url(chosen_url),
+                status,
             )
-            self.log.debug(
-                "REPLACE OK | row=%s container=%s -> final=%s (+%d siblings) status=%s",
-                row_idx,
-                self.canonical_url(container_url),
-                self.canonical_url(final_url),
-                max(len(urls_to_insert) - 1, 0),
-                (payload.get("status") or "UNKNOWN").upper(),
-            )
-            self._lc_stats["containers_replaced"] += 1
+            self._lc_stats["replaced"] += 1
             return
 
-        url = (payload.get("url") or "").strip()
-        status = (payload.get("status") or "UNKNOWN").upper()
-        row_idx = self.find_row(url)
-        if row_idx is None:
-            self._lc_stats["rows_not_found"] += 1
-            return
-        self.update_status_cell(row_idx, status)
-        cache.setdefault(url, {}).update({"status": status})
-        try:
-            self.user_manager.save_user_data(self.LINK_STATUS_FILE, cache)
-        except Exception as e:
-            self.log.warning("Failed to persist link_status.json: %s", e)
-        self._lc_counts[status] = self._lc_counts.get(status, 0) + 1
-        self._lc_stats["direct_updated"] += 1
-        self.log.debug(
-            "STATUS OK | row=%s url=%s => %s",
-            row_idx,
-            self.canonical_url(url),
-            status,
-        )
+        if ptype == "status":
+            url = (payload.get("url") or "").strip()
+            status = (payload.get("status") or "UNKNOWN").upper()
+            canon = self.canonical_url(url)
+            row_idx = self.row_by_direct.get(canon)
+            if row_idx is None:
+                hid = self.host_id_key(url)
+                row_idx = self.row_by_direct.get(hid)
+            if row_idx is None:
+                self.log.debug("status-only row not found | %s", canon or url)
+                self._lc_stats["rows_not_found"] += 1
+                return
+            self.update_status_cell(row_idx, status)
+            cache.setdefault(url, {}).update({"status": status})
+            try:
+                self.user_manager.save_user_data(self.LINK_STATUS_FILE, cache)
+            except Exception as e:
+                self.log.warning("Failed to persist link_status.json: %s", e)
+            self._lc_stats["status_updates"] += 1
+            self.log.debug(
+                "STATUS OK | row=%s url=%s => %s",
+                row_idx,
+                self.canonical_url(url),
+                status,
+            )
+
     def _on_link_finished(self, info: dict):
         ui_notifier.suppress(False)
-        counts = getattr(self, "_lc_counts", {})
-        online = counts.get("ONLINE", 0)
-        offline = counts.get("OFFLINE", 0)
-        unknown = counts.get("UNKNOWN", 0)
+
         try:
             self._save_link_check_cache()
         except Exception:
             pass
+        pending = max(self._lc_total_groups - self._lc_stats.get("replaced", 0), 0)
+        self.log.debug(
+            "SUMMARY | replaced=%d, status_updates=%d, pending_without_ack=%d",
+            self._lc_stats.get("replaced", 0),
+            self._lc_stats.get("status_updates", 0),
+            pending,
+        )
         self.link_check_worker = None
 
     def _on_link_error(self, msg: str):
