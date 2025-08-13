@@ -3317,20 +3317,14 @@ class ForumBotGUI(QMainWindow):
             self.statusBar().showMessage("تم طلب إلغاء فحص الروابط…")
 
     def _on_link_progress(self, rowdict: dict):
-        # figure out which row to update: prefer container_url (keeplinks) then direct url
-        container_url = (rowdict.get("container_url") or "").strip()
-        direct_url = (rowdict.get("url") or "").strip()
-        display_url = (rowdict.get("display_url") or container_url or direct_url)
+        gui_url = (rowdict.get("gui_url") or "").strip()
+        final_url = (rowdict.get("final_url") or "").strip()
 
-        row_idx = self._find_row_for_url([container_url, direct_url])
-        if row_idx < 0:
-            # fallback: try display_url only
-            row_idx = self._find_row_for_url([display_url])
-
-        # If still not found, bail out quietly (don't crash)
+        row_idx = self._find_row_by_url(gui_url)
         if row_idx < 0:
             return
-
+        if rowdict.get("replace") and final_url:
+            self._replace_url_in_row(row_idx, gui_url, final_url)
         status = rowdict.get("status", "UNKNOWN")
         self.update_status_cell(row_idx, status, tooltip=self._format_tooltip(rowdict))
 
@@ -3341,17 +3335,18 @@ class ForumBotGUI(QMainWindow):
                 "host": rowdict.get("host"),
                 "name": rowdict.get("name"),
                 "size": rowdict.get("size"),
-                "ts": int(time.time())
+                "final_url": final_url or gui_url,
+                "ts": int(time.time()),
             }
 
             if not hasattr(self, "_link_check_cache") or self._link_check_cache is None:
                 self._load_link_check_cache()
 
-            if container_url:
-                self._link_check_cache[container_url] = entry
-            if direct_url:
-
-                self._link_check_cache[direct_url] = entry
+            cache = self._link_check_cache
+            old = cache.pop(gui_url, {})
+            old.update(entry)
+            cache[final_url or gui_url] = old
+            self._save_link_check_cache()
         except Exception:
             pass
 
@@ -3455,6 +3450,19 @@ class ForumBotGUI(QMainWindow):
                             return r
         return -1
 
+    def _find_row_by_url(self, url: str) -> int:
+        return self._find_row_for_url([url])
+
+    def _replace_url_in_row(self, row_idx: int, old_url: str, new_url: str):
+        table = self.process_threads_table
+        cols = table.columnCount()
+        for c in range(cols):
+            item = table.item(row_idx, c)
+            if not item:
+                continue
+            text = item.text() or ""
+            if old_url in text:
+                item.setText(text.replace(old_url, new_url))
     def find_row_by_url(self, url):
         table = self.process_threads_table
         for row in range(table.rowCount()):

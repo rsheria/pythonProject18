@@ -100,11 +100,18 @@ class LinkCheckWorker(QThread):
             a = (a or "").upper()
             return 0 if a == "ONLINE" else (1 if a == "OFFLINE" else 2)
 
-        # Group by packageUUID so keeplinks expansions are evaluated together
+        # Group items by container key: prefer contentURL > containerURL > origin/pluginURL > url
         groups = {}
 
         for it in items:
-            key = it.get("packageUUID") or "all"
+            key = (
+                it.get("contentURL")
+                or it.get("containerURL")
+                or it.get("origin")
+                or it.get("pluginURL")
+                or it.get("url")
+                or ""
+            )
             groups.setdefault(key, []).append(it)
 
         results = []
@@ -113,23 +120,19 @@ class LinkCheckWorker(QThread):
                 group,
                 key=lambda it: (host_rank(it.get("host")), availability_rank(it.get("availability")))
             )[0]
-            best_direct_url = best.get("url") or best.get("contentURL") or best.get("pluginURL") or ""
-            container_url = best.get("containerURL") or ""
+            gui_url = key
+            final_url = best.get("url") or best.get("contentURL") or best.get("pluginURL") or ""
             availability = (best.get("availability") or "").upper()
             if availability not in ("ONLINE", "OFFLINE"):
                 availability = "UNKNOWN"
             d = {
-                # direct link the user would actually download
-                "url": best_direct_url,
-                # keeplinks/container url (if any). empty for plain direct links
-                "container_url": container_url,
-                # convenience: what to use for row matching/display first
-                "display_url": container_url or best_direct_url,
+                "gui_url": gui_url,
+                "final_url": final_url,
                 "status": availability,
                 "name": best.get("name") or "",
                 "host": best.get("host") or "",
                 "size": best.get("size") or -1,
-                "package": best.get("packageName") or "",
+                "replace": gui_url != final_url,
             }
             self.progress.emit(d)
             results.append(d)
