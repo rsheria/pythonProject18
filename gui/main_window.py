@@ -31,7 +31,7 @@ import sys
 import time
 import webbrowser
 from datetime import datetime
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse, urlsplit, urlunsplit
 
 import requests
 from bs4 import BeautifulSoup, NavigableString
@@ -78,6 +78,37 @@ from utils.paths import get_data_folder
 from workers.login_thread import LoginThread
 from integrations.jd_client import JDClient
 from workers.link_check_worker import LinkCheckWorker
+RG_RE = re.compile(r"^/file/([A-Za-z0-9]+)(?:/.*)?$")
+NF_RE = re.compile(r"^/view/([A-Za-z0-9]+)(?:/.*)?$")
+DD_RE = re.compile(r"^/(?:f|file)/([A-Za-z0-9]+)(?:/.*)?$")
+
+
+def _clean_host(host: str) -> str:
+    host = (host or "").lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def canonicalize_path(host: str, path: str) -> str:
+    host = _clean_host(host)
+    path = path or ""
+    if path.endswith("/"):
+        path = path[:-1]
+    if path.endswith(".html"):
+        path = path[:-5]
+
+    if host.endswith("rapidgator.net"):
+        m = RG_RE.match(path)
+        if m:
+            return f"/file/{m.group(1)}"
+    elif host.endswith("nitroflare.com"):
+        m = NF_RE.match(path)
+        if m:
+            return f"/view/{m.group(1)}"
+    elif host.endswith("ddownload.com"):
+        m = DD_RE.match(path)
+        if m:
+            return f"/f/{m.group(1)}"
+    return path
 from threading import Event
 from .advanced_bbcode_editor import AdvancedBBCodeEditor
 # Import modern UI components
@@ -282,6 +313,7 @@ class ForumBotGUI(QMainWindow):
         self._link_check_cache = {}
         self._load_link_check_cache()
         self.row_index_by_url = {}
+        self.row_index_by_hostid = {}
 
         # Initialize Rapidgator token from config
         self.bot.rapidgator_token = self.config.get('rapidgator_api_token', '')
@@ -3320,6 +3352,39 @@ class ForumBotGUI(QMainWindow):
         self.statusBar().showMessage(f"Starting link check for {len(urls)} URLs…")
         self.link_check_worker.start()
 
+    def canonical_url(self, s: str) -> str:
+        if not s:
+            return ""
+        try:
+            sp = urlsplit(s.strip())
+            host = _clean_host(sp.hostname or "")
+            path = canonicalize_path(host, sp.path or "")
+            return urlunsplit((sp.scheme.lower(), host, path, "", ""))
+        except Exception:
+            return (s or "").strip().lower().rstrip("/").removesuffix(".html")
+
+    def host_id_key(self, s: str) -> str:
+        if not s:
+            return ""
+        try:
+            sp = urlsplit(s.strip())
+            host = _clean_host(sp.hostname or "")
+            path = sp.path or ""
+            if host.endswith("rapidgator.net"):
+                m = RG_RE.match(path)
+                if m:
+                    return f"{host}:{m.group(1)}"
+            elif host.endswith("nitroflare.com"):
+                m = NF_RE.match(path)
+                if m:
+                    return f"{host}:{m.group(1)}"
+            elif host.endswith("ddownload.com"):
+                m = DD_RE.match(path)
+                if m:
+                    return f"{host}:{m.group(1)}"
+        except Exception:
+            pass
+        return ""
     def normalize_url(self, s: str) -> str:
         if not s:
             return ""
@@ -3350,39 +3415,33 @@ class ForumBotGUI(QMainWindow):
         replace = bool(rowdict.get("replace"))
         alias = rowdict.get("alias")
 
-        key = self.normalize_url(gui_url)
-        row_idx = self.row_index_by_url.get(key)
+        row_idx = self.row_index_by_url.get(self.canonical_url(gui_url))
+        if row_idx is None:
+            hid = self.host_id_key(gui_url)
+            if hid:
+                row_idx = self.row_index_by_hostid.get(hid)
 
         if row_idx is None and final_url:
-            row_idx = self.row_index_by_url.get(self.normalize_url(final_url))
+            row_idx = self.row_index_by_url.get(self.canonical_url(final_url))
+        if row_idx is None and final_url:
+            hid2 = self.host_id_key(final_url)
+            if hid2:
+                row_idx = self.row_index_by_hostid.get(hid2)
 
         if row_idx is None:
+            wanted1 = self.canonical_url(gui_url)
+            wanted2 = self.canonical_url(final_url) if final_url else ""
             rows = self.process_threads_table.rowCount()
-            key_no_html = key[:-5] if key.endswith(".html") else key
             for r in range(rows):
-                found = False
-                for c in (3, 4, 5):
-                    it = self.process_threads_table.item(r, c)
-                    if not it:
-                        continue
-                    for part in (it.text() or "").split():
-                        n = self.normalize_url(part.strip())
-                        if n == key or n.startswith(key_no_html):
-                            row_idx = r
-                            found = True
-                            break
-                    if found:
-                        break
-                if found:
+                cell = self.process_threads_table.item(r, 0)
+                if not cell:
+                    continue
+                c_can = self.canonical_url(cell.text())
+                if c_can == wanted1 or (wanted2 and c_can == wanted2):
+                    row_idx = r
                     break
             if row_idx is None:
-                sample = []
-                for r in range(min(rows, 3)):
-                    cell = self.process_threads_table.item(r, 3)
-                    if cell:
-                        text = (cell.text() or "").strip().splitlines()[0] if cell.text() else ""
-                        sample.append([text, self.normalize_url(text)])
-                logging.debug("Row not found | gui_url=%s final_url=%s sample_norm=%s", gui_url, final_url, sample)
+                logging.debug("Row not found | gui=%s final=%s", gui_url, final_url)
                 return
 
         cache = getattr(self, "_link_check_cache", None)
@@ -3396,14 +3455,29 @@ class ForumBotGUI(QMainWindow):
         model.dataChanged.emit(sidx, sidx, [Qt.DisplayRole])
 
         if replace and final_url:
-            self._replace_url_in_row(row_idx, gui_url, final_url)
-            old_norm = key
-            self.row_index_by_url.pop(old_norm, None)
-            new_norm = self.normalize_url(final_url)
-            self.row_index_by_url[new_norm] = row_idx
+            cell = self.process_threads_table.item(row_idx, 0)
+            old_text = cell.text() if cell else ""
+            if cell:
+                cell.setText(final_url)
+                idx = model.index(row_idx, 0)
+                model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
+
+            old_can = self.canonical_url(old_text)
+            old_hid = self.host_id_key(old_text)
+            self.row_index_by_url.pop(old_can, None)
+            if old_hid:
+                self.row_index_by_hostid.pop(old_hid, None)
+            new_can = self.canonical_url(final_url)
+            new_hid = self.host_id_key(final_url)
+            self.row_index_by_url[new_can] = row_idx
+            if new_hid:
+                self.row_index_by_hostid[new_hid] = row_idx
             if alias and "://" in str(alias):
-                self.row_index_by_url[self.normalize_url(alias)] = row_idx
-            data = cache.pop(gui_url, {})
+                self.row_index_by_url[self.canonical_url(alias)] = row_idx
+                hid_a = self.host_id_key(alias)
+                if hid_a:
+                    self.row_index_by_hostid[hid_a] = row_idx
+            data = cache.pop(old_text or gui_url, {})
             cache.setdefault(final_url, data).update({"status": status})
         else:
             cache.setdefault(gui_url, {}).update({"status": status})
@@ -6073,6 +6147,7 @@ class ForumBotGUI(QMainWindow):
         """Populate the Process Threads table."""
         self.process_threads_table.setRowCount(0)
         self.row_index_by_url = {}
+        self.row_index_by_hostid = {}
 
         # Flatten threads to a list for sorting
         flat_threads = []
@@ -6249,9 +6324,12 @@ class ForumBotGUI(QMainWindow):
             self.process_threads_table.setItem(row_position, 3, primary_item)
 
             for link in primary_links:
-                norm = self.normalize_url(link)
+                norm = self.canonical_url(link)
                 if norm:
                     self.row_index_by_url[norm] = row_position
+                    hid = self.host_id_key(link)
+                    if hid:
+                        self.row_index_by_hostid[hid] = row_position
 
             # Rapidgator Backup Link
             rg_backup_links = links.get('rapidgator-backup', [])
@@ -6269,10 +6347,12 @@ class ForumBotGUI(QMainWindow):
             self.process_threads_table.setItem(row_position, 4, rg_backup_item)
 
             for link in flat_backup:
-                norm = self.normalize_url(link)
+                norm = self.canonical_url(link)
                 if norm:
                     self.row_index_by_url[norm] = row_position
-
+                hid = self.host_id_key(link)
+                if hid:
+                    self.row_index_by_hostid[hid] = row_position
             # Keeplinks Link
             keeplinks_link = links.get('keeplinks', '')
             if isinstance(keeplinks_link, list):
@@ -6283,10 +6363,12 @@ class ForumBotGUI(QMainWindow):
             self.process_threads_table.setItem(row_position, 5, keeplinks_item)
 
             for link in keeplinks_link.splitlines():
-                norm = self.normalize_url(link.strip())
+                norm = self.canonical_url(link.strip())
                 if norm:
                     self.row_index_by_url[norm] = row_position
-
+                hid = self.host_id_key(link.strip())
+                if hid:
+                    self.row_index_by_hostid[hid] = row_position
             # Password column
             password_text = thread.get('password', '')
             password_item = QTableWidgetItem(password_text)
