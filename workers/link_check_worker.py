@@ -79,11 +79,22 @@ class LinkCheckWorker(QtCore.QThread):
     finished = QtCore.pyqtSignal(dict)
     error = QtCore.pyqtSignal(str)
 
-
-    def __init__(self, jd_client, urls, cancel_event, poll_timeout_sec=120, poll_interval=1.0):
+    def __init__(
+        self,
+        jd_client,
+        direct_urls,
+        container_urls,
+        cancel_event,
+        visible_scope=None,
+        poll_timeout_sec=120,
+        poll_interval=1.0,
+    ):
         super().__init__()
         self.jd = jd_client
-        self.urls = urls or []
+        self.direct_urls = direct_urls or []
+        self.container_urls = container_urls or []
+        self.urls = (self.direct_urls + self.container_urls) or []
+        self.visible_scope = visible_scope or {}
         self.cancel_event = cancel_event
         self.poll_timeout = poll_timeout_sec
         self.poll_interval = poll_interval
@@ -154,6 +165,12 @@ class LinkCheckWorker(QtCore.QThread):
             self.finished.emit({"session_id": self.session_id})
             return
 
+        log.debug(
+            "JD.ADD | direct=%d | containers=%d",
+            len(self.direct_urls),
+            len(self.container_urls),
+        )
+
         time.sleep(2)
 
         t0 = time.time()
@@ -188,6 +205,12 @@ class LinkCheckWorker(QtCore.QThread):
 
         items = self.jd.query_links() or []
 
+        allowed_direct = {canonical_url(u) for u in self.direct_urls}
+        allowed_containers = {canonical_url(u): u for u in self.container_urls}
+        scope_hosts = {
+            canonical_url(k): set(v.get("hosts", []))
+            for k, v in (self.visible_scope or {}).items()
+        }
         def _availability(it):
             a = (it.get("availability") or "").upper()
             return a if a in ("ONLINE", "OFFLINE") else "UNKNOWN"
@@ -229,8 +252,13 @@ class LinkCheckWorker(QtCore.QThread):
             chost = _clean_host(urlsplit(container_url or item_url).hostname or "")
             is_container = chost in CONTAINER_HOSTS or bool(it.get("containerURL"))
             if is_container:
-                groups[container_url].append(it)
+                ccanon = canonical_url(container_url)
+                if ccanon in allowed_containers:
+                    groups[container_url].append(it)
             else:
+                canon_item = canonical_url(item_url)
+                if canon_item not in allowed_direct:
+                    continue
                 availability = _availability(it)
                 uid = it.get("uuid")
                 if uid:
@@ -240,6 +268,7 @@ class LinkCheckWorker(QtCore.QThread):
                     "session_id": self.session_id,
                     "url": item_url,
                     "status": availability,
+                    "scope_hosts": [_host_of(it)],
                 }
 
                 self.progress.emit(payload)
@@ -252,9 +281,28 @@ class LinkCheckWorker(QtCore.QThread):
 
         total_groups = len(groups)
         for idx, (container_key, gitems) in enumerate(groups.items(), start=1):
-            host, ordered = pick_best(gitems, self.host_priority)
+            ccanon = canonical_url(container_key)
+            allowed = scope_hosts.get(ccanon, set())
+            filtered = [it for it in gitems if not allowed or _host_of(it) in allowed]
+            dropped = len(gitems) - len(filtered)
+            if allowed:
+                log.debug(
+                    "SCOPE FILTER | container=%s | kept=%d | dropped=%d | hosts=%s",
+                    canonical_url(container_key),
+                    len(filtered),
+                    dropped,
+                    sorted(allowed),
+                )
+            if not filtered:
+                log.debug(
+                    "CONTAINER SCOPE FILTERED OUT ALL ITEMS | container=%s | allowed_hosts=%s",
+                    canonical_url(container_key),
+                    sorted(allowed),
+                )
+                continue
+            host, ordered = pick_best(filtered, self.host_priority)
 
-            jd_ids = [it.get("uuid") for it in gitems if it.get("uuid")]
+            jd_ids = [it.get("uuid") for it in filtered if it.get("uuid")]
             group_id = uuid.uuid4().hex
             self.awaiting_ack[(self.session_id, group_id)] = {
                 "container_url": container_key,
@@ -284,6 +332,7 @@ class LinkCheckWorker(QtCore.QThread):
             payload = {
                 "type": "container",
                 "container_url": container_key,
+                "final_url": chosen_url,
                 "chosen": {
                     "url": chosen_url,
                     "status": chosen_status,
@@ -295,17 +344,19 @@ class LinkCheckWorker(QtCore.QThread):
                 "group_id": group_id,
                 "total_groups": total_groups,
                 "idx": idx,
+                "scope_hosts": sorted(allowed),
             }
             if chosen_alias:
                 payload["chosen"]["alias"] = chosen_alias
             self.progress.emit(payload)
             log.debug(
-                "EMIT container | container_url=%s chosen=%s/%s idx=%d/%d",
+                "EMIT container (scoped) | container_url=%s chosen=%s/%s idx=%d/%d scope_hosts=%s",
                 canonical_url(container_key),
                 host,
                 chosen_status,
                 idx,
                 total_groups,
+                sorted(allowed),
             )
 
         if self._direct_ids:

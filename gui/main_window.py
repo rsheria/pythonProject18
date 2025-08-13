@@ -78,7 +78,7 @@ from utils import sanitize_filename
 from utils.paths import get_data_folder
 from workers.login_thread import LoginThread
 from integrations.jd_client import JDClient
-from workers.link_check_worker import LinkCheckWorker
+from workers.link_check_worker import LinkCheckWorker, CONTAINER_HOSTS
 RG_RE = re.compile(r"^/file/([A-Za-z0-9]+)(?:/.*)?$")
 NF_RE = re.compile(r"^/view/([A-Za-z0-9]+)(?:/.*)?$")
 DD_RE = re.compile(r"^/(?:f|file)/([A-Za-z0-9]+)(?:/.*)?$")
@@ -3239,36 +3239,44 @@ class ForumBotGUI(QMainWindow):
             # C) Show row only if both status and text match
             table.setRowHidden(row, not (status_ok and text_ok))
 
-    def collect_all_candidate_urls_for_selected_threads(self) -> list:
-        urls = []
+    def collect_visible_scope_for_selected_threads(self):
+        direct_urls: list[str] = []
+        container_urls: list[str] = []
+        visible_scope: dict[str, dict] = {}
         rows = {idx.row() for idx in self.process_threads_table.selectedIndexes()}
         if not rows:
-            return urls
+            return direct_urls, container_urls, visible_scope
 
-        col_count = self.process_threads_table.columnCount()
         for row in rows:
-            for col in range(col_count):
-                item = self.process_threads_table.item(row, col)
-                if not item:
-                    continue
-                text = (item.text() or "").strip()
-                if not text:
-                    continue
-                for m in URL_RE.findall(text):
-                    u = m.strip().strip('.,);]')
-                    low = u.lower()
-                    if any(b in low for b in ("swistransfer", "/img", "image", "folder=")):
-                        continue
-                    urls.append(u)
-        # إزالة التكرارات مع الحفاظ على الترتيب
-        seen = set();
-        dedup = []
-        for u in urls:
-            if u not in seen:
-                seen.add(u);
-                dedup.append(u)
-        return dedup
 
+            item = self.process_threads_table.item(row, 2)
+            if not item:
+                continue
+            text = (item.text() or "").strip()
+            if not text:
+                continue
+            row_urls: list[str] = []
+            hosts: set[str] = set()
+            row_containers: list[str] = []
+            for m in URL_RE.findall(text):
+                u = m.strip().strip('.,);]')
+                row_urls.append(u)
+                host = _clean_host(urlsplit(u).hostname or "")
+                if host in CONTAINER_HOSTS:
+                    container_urls.append(u)
+                    row_containers.append(u)
+                else:
+                    direct_urls.append(u)
+                    hosts.add(host)
+
+            if row_containers:
+                for cu in row_containers:
+                    visible_scope[cu] = {"urls": row_urls, "hosts": sorted(hosts)}
+            else:
+                key = f"row:{row}"
+                visible_scope[key] = {"urls": row_urls, "hosts": sorted(hosts)}
+
+        return direct_urls, container_urls, visible_scope
     def _get_myjd_credentials(self):
         """
         يرجّع (email, password, device_name, app_key) من:
@@ -3330,8 +3338,8 @@ class ForumBotGUI(QMainWindow):
             "rows_not_found": 0,
         }
         self._lc_total_groups = 0
-        urls = self.collect_all_candidate_urls_for_selected_threads()
-        if not urls:
+        direct_urls, container_urls, visible_scope = self.collect_visible_scope_for_selected_threads()
+        if not direct_urls and not container_urls:
             self.statusBar().showMessage("لا توجد روابط للفحص.")
             return
 
@@ -3339,9 +3347,6 @@ class ForumBotGUI(QMainWindow):
         if not email or not password:
             self.statusBar().showMessage("برجاء ضبط My.JDownloader (الإيميل والباسورد) من الإعدادات أولًا.")
             return
-
-        from integrations.jd_client import JDClient
-        from workers.link_check_worker import LinkCheckWorker
 
         jd_client = JDClient(
             email=email,
@@ -3352,10 +3357,21 @@ class ForumBotGUI(QMainWindow):
 
         # Extend the polling timeout so manual captcha resolution has ample time
         # before the worker gives up and returns no results.
+        log = logging.getLogger(__name__)
+        log.debug("SCOPE START | rows=%d", len(visible_scope))
+        for key, info in visible_scope.items():
+            log.debug(
+                "SCOPE ROW | key=%s | hosts=%s | urls=%d",
+                key,
+                info.get("hosts", []),
+                len(info.get("urls", [])),
+            )
         self.link_check_worker = LinkCheckWorker(
             jd_client,
-            urls,
+            direct_urls,
+            container_urls,
             self.link_check_cancel_event,
+            visible_scope,
             poll_timeout_sec=600,
         )
         host_priority = self._get_download_host_priority()
@@ -3364,7 +3380,8 @@ class ForumBotGUI(QMainWindow):
         self.link_check_worker.finished.connect(self._on_link_finished)
         self.link_check_worker.error.connect(lambda msg: self.statusBar().showMessage(msg))
         self.rebuild_row_index()
-        self.statusBar().showMessage(f"Starting link check for {len(urls)} URLs…")
+        total = len(direct_urls) + len(container_urls)
+        self.statusBar().showMessage(f"Starting link check for {total} URLs…")
         self.link_check_worker.start()
 
     def canonical_url(self, s: str) -> str:
@@ -3410,33 +3427,25 @@ class ForumBotGUI(QMainWindow):
         self.row_by_container = {}
         self.row_by_direct = {}
         rows = self.process_threads_table.rowCount()
-        cols = self.process_threads_table.columnCount()
         for r in range(rows):
-            # Column 3 (index 2) is used for container replacement
-            container_cell = self.process_threads_table.item(r, 2)
-            if container_cell:
-                text = container_cell.text() or ""
-                for raw in URL_RE.findall(text):
-                    raw = raw.strip().strip('.,);]')
-                    canon = self.canonical_url(raw)
-                    self.row_by_container[raw] = r
-                    if canon:
-                        self.row_by_container[canon] = r
-            for c in range(cols):
-                cell = self.process_threads_table.item(r, c)
-                if not cell:
-                    continue
-                text = cell.text() or ""
-                if not text:
-                    continue
-                for raw in URL_RE.findall(text):
-                    raw = raw.strip().strip('.,);]')
-                    canon = self.canonical_url(raw)
-                    hid = self.host_id_key(raw)
-                    if canon:
-                        self.row_by_direct[canon] = r
-                    if hid:
-                        self.row_by_direct[hid] = r
+            cell = self.process_threads_table.item(r, 2)
+            if not cell:
+                continue
+            text = cell.text() or ""
+            if not text:
+                continue
+            for raw in URL_RE.findall(text):
+                raw = raw.strip().strip('.,);]')
+                canon = self.canonical_url(raw)
+                hid = self.host_id_key(raw)
+                self.row_by_container[raw] = r
+                if canon:
+                    self.row_by_container[canon] = r
+                    self.row_by_direct[canon] = r
+                self.row_by_direct[raw] = r
+                if hid:
+                    self.row_by_direct[hid] = r
+
     def find_row(self, url: str):
         if not url:
             return None
@@ -3453,28 +3462,26 @@ class ForumBotGUI(QMainWindow):
 
         sample = []
         rows = self.process_threads_table.rowCount()
-        cols = self.process_threads_table.columnCount()
         for r in range(rows):
 
-            for c in range(cols):
-                cell = self.process_threads_table.item(r, c)
-                if not cell:
-                    continue
-                text = (cell.text() or "").strip()
-                if not text:
-                    continue
-                for raw in URL_RE.findall(text):
-                    raw = raw.strip().strip('.,);]')
-                    c = self.canonical_url(raw)
-                    h = self.host_id_key(raw)
-                    sample.append([raw, c])
-                    if c == canon or h == hid:
-                        self.by_raw_url[raw] = r
-                        if c:
-                            self.by_canonical[c] = r
-                        if h:
-                            self.by_host_id[h] = r
-                        return r
+            cell = self.process_threads_table.item(r, 2)
+            if not cell:
+                continue
+            text = (cell.text() or "").strip()
+            if not text:
+                continue
+            for raw in URL_RE.findall(text):
+                raw = raw.strip().strip('.,);]')
+                c = self.canonical_url(raw)
+                h = self.host_id_key(raw)
+                sample.append([raw, c])
+                if c == canon or h == hid:
+                    self.by_raw_url[raw] = r
+                    if c:
+                        self.by_canonical[c] = r
+                    if h:
+                        self.by_host_id[h] = r
+                    return r
         self.log.debug(
             "ROW NOT FOUND | looking_for=%s sample_norm=%s",
             canon or url,
