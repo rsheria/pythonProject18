@@ -22,6 +22,10 @@ def is_container_host(host: str) -> bool:
     """Return True if *host* is considered a container/redirect service."""
     return (host or "").lower() in CONTAINER_HOSTS
 
+# Number of consecutive polls with an unchanged result set before we give up
+# waiting for JDownloader to resolve links when no containers are involved.
+
+MAX_STABLE_POLLS = 5
 
 RG_RE = re.compile(r"^/file/([A-Za-z0-9]+)")
 NF_RE = re.compile(r"^/view/([A-Za-z0-9]+)")
@@ -195,7 +199,24 @@ class LinkCheckWorker(QtCore.QThread):
                 for it in items
             )
 
-            log.debug("LinkCheckWorker: poll count=%d", curr_count)
+            if not self.container_urls:
+                if curr_count == last_count:
+                    stable_hits += 1
+                else:
+                    stable_hits = 0
+                last_count = curr_count
+                if stable_hits >= MAX_STABLE_POLLS:
+                    log.debug(
+                        "LinkCheckWorker: poll count=%d (stable=%d)",
+                        curr_count,
+                        stable_hits,
+                    )
+                    break
+            log.debug(
+                "LinkCheckWorker: poll count=%d%s",
+                curr_count,
+                f" (stable={stable_hits})" if not self.container_urls else "",
+            )
             if all_resolved:
                 break
 
