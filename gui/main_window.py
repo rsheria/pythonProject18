@@ -3261,6 +3261,8 @@ class ForumBotGUI(QMainWindow):
                 continue
             row_host_links: dict[str, list[str]] = {}
             row_containers: list[str] = []
+            row_urls: list[str] = []
+
             for m in URL_RE.findall(text):
                 u = m.strip().strip('.,);]')
                 host = _clean_host(urlsplit(u).hostname or "")
