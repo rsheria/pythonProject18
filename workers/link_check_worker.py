@@ -21,10 +21,7 @@ CONTAINER_HOSTS = {
 def is_container_host(host: str) -> bool:
     """Return True if *host* is considered a container/redirect service."""
     return (host or "").lower() in CONTAINER_HOSTS
-# Number of consecutive polls with an unchanged result set before we give up
-# waiting for JDownloader to resolve every link.  This prevents the worker from
-# polling indefinitely when some items never transition to ONLINE/OFFLINE.
-MAX_STABLE_POLLS = 5
+
 
 RG_RE = re.compile(r"^/file/([A-Za-z0-9]+)")
 NF_RE = re.compile(r"^/view/([A-Za-z0-9]+)")
@@ -184,8 +181,6 @@ class LinkCheckWorker(QtCore.QThread):
         time.sleep(2)
 
         t0 = time.time()
-        last_count = -1
-        stable_hits = 0
 
         while time.time() - t0 < self.poll_timeout:
             if self.cancel_event.is_set():
@@ -200,17 +195,10 @@ class LinkCheckWorker(QtCore.QThread):
                 for it in items
             )
 
-            if curr_count > 0 and curr_count == last_count:
-                stable_hits += 1
-            else:
-                stable_hits = 0
-
-            log.debug("LinkCheckWorker: poll count=%d (stable=%d)", curr_count, stable_hits)
-
-            if all_resolved or stable_hits >= MAX_STABLE_POLLS:
+            log.debug("LinkCheckWorker: poll count=%d", curr_count)
+            if all_resolved:
                 break
 
-            last_count = curr_count
             time.sleep(self.poll_interval)
 
         items = self.jd.query_links() or []
