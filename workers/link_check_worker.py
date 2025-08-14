@@ -99,19 +99,27 @@ class LinkCheckWorker(QtCore.QThread):
         visible_scope=None,
         poll_timeout_sec=120,
         poll_interval=1.0,
+        single_host_mode: bool = True,
+        auto_replace: bool = True,
     ):
         super().__init__()
         self.jd = jd_client
-        self.direct_urls = direct_urls or []
-        self.container_urls = container_urls or []
-        self.urls = (self.direct_urls + self.container_urls) or []
+        self.direct_urls = list(direct_urls or [])
+        self.container_urls = list(container_urls or [])
+        # For container runs, only container URLs should be sent to JD.
+        self.urls = self.container_urls if self.container_urls else self.direct_urls
         self.visible_scope = visible_scope or {}
         self.cancel_event = cancel_event
         self.poll_timeout = poll_timeout_sec
         self.poll_interval = poll_interval
+        self.single_host_mode = single_host_mode
+        self.auto_replace = auto_replace
         self.host_priority: list[str] = []
-        self.session_id: str | None = None
-        # {(session_id, group_id): {"container_url": str, "ids": [jd_ids]}}
+        self.chosen_host: str | None = None
+        # Generate a session_id early so logs from the main thread can reference it
+        self.session_id: str = uuid.uuid4().hex
+        self._start_time: float | None = None
+        # {(session_id, group_id): {"container_url": str, "remove_ids": [jd_ids]}}
         self.awaiting_ack: dict[tuple[str, str], dict] = {}
         self._direct_ids: list[str] = []
 
@@ -134,24 +142,50 @@ class LinkCheckWorker(QtCore.QThread):
         info = self.awaiting_ack.pop(key, None)
         if not info:
             return
-        ids = info.get("ids", [])
-        if ids:
-            try:
-                self.jd.remove_links(ids)
-                logging.getLogger(__name__).debug(
-                    "ACK container | container_url=%s -> remove JD",
+
+        log = logging.getLogger(__name__)
+        remove_ids = info.get("remove_ids") or []
+        try:
+            if remove_ids:
+                self.jd.remove_links(remove_ids)
+                log.debug(
+                    "JD CLEANUP | session=%s | group=%s | removed=%d | container=%s | dur=%.3f",
+                    self.session_id,
+                    group_id,
+                    len(remove_ids),
                     canonical_url(container_url),
+                    time.monotonic() - self._start_time if self._start_time else 0.0,
                 )
-            except Exception as e:
-                logging.getLogger(__name__).warning(
-                    "JD remove failed for container=%s: %s", container_url, e
+            else:
+                log.debug(
+                    "JD CLEANUP | session=%s | group=%s | removed=0 | container=%s | dur=%.3f",
+                    self.session_id,
+                    group_id,
+                    canonical_url(container_url),
+                    time.monotonic() - self._start_time if self._start_time else 0.0,
                 )
+        except Exception as e:
+            log.warning("remove container links failed: %s", e)
 
     def run(self):
         log = logging.getLogger(__name__)
-        self.session_id = uuid.uuid4().hex
+        self._start_time = time.monotonic()
         self.awaiting_ack.clear()
         self._direct_ids.clear()
+        log.debug(
+            "DETECT | session=%s | direct=%d | containers=%d | dur=%.3f",
+            self.session_id,
+            len(self.direct_urls),
+            len(self.container_urls),
+            0.0,
+        )
+        if self.chosen_host:
+            log.debug(
+                "CHOSEN HOST | session=%s | host=%s | dur=%.3f",
+                self.session_id,
+                self.chosen_host,
+                0.0,
+            )
 
         if not self.urls:
             msg = "No URLs to check."
@@ -161,6 +195,11 @@ class LinkCheckWorker(QtCore.QThread):
             return
 
         if self.cancel_event.is_set():
+            log.debug(
+                "CANCELLED | session=%s | at=start | dur=%.3f",
+                self.session_id,
+                time.monotonic() - self._start_time,
+            )
             self.finished.emit({"session_id": self.session_id})
             return
 
@@ -169,17 +208,18 @@ class LinkCheckWorker(QtCore.QThread):
             self.finished.emit({"session_id": self.session_id})
             return
 
-
-
-        if not self.jd.add_links_to_linkgrabber(self.urls):
+        if not self.jd.add_links_to_linkgrabber(self.urls, start_check=not self.container_urls):
             self.error.emit("Failed to add links to LinkGrabber.")
             self.finished.emit({"session_id": self.session_id})
             return
 
+        sent_direct = [] if self.container_urls else self.direct_urls
         log.debug(
-            "JD.ADD | direct=%d | containers=%d",
-            len(self.direct_urls),
+            "JD ENQUEUE | session=%s | direct=%d | containers=%d | dur=%.3f",
+            self.session_id,
+            len(sent_direct),
             len(self.container_urls),
+            time.monotonic() - self._start_time,
         )
 
         time.sleep(2)
@@ -189,57 +229,95 @@ class LinkCheckWorker(QtCore.QThread):
         # Track stability of poll results when dealing only with direct links
         stable_hits = 0
         last_count: int | None = None
+        state = "queued" if self.container_urls else ""
+        if self.container_urls:
+            log.debug(
+                "WAIT POLL | session=%s | status=%s | dur=%.3f",
+                self.session_id,
+                state,
+                time.monotonic() - self._start_time,
+            )
         while time.time() - t0 < self.poll_timeout:
             if self.cancel_event.is_set():
+                log.debug(
+                    "CANCELLED | session=%s | at=poll | dur=%.3f",
+                    self.session_id,
+                    time.monotonic() - self._start_time,
+                )
                 self.finished.emit({"session_id": self.session_id})
                 return
 
             items = self.jd.query_links()
             curr_count = len(items)
 
-            all_resolved = curr_count > 0 and all(
-                (it.get("availability") or "").upper() in ("ONLINE", "OFFLINE")
-                for it in items
-            )
-
-            if not self.container_urls:
+            if self.container_urls:
+                if curr_count == 0 and state == "queued":
+                    state = "solving"
+                    log.debug(
+                        "WAIT POLL | session=%s | status=%s | dur=%.3f",
+                        self.session_id,
+                        state,
+                        time.monotonic() - self._start_time,
+                    )
+                elif curr_count > 0:
+                    if state != "decrypted":
+                        state = "decrypted"
+                        log.debug(
+                            "WAIT POLL | session=%s | status=%s | items=%d | dur=%.3f",
+                            self.session_id,
+                            state,
+                            curr_count,
+                            time.monotonic() - self._start_time,
+                        )
+                    break
+            else:
+                all_resolved = curr_count > 0 and all(
+                    (it.get("availability") or "").upper() in ("ONLINE", "OFFLINE")
+                    for it in items
+                )
                 if curr_count == last_count:
                     stable_hits += 1
                 else:
                     stable_hits = 0
                 last_count = curr_count
-                if stable_hits >= MAX_STABLE_POLLS:
+                if stable_hits >= MAX_STABLE_POLLS or all_resolved:
                     log.debug(
-                        "LinkCheckWorker: poll count=%d (stable=%d)",
+                        "WAIT POLL | session=%s | count=%d | stable=%d | dur=%.3f",
+                        self.session_id,
                         curr_count,
                         stable_hits,
+                        time.monotonic() - self._start_time,
                     )
                     break
-            log.debug(
-                "LinkCheckWorker: poll count=%d%s",
-                curr_count,
-                f" (stable={stable_hits})" if not self.container_urls else "",
-            )
-            if all_resolved:
-                break
 
+                log.debug(
+                    "WAIT POLL | session=%s | count=%d | stable=%d | dur=%.3f",
+                    self.session_id,
+                    curr_count,
+                    stable_hits,
+                    time.monotonic() - self._start_time,
+                )
             time.sleep(self.poll_interval)
+
+        if self.container_urls and state != "decrypted":
+            log.warning(
+                "WAIT POLL | session=%s | status=timeout | dur=%.3f",
+                self.session_id,
+                time.monotonic() - self._start_time,
+            )
 
         items = self.jd.query_links() or []
 
         allowed_direct = {canonical_url(u) for u in self.direct_urls}
-        # Map canonical form -> original URL so we can keep track of the exact
-        # container link that was provided by the user interface.
         allowed_containers = {canonical_url(u): u for u in self.container_urls}
         scope_hosts = {
             canonical_url(k): set(v.get("hosts", []))
             for k, v in (self.visible_scope or {}).items()
         }
-        # Track row index for each container so the GUI can update the proper
-        # table cell without relying on string lookups.
         scope_rows = {
             canonical_url(k): v.get("row") for k, v in (self.visible_scope or {}).items()
         }
+
         def _availability(it):
             a = (it.get("availability") or "").upper()
             return a if a in ("ONLINE", "OFFLINE") else "UNKNOWN"
@@ -247,160 +325,242 @@ class LinkCheckWorker(QtCore.QThread):
         def _host_of(it):
             return _clean_host(it.get("host"))
 
-        def pick_best(items, priority):
-            hosts = defaultdict(list)
-
+        if not self.container_urls:
+            direct_ids = []
             for it in items:
-                hosts[_host_of(it)].append(it)
-            priority_map = {h: i for i, h in enumerate(priority or [])}
-            online_hosts = []
-            offline_hosts = []
-            for h, lst in hosts.items():
-                idx = priority_map.get(h, len(priority_map))
-                if any(_availability(x) == "ONLINE" for x in lst):
-                    online_hosts.append((idx, h, lst))
-                else:
-                    offline_hosts.append((idx, h, lst))
-                if online_hosts:
-                    idx, host, lst = sorted(online_hosts, key=lambda x: x[0])[0]
-                else:
-                    idx, host, lst = sorted(offline_hosts, key=lambda x: x[0])[0]
-
-                lst.sort(
-                    key=lambda it: {"ONLINE": 0, "OFFLINE": 1, "UNKNOWN": 2}[_availability(it)]
-                )
-                return host, lst
-
-        groups: dict[str, list] = defaultdict(list)
-        for it in items:
-            item_url = it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
-            container_url = (
-                it.get("containerURL")
-                or it.get("origin")
-                or it.get("pluginURL")
-                or it.get("url")
-                or ""
-            )
-            chost = _clean_host(urlsplit(container_url or item_url).hostname or "")
-            is_container = is_container_host(chost) or bool(it.get("containerURL"))
-            if is_container:
-                ccanon = canonical_url(container_url)
-                if ccanon in allowed_containers:
-                    orig = allowed_containers[ccanon]
-                    groups[orig].append(it)
-            else:
+                item_url = it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
                 canon_item = canonical_url(item_url)
                 if canon_item not in allowed_direct:
                     continue
-                availability = _availability(it)
+
                 uid = it.get("uuid")
                 if uid:
-                    self._direct_ids.append(uid)
+                    direct_ids.append(uid)
+            self._direct_ids = direct_ids
+            if direct_ids:
+                try:
+                    self.jd.start_online_check(direct_ids)
+                except Exception:
+                    pass
+                items = self.jd.query_links() or []
+            item_map = {it.get("uuid"): it for it in items}
+            for uid in direct_ids:
+                it = item_map.get(uid)
+                if not it:
+                    continue
+                item_url = (
+                    it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
+                )
                 payload = {
                     "type": "status",
                     "session_id": self.session_id,
                     "url": item_url,
-                    "status": availability,
+                    "status": _availability(it),
                     "scope_hosts": [_host_of(it)],
                 }
 
                 self.progress.emit(payload)
 
                 log.debug(
-                    "EMIT status-only | url=%s status=%s",
+                    "AVAIL RESULT | session=%s | url=%s | status=%s | dur=%.3f",
+                    self.session_id,
                     canonical_url(item_url),
-                    availability,
+                    payload["status"],
+                    time.monotonic() - self._start_time,
                 )
 
-        total_groups = len(groups)
-        for idx, (container_key, gitems) in enumerate(groups.items(), start=1):
-            ccanon = canonical_url(container_key)
-            allowed = scope_hosts.get(ccanon, set())
-            row_idx = scope_rows.get(ccanon)
-            filtered = [it for it in gitems if not allowed or _host_of(it) in allowed]
-            dropped = len(gitems) - len(filtered)
-            if allowed:
-                log.debug(
-                    "SCOPE FILTER | container=%s | kept=%d | dropped=%d | hosts=%s",
-                    canonical_url(container_key),
-                    len(filtered),
-                    dropped,
-                    sorted(allowed),
-                )
-            if not filtered:
-                log.debug(
-                    "CONTAINER SCOPE FILTERED OUT ALL ITEMS | container=%s | allowed_hosts=%s",
-                    canonical_url(container_key),
-                    sorted(allowed),
-                )
-                continue
-            host, ordered = pick_best(filtered, self.host_priority)
-            # Keep only links from the chosen host so we don't emit other hosts
-            ordered = [it for it in ordered if _host_of(it) == host]
-            jd_ids = [it.get("uuid") for it in filtered if it.get("uuid")]
-            replace = bool(self.host_priority)
-            group_id = uuid.uuid4().hex if replace else ""
-            if replace:
-                self.awaiting_ack[(self.session_id, group_id)] = {
-                    "container_url": container_key,
-                    "ids": jd_ids,
-                }
-            elif jd_ids:
-                try:
-                    self.jd.remove_links(jd_ids)
-                except Exception as e:
-                    log.warning("remove container links failed: %s", e)
-
-            chosen = ordered[0]
-            chosen_url = (
-                chosen.get("url")
-                or chosen.get("contentURL")
-                or chosen.get("pluginURL")
-                or ""
-            )
-            chosen_status = _availability(chosen)
-            chosen_alias = chosen.get("name")
-
-            siblings = []
-            for alt in ordered[1:]:
-                aurl = (
-                    alt.get("url")
-                    or alt.get("contentURL")
-                    or alt.get("pluginURL")
+        else:
+            groups: dict[str, list] = defaultdict(list)
+            for it in items:
+                item_url = it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
+                container_url = (
+                    it.get("containerURL")
+                    or it.get("origin")
+                    or it.get("pluginURL")
+                    or it.get("url")
                     or ""
                 )
-                siblings.append({"url": aurl, "status": _availability(alt)})
 
-            payload = {
-                "type": "container",
-                "container_url": container_key,
-                "final_url": chosen_url,
-                "chosen": {
-                    "url": chosen_url,
-                    "status": chosen_status,
-                    "host": host,
-                },
-                "siblings": siblings,
-                "replace": replace,
-                "session_id": self.session_id,
-                "group_id": group_id,
-                "total_groups": total_groups,
-                "idx": idx,
-                "scope_hosts": sorted(allowed),
-                "row": row_idx,
-            }
-            if chosen_alias:
-                payload["chosen"]["alias"] = chosen_alias
-            self.progress.emit(payload)
-            log.debug(
-                "EMIT container (scoped) | container_url=%s chosen=%s/%s idx=%d/%d scope_hosts=%s",
-                canonical_url(container_key),
-                host,
-                chosen_status,
-                idx,
-                total_groups,
-                sorted(allowed),
-            )
+                chost = _clean_host(urlsplit(container_url or item_url).hostname or "")
+                is_container = is_container_host(chost) or bool(it.get("containerURL"))
+                if is_container:
+                    ccanon = canonical_url(container_url)
+                    if ccanon in allowed_containers:
+                        orig = allowed_containers[ccanon]
+                        groups[orig].append(it)
+
+            selected = []
+            check_ids: list[str] = []
+            total_groups = len(groups)
+            for idx, (container_key, gitems) in enumerate(groups.items(), start=1):
+                ccanon = canonical_url(container_key)
+                allowed = scope_hosts.get(ccanon, set())
+                row_idx = scope_rows.get(ccanon)
+                if self.single_host_mode:
+                    filtered = [it for it in gitems if not allowed or _host_of(it) in allowed]
+                    dropped = len(gitems) - len(filtered)
+                else:
+                    filtered = gitems
+                    dropped = 0
+                    if not allowed:
+                        allowed = {_host_of(it) for it in gitems}
+                if allowed:
+                    log.debug(
+                        "POST FILTER | session=%s | container=%s | kept=%d | dropped=%d | hosts=%s | dur=%.3f",
+                        self.session_id,
+                        canonical_url(container_key),
+                        len(filtered),
+                        dropped,
+                        sorted(allowed),
+                        time.monotonic() - self._start_time,
+                    )
+                if not filtered:
+                    log.debug(
+                        "POST FILTER | session=%s | container=%s | dropped_all | hosts=%s | dur=%.3f",
+                        self.session_id,
+                        canonical_url(container_key),
+                        sorted(allowed),
+                        time.monotonic() - self._start_time,
+                    )
+                    continue
+
+                host_map: dict[str, list] = defaultdict(list)
+                for it in filtered:
+                    host_map[_host_of(it)].append(it)
+                if not host_map:
+                    continue
+
+                if self.single_host_mode:
+                    host = None
+                    if self.chosen_host and self.chosen_host in host_map:
+                        host = self.chosen_host
+                    else:
+                        for h in self.host_priority:
+                            if h in host_map:
+                                host = h
+                                break
+                        if host is None:
+                            host = next(iter(host_map))
+                        if self.chosen_host and host != self.chosen_host:
+                            log.debug(
+                                "HOST FALLBACK | session=%s | preferred=%s | fallback=%s | dur=%.3f",
+                                self.session_id,
+                                self.chosen_host,
+                                host,
+                                time.monotonic() - self._start_time,
+                            )
+
+                    ordered = host_map.get(host, [])
+                    ordered_ids = [it.get("uuid") for it in ordered if it.get("uuid")]
+                    all_ids = [it.get("uuid") for it in filtered if it.get("uuid")]
+                    oset = set(ordered_ids)
+                    remove_ids = [uid for uid in all_ids if uid not in oset]
+                    replace = self.auto_replace and bool(self.host_priority)
+                    group_id = uuid.uuid4().hex if replace else ""
+                    if replace:
+                        self.awaiting_ack[(self.session_id, group_id)] = {
+                            "container_url": container_key,
+                            "remove_ids": remove_ids,
+                        }
+                    sel = {
+                        "container_url": container_key,
+                        "host": host,
+                        "ordered_ids": ordered_ids,
+                        "idx": idx,
+                        "total": total_groups,
+                        "allowed": sorted(allowed),
+                        "row": row_idx,
+                        "replace": replace,
+                        "group_id": group_id,
+                    }
+                    selected.append(sel)
+                    check_ids.extend(ordered_ids)
+                else:
+                    ordered: list = []
+                    for lst in host_map.values():
+                        ordered.extend(lst)
+                    ordered_ids = [it.get("uuid") for it in ordered if it.get("uuid")]
+                    replace = self.auto_replace
+                    group_id = uuid.uuid4().hex if replace else ""
+                    if replace:
+                        self.awaiting_ack[(self.session_id, group_id)] = {
+                            "container_url": container_key,
+                            "remove_ids": [],
+                        }
+                    sel = {
+                        "container_url": container_key,
+                        "host": _host_of(ordered[0]) if ordered else "",
+                        "ordered_ids": ordered_ids,
+                        "idx": idx,
+                        "total": total_groups,
+                        "allowed": sorted(allowed or {""}),
+                        "row": row_idx,
+                        "replace": replace,
+                        "group_id": group_id,
+                    }
+                    selected.append(sel)
+                    check_ids.extend(ordered_ids)
+
+            if check_ids:
+                try:
+                    self.jd.start_online_check(check_ids)
+                except Exception:
+                    pass
+                items = self.jd.query_links() or []
+            item_map = {it.get("uuid"): it for it in items}
+            for sel in selected:
+                ordered_items = [item_map.get(uid) for uid in sel["ordered_ids"] if item_map.get(uid)]
+                if not ordered_items:
+                    continue
+                chosen = ordered_items[0]
+                chosen_url = (
+                    chosen.get("url")
+                    or chosen.get("contentURL")
+                    or chosen.get("pluginURL")
+                    or ""
+                )
+                chosen_status = _availability(chosen)
+                chosen_alias = chosen.get("name")
+                siblings = []
+                for alt in ordered_items[1:]:
+                    aurl = (
+                        alt.get("url")
+                        or alt.get("contentURL")
+                        or alt.get("pluginURL")
+                        or ""
+                    )
+                    siblings.append({"url": aurl, "status": _availability(alt)})
+                payload = {
+                    "type": "container",
+                    "container_url": sel["container_url"],
+                    "final_url": chosen_url,
+                    "chosen": {
+                        "url": chosen_url,
+                        "status": chosen_status,
+                        "host": sel["host"],
+                    },
+                    "siblings": siblings,
+                    "replace": sel["replace"],
+                    "session_id": self.session_id,
+                    "group_id": sel["group_id"],
+                    "total_groups": sel["total"],
+                    "idx": sel["idx"],
+                    "scope_hosts": sel["allowed"],
+                    "row": sel["row"],
+                }
+                if chosen_alias:
+                    payload["chosen"]["alias"] = chosen_alias
+                self.progress.emit(payload)
+                log.debug(
+                    "AVAIL RESULT | session=%s | container=%s | host=%s | status=%s | idx=%d/%d | dur=%.3f",
+                    self.session_id,
+                    canonical_url(sel["container_url"]),
+                    sel["host"],
+                    chosen_status,
+                    sel["idx"],
+                    sel["total"],
+                    time.monotonic() - self._start_time,
+                )
 
         if self._direct_ids:
             try:

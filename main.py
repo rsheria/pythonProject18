@@ -73,6 +73,12 @@ sys.excepthook = global_exception_handler
 # 6) Main routine
 # ------------------------------------------------------------------
 def main():
+    """Manual Test Plan
+    1. direct-only with multiple hosts → only chosen host checked
+    2. container with captcha → wait, extract, filter to chosen host, check, replace, persist, restart shows direct link
+    3. cancel mid-solve
+    4. JD errors handled
+    """
     logging.info("Application starting…")
 
     # Qt application

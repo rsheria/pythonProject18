@@ -87,9 +87,10 @@ class JDClient:
         self.lg = None
         self.lg_mode = "none"
 
-    def add_links_to_linkgrabber(self, urls: list[str]) -> bool:
+    def add_links_to_linkgrabber(self, urls: list[str], start_check: bool = True) -> bool:
         """
         Send URLs (including keeplinks) to LinkGrabber with deepDecrypt=True.
+                Optionally trigger the availability check immediately.
         """
         try:
             if not self.device:
@@ -109,11 +110,11 @@ class JDClient:
             # NOTE: /linkgrabberv2/* expects a LIST of params
             self.device.action("/linkgrabberv2/addLinks", [payload])
             logging.debug("JD.add_links (raw): %d urls sent", len(urls))
-            # Try to trigger online check (safe if unsupported)
-            try:
-                self.device.action("/linkgrabberv2/startOnlineCheck", [])
-            except Exception:
-                pass
+            if start_check:
+                try:
+                    self.device.action("/linkgrabberv2/startOnlineCheck", [])
+                except Exception:
+                    pass
             return True
         except Exception as e:
             logging.exception("JD.add_links: failed: %s", e)
@@ -179,6 +180,25 @@ class JDClient:
             logging.exception("JD.query_links: failed: %s", e)
             return []
 
+    def start_online_check(self, link_ids) -> bool:
+        """Trigger availability check for specific LinkGrabber entries."""
+        try:
+            if not self.device:
+                logging.error("JD.start_online_check: device not ready")
+                return False
+            ids = []
+            for uid in link_ids or []:
+                if uid is None:
+                    continue
+                try:
+                    ids.append(int(uid))
+                except Exception:
+                    ids.append(uid)
+            self.device.action("/linkgrabberv2/startOnlineCheck", [ids])
+            return True
+        except Exception as e:
+            logging.exception("JD.start_online_check: failed: %s", e)
+            return False
     def remove_links(self, link_ids) -> bool:
         """Remove specific LinkGrabber entries by their UUIDs."""
         try:

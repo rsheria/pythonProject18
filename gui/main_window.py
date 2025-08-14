@@ -76,6 +76,12 @@ from models.job_model import AutoProcessJob
 from models.operation_status import OperationStatus, OpStage, OpType
 from utils import sanitize_filename
 from utils.paths import get_data_folder
+from utils.host_priority import (
+    get_highest_priority_host,
+    filter_direct_links_for_host,
+)
+from utils.link_cache import persist_link_replacement
+from utils.link_summary import LinkCheckSummary
 from workers.login_thread import LoginThread
 from integrations.jd_client import JDClient
 from workers.link_check_worker import LinkCheckWorker, CONTAINER_HOSTS, is_container_host
@@ -3241,14 +3247,11 @@ class ForumBotGUI(QMainWindow):
             # C) Show row only if both status and text match
             table.setRowHidden(row, not (status_ok and text_ok))
 
-    def collect_visible_scope_for_selected_threads(self, host_priority=None):
-        """Collect links from selected threads and filter by host priority."""
+    def collect_visible_scope_for_selected_threads(self):
+        """Collect links from selected threads without host filtering."""
         direct_urls: list[str] = []
         container_urls: list[str] = []
         visible_scope: dict[str, dict] = {}
-        priority = [
-            _clean_host(h) for h in (host_priority or []) if isinstance(h, str)
-        ]
         rows = {idx.row() for idx in self.process_threads_table.selectedIndexes()}
         if not rows:
             rows = set(range(self.process_threads_table.rowCount()))
@@ -3283,20 +3286,9 @@ class ForumBotGUI(QMainWindow):
                 else:
                     row_host_links.setdefault(host, []).append(u)
 
-            selected_host = None
-            for h in priority:
-                if h in row_host_links:
-                    selected_host = h
-                    break
-
-            if selected_host:
-                hosts = {selected_host}
-                urls_to_keep = row_host_links.get(selected_host, [])
-                direct_urls.extend(urls_to_keep)
-            else:
-                hosts = set(row_host_links.keys())
-                urls_to_keep = [u for links in row_host_links.values() for u in links]
-                direct_urls.extend(urls_to_keep)
+            hosts = set(row_host_links.keys())
+            urls_to_keep = [u for links in row_host_links.values() for u in links]
+            direct_urls.extend(urls_to_keep)
 
             row_urls = urls_to_keep + row_containers
             if not row_urls:
@@ -3372,15 +3364,27 @@ class ForumBotGUI(QMainWindow):
 
         self.link_check_cancel_event.clear()
         self._lc_expanded = {}
-        self._lc_counts = {"ONLINE": 0, "OFFLINE": 0, "UNKNOWN": 0}
+        self._lc_summary = LinkCheckSummary()
         self._lc_stats = {
             "replaced": 0,
             "status_updates": 0,
             "rows_not_found": 0,
         }
         self._lc_total_groups = 0
-        host_priority = self._get_download_host_priority()
-        direct_urls, container_urls, visible_scope = self.collect_visible_scope_for_selected_threads(host_priority)
+        self._lc_start_ts = time.monotonic()
+        single_host_mode = bool(self.config.get("single_host_mode", True))
+        auto_replace = bool(self.config.get("auto_replace_container", True))
+        host_priority = self._get_download_host_priority() if single_host_mode else []
+        chosen_host = (
+            get_highest_priority_host(getattr(self, "settings_widget", None), self.config)
+            if single_host_mode
+            else None
+        )
+        direct_urls, container_urls, visible_scope = self.collect_visible_scope_for_selected_threads()
+        if single_host_mode and direct_urls and not container_urls:
+            direct_urls, visible_scope = filter_direct_links_for_host(
+                direct_urls, visible_scope, chosen_host
+            )
         if not direct_urls and not container_urls:
             self.statusBar().showMessage("لا توجد روابط للفحص.")
             return
@@ -3415,8 +3419,18 @@ class ForumBotGUI(QMainWindow):
             self.link_check_cancel_event,
             visible_scope,
             poll_timeout_sec=600,
+            single_host_mode=single_host_mode,
+            auto_replace=auto_replace,
         )
         self.link_check_worker.set_host_priority(host_priority)
+        self.link_check_worker.chosen_host = chosen_host
+        log.debug(
+            "DETECT | session=%s | direct=%d | containers=%d | chosen_host=%s",
+            self.link_check_worker.session_id,
+            len(direct_urls),
+            len(container_urls),
+            chosen_host or "",
+        )
         self.link_check_worker.progress.connect(self._on_link_progress)
         self.link_check_worker.finished.connect(self._on_link_finished)
         self.link_check_worker.error.connect(lambda msg: self.statusBar().showMessage(msg))
@@ -3537,6 +3551,9 @@ class ForumBotGUI(QMainWindow):
     def on_cancel_check_clicked(self):
         if self.link_check_worker and self.link_check_worker.isRunning():
             self.link_check_cancel_event.set()
+            self.log.debug(
+                "CANCEL REQUEST | session=%s", getattr(self.link_check_worker, "session_id", "")
+            )
             self.statusBar().showMessage("تم طلب إلغاء فحص الروابط…")
 
     def _on_link_progress(self, payload: dict):
@@ -3573,6 +3590,11 @@ class ForumBotGUI(QMainWindow):
             siblings = payload.get("siblings") or []
             if replace_flag:
                 links = [chosen_url] + [s.get("url") for s in siblings if s.get("url")]
+                status_map = {chosen_url: status}
+                for s in siblings:
+                    surl = s.get("url")
+                    if surl:
+                        status_map[surl] = (s.get("status") or "UNKNOWN").upper()
                 rg_col = getattr(self, "RG_LINKS_COL", 3)
                 cell = self.process_threads_table.item(row_idx, rg_col)
                 if cell is None:
@@ -3580,16 +3602,30 @@ class ForumBotGUI(QMainWindow):
                     self.process_threads_table.setItem(row_idx, rg_col, cell)
                 cell.setText("\n".join(links))
 
-                display_status = "OFFLINE" if status == "UNKNOWN" else status
-                self.update_status_cell(row_idx, display_status)
+                self.update_status_cell(row_idx, status)
 
-                for entry in links:
-                    if entry:
-                        cache.setdefault(entry, {}).update({"status": status})
-                try:
-                    self.user_manager.save_user_data(self.LINK_STATUS_FILE, cache)
-                except Exception as e:
-                    self.log.warning("Failed to persist link_status.json: %s", e)
+                cat_item = self.process_threads_table.item(row_idx, 1)
+                title_item = self.process_threads_table.item(row_idx, 0)
+                if cat_item and title_item:
+                    cache = persist_link_replacement(
+                        self.process_threads,
+                        cat_item.text(),
+                        title_item.text(),
+                        chosen.get("host") or "",
+                        status_map,
+                        self.save_process_threads_data,
+                        self.user_manager,
+                        self.LINK_STATUS_FILE,
+                    )
+                    self._link_check_cache = cache
+                    self.log.debug(
+                        "PERSIST SAVE | session=%s | row=%s | title=%s | links=%d | dur=%.3f",
+                        payload.get("session_id"),
+                        row_idx,
+                        title_item.text(),
+                        len(links),
+                        time.monotonic() - getattr(self, "_lc_start_ts", 0.0),
+                    )
 
                 self.rebuild_row_index()
 
@@ -3602,11 +3638,15 @@ class ForumBotGUI(QMainWindow):
                     QtCore.Q_ARG(str, payload.get("group_id") or ""),
                 )
                 self.log.debug(
-                    "GUI REPLACED | container=%s \u2192 direct=%s | status=%s (ack sent)",
-                    self.canonical_url(container_url),
-                    self.canonical_url(chosen_url),
+                    "UI REPLACE | session=%s | group=%s | row=%s | title=%s | status=%s | dur=%.3f",
+                    payload.get("session_id"),
+                    payload.get("group_id"),
+                    row_idx,
+                    title_item.text() if title_item else "",
                     status,
+                    time.monotonic() - getattr(self, "_lc_start_ts", 0.0),
                 )
+                self._lc_summary.update(row_idx, status, replaced=True)
                 self._lc_stats["replaced"] += 1
                 return
             else:
@@ -3618,10 +3658,14 @@ class ForumBotGUI(QMainWindow):
                 except Exception as e:
                     self.log.warning("Failed to persist link_status.json: %s", e)
                 self.log.debug(
-                    "STATUS ONLY (container) | container=%s => %s",
+                    "UI STATUS | session=%s | row=%s | container=%s | status=%s | dur=%.3f",
+                    payload.get("session_id"),
+                    row_idx,
                     self.canonical_url(container_url),
                     status,
+                    time.monotonic() - getattr(self, "_lc_start_ts", 0.0),
                 )
+                self._lc_summary.update(row_idx, status)
                 self._lc_stats["status_updates"] += 1
                 return
 
@@ -3634,7 +3678,11 @@ class ForumBotGUI(QMainWindow):
                 hid = self.host_id_key(url)
                 row_idx = self.row_by_direct.get(hid)
             if row_idx is None:
-                self.log.debug("status-only row not found | %s", canon or url)
+                self.log.debug(
+                    "UI STATUS MISS | session=%s | url=%s",
+                    payload.get("session_id"),
+                    canon or url,
+                )
                 self._lc_stats["rows_not_found"] += 1
                 return
             self.update_status_cell(row_idx, status)
@@ -3643,12 +3691,15 @@ class ForumBotGUI(QMainWindow):
                 self.user_manager.save_user_data(self.LINK_STATUS_FILE, cache)
             except Exception as e:
                 self.log.warning("Failed to persist link_status.json: %s", e)
+            self._lc_summary.update(row_idx, status)
             self._lc_stats["status_updates"] += 1
             self.log.debug(
-                "STATUS OK | row=%s url=%s => %s",
+                "UI STATUS | session=%s | row=%s | url=%s | status=%s | dur=%.3f",
+                payload.get("session_id"),
                 row_idx,
                 self.canonical_url(url),
                 status,
+                time.monotonic() - getattr(self, "_lc_start_ts", 0.0),
             )
 
     def _on_link_finished(self, info: dict):
@@ -3658,17 +3709,22 @@ class ForumBotGUI(QMainWindow):
             self._save_link_check_cache()
         except Exception:
             pass
-        pending = max(self._lc_total_groups - self._lc_stats.get("replaced", 0), 0)
-        self.log.debug(
-            "SUMMARY | replaced=%d, status_updates=%d, pending_without_ack=%d",
-            self._lc_stats.get("replaced", 0),
-            self._lc_stats.get("status_updates", 0),
+        pending = max(self._lc_total_groups - self._lc_summary.replaced, 0)
+        cancelled = self.link_check_cancel_event.is_set()
+        self.log.info(
+            "SUMMARY | session=%s | rows=%d | replaced=%d | online=%d | offline=%d | unknown=%d | pending=%d | cancelled=%s | dur=%.3f",
+            info.get("session_id"),
+            len(self._lc_summary.row_statuses),
+            self._lc_summary.replaced,
+            self._lc_summary.counts["ONLINE"],
+            self._lc_summary.counts["OFFLINE"],
+            self._lc_summary.counts["UNKNOWN"],
             pending,
+            cancelled,
+            time.monotonic() - getattr(self, "_lc_start_ts", 0.0),
         )
-        self.statusBar().showMessage(
-            f"Link check finished: {self._lc_stats.get('status_updates', 0)} updated",
-            5000,
-        )
+        msg = self._lc_summary.message(cancelled)
+        self.statusBar().showMessage(msg, 5000)
         self.link_check_worker = None
 
     def _on_link_error(self, msg: str):

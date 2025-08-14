@@ -50,6 +50,8 @@ def load_configuration(env_path: str = None) -> dict:
 
     config = { key.lower(): _parse(val) for key, val in raw.items() }
     config.setdefault('data_dir', DATA_DIR)
+    config.setdefault('single_host_mode', True)
+    config.setdefault('auto_replace_container', True)
     return config
 
 
