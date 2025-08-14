@@ -3249,7 +3249,9 @@ class ForumBotGUI(QMainWindow):
         ]
         rows = {idx.row() for idx in self.process_threads_table.selectedIndexes()}
         if not rows:
-            return direct_urls, container_urls, visible_scope
+            rows = set(range(self.process_threads_table.rowCount()))
+            if not rows:
+                return direct_urls, container_urls, visible_scope
 
         for row in rows:
 
@@ -3273,27 +3275,26 @@ class ForumBotGUI(QMainWindow):
                     container_urls.append(u)
                     row_containers.append(u)
                 else:
-
                     row_host_links.setdefault(host, []).append(u)
 
-                selected_host = None
-                for h in priority:
-                    if h in row_host_links:
-                        selected_host = h
-                        break
+            selected_host = None
+            for h in priority:
+                if h in row_host_links:
+                    selected_host = h
+                    break
 
-                if selected_host:
-                    hosts = {selected_host}
-                    urls_to_keep = row_host_links.get(selected_host, [])
-                    direct_urls.extend(urls_to_keep)
-                else:
-                    hosts = set(row_host_links.keys())
-                    urls_to_keep = [u for links in row_host_links.values() for u in links]
-                    direct_urls.extend(urls_to_keep)
+            if selected_host:
+                hosts = {selected_host}
+                urls_to_keep = row_host_links.get(selected_host, [])
+                direct_urls.extend(urls_to_keep)
+            else:
+                hosts = set(row_host_links.keys())
+                urls_to_keep = [u for links in row_host_links.values() for u in links]
+                direct_urls.extend(urls_to_keep)
 
-                row_urls = urls_to_keep + row_containers
-                if not row_urls:
-                    continue
+            row_urls = urls_to_keep + row_containers
+            if not row_urls:
+                continue
 
             if row_containers:
                 for cu in row_containers:
