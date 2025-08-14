@@ -163,11 +163,36 @@ def test_container_keeps_only_chosen_host(monkeypatch):
     worker.progress = types.SimpleNamespace(emit=lambda payload: events.append(payload))
     worker.run()
     assert events
-    chosen = events[0]["chosen"]
+    container = next(e for e in events if e["type"] == "container")
+    chosen = container["chosen"]
     assert chosen["host"] == "rapidgator.net"
     assert "rapidgator.net" in chosen["url"]
 
+def test_container_chosen_host_alias(monkeypatch):
+    class JD(DummyJD):
+        def query_links(self):
+            return [
+                {
+                    "url": "https://rapidgator.net/file/abc",
+                    "host": "rapidgator.net",
+                    "availability": "ONLINE",
+                    "containerURL": "c",
+                    "uuid": "1",
+                }
+            ]
 
+    monkeypatch.setattr(link_check_worker.time, "sleep", lambda _=None: None)
+    jd = JD()
+    worker = LinkCheckWorker(jd, [], ["c"], threading.Event(), poll_timeout_sec=0)
+    worker.set_host_priority(["rapidgator"])
+    worker.chosen_host = "RapidGator"
+    events = []
+    worker.progress = types.SimpleNamespace(emit=lambda payload: events.append(payload))
+    worker.run()
+    assert events
+    container = next(e for e in events if e["type"] == "container")
+    chosen = container["chosen"]
+    assert chosen["host"] == "rapidgator.net"
 def test_container_fallback_logs(monkeypatch, caplog):
     class JD(DummyJD):
         def query_links(self):
@@ -190,11 +215,77 @@ def test_container_fallback_logs(monkeypatch, caplog):
     events = []
     worker.progress = types.SimpleNamespace(emit=lambda payload: events.append(payload))
     worker.run()
-    assert events[0]["chosen"]["host"] == "nitroflare.com"
+    container = next(e for e in events if e["type"] == "container")
+    assert container["chosen"]["host"] == "nitroflare.com"
     msgs = "\n".join(r.getMessage() for r in caplog.records)
     assert "HOST FALLBACK" in msgs
 
+def test_container_decrypt_summary_log(monkeypatch, caplog):
+    class JD(DummyJD):
+        def query_links(self):
+            return [
+                {
+                    "url": "https://rapidgator.net/file/abc",
+                    "host": "rapidgator.net",
+                    "availability": "ONLINE",
+                    "containerURL": "c",
+                    "uuid": "1",
+                },
+                {
+                    "url": "https://nitroflare.com/view/xyz",
+                    "host": "nitroflare.com",
+                    "availability": "ONLINE",
+                    "containerURL": "c",
+                    "uuid": "2",
+                },
+            ]
 
+    monkeypatch.setattr(link_check_worker.time, "sleep", lambda _=None: None)
+    jd = JD()
+    caplog.set_level(logging.DEBUG)
+    worker = LinkCheckWorker(jd, [], ["c"], threading.Event(), poll_timeout_sec=0)
+    worker.set_host_priority(["rapidgator.net", "nitroflare.com"])
+    worker.chosen_host = "rapidgator.net"
+    worker.run()
+    msg = next(r.getMessage() for r in caplog.records if "DECRYPT SUMMARY" in r.getMessage())
+    assert "chosen=rapidgator.net" in msg
+    assert "nitroflare.com" in msg and "rapidgator.net" in msg
+    assert "kept=1" in msg
+    assert "auto_replace=ON" in msg
+    assert "single_host=ON" in msg
+def test_container_decrypt_summary_log(monkeypatch, caplog):
+    class JD(DummyJD):
+        def query_links(self):
+            return [
+                {
+                    "url": "https://rapidgator.net/file/abc",
+                    "host": "rapidgator.net",
+                    "availability": "ONLINE",
+                    "containerURL": "c",
+                    "uuid": "1",
+                },
+                {
+                    "url": "https://nitroflare.com/view/xyz",
+                    "host": "nitroflare.com",
+                    "availability": "ONLINE",
+                    "containerURL": "c",
+                    "uuid": "2",
+                },
+            ]
+
+    monkeypatch.setattr(link_check_worker.time, "sleep", lambda _=None: None)
+    jd = JD()
+    caplog.set_level(logging.DEBUG)
+    worker = LinkCheckWorker(jd, [], ["c"], threading.Event(), poll_timeout_sec=0)
+    worker.set_host_priority(["rapidgator.net", "nitroflare.com"])
+    worker.chosen_host = "rapidgator.net"
+    worker.run()
+    msg = next(r.getMessage() for r in caplog.records if "DECRYPT SUMMARY" in r.getMessage())
+    assert "chosen=rapidgator.net" in msg
+    assert "nitroflare.com" in msg and "rapidgator.net" in msg
+    assert "kept=1" in msg
+    assert "auto_replace=ON" in msg
+    assert "single_host=ON" in msg
 def test_direct_availability_check_only_kept_links(monkeypatch):
     class JD(DummyJD):
         def __init__(self):
@@ -285,7 +376,9 @@ def test_container_availability_check_only_kept_links(monkeypatch):
     worker.progress = types.SimpleNamespace(emit=lambda payload: events.append(payload))
     worker.run()
     assert jd.checked == ["1"]
-    assert events and events[0]["chosen"]["status"] == "ONLINE"
+    assert events and events[0]["type"] == "status"
+    container = next(e for e in events if e["type"] == "container")
+    assert container["chosen"]["status"] == "ONLINE"
 
 
 def test_container_payload_replaces_and_lists_siblings(monkeypatch):
@@ -334,10 +427,54 @@ def test_container_payload_replaces_and_lists_siblings(monkeypatch):
     worker.progress = types.SimpleNamespace(emit=lambda payload: events.append(payload))
     worker.run()
     assert jd.checked == ["1", "2"]
-    assert events and events[0]["replace"] is True
-    assert events[0]["chosen"]["url"].endswith("/abc")
-    assert events[0]["chosen"]["status"] == "ONLINE"
-    assert events[0]["siblings"] == [{"url": "https://rapidgator.net/file/def", "status": "OFFLINE"}]
+
+    assert events and events[0]["type"] == "status"
+    container = next(e for e in events if e["type"] == "container")
+    assert container["replace"] is True
+    assert container["chosen"]["url"].endswith("/abc")
+    assert container["chosen"]["status"] == "ONLINE"
+    assert container["siblings"] == [{"url": "https://rapidgator.net/file/def", "status": "OFFLINE"}]
+
+
+def test_container_emits_status_before_replace(monkeypatch):
+    class JD(DummyJD):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+            self.items = [
+                {
+                    "url": "https://rapidgator.net/file/abc",
+                    "host": "rapidgator.net",
+                    "availability": "UNKNOWN",
+                    "uuid": "1",
+                    "containerURL": "c",
+                }
+            ]
+
+        def query_links(self):
+            self.calls += 1
+            if self.calls < 2:
+                return []
+            return self.items
+
+        def start_online_check(self, ids):
+            super().start_online_check(ids)
+            for it in self.items:
+                if it["uuid"] in ids:
+                    it["availability"] = "ONLINE"
+            return True
+
+    monkeypatch.setattr(link_check_worker.time, "sleep", lambda _=None: None)
+    jd = JD()
+    worker = LinkCheckWorker(jd, [], ["c"], threading.Event(), poll_timeout_sec=1, poll_interval=0)
+    worker.set_host_priority(["rapidgator.net"])
+    worker.chosen_host = "rapidgator.net"
+    events = []
+    worker.progress = types.SimpleNamespace(emit=lambda payload: events.append(payload))
+    worker.run()
+    assert events[0]["type"] == "status"
+    assert events[1]["type"] == "container"
+    assert events[0]["status"] == "ONLINE"
 
 
 def test_ack_removes_only_non_chosen(monkeypatch):
@@ -374,18 +511,30 @@ def test_ack_removes_only_non_chosen(monkeypatch):
 
     monkeypatch.setattr(link_check_worker.time, "sleep", lambda _=None: None)
     jd = JD()
-    worker = LinkCheckWorker(jd, [], ["c"], threading.Event(), poll_timeout_sec=1, poll_interval=0)
+    scope = {"c": {"row": 0}}
+    worker = LinkCheckWorker(
+        jd,
+        [],
+        ["c"],
+        threading.Event(),
+        poll_timeout_sec=1,
+        poll_interval=0,
+        visible_scope=scope,
+    )
     worker.set_host_priority(["rapidgator.net", "nitroflare.com"])
     worker.chosen_host = "rapidgator.net"
     events: list = []
     worker.progress = types.SimpleNamespace(emit=lambda payload: events.append(payload))
     worker.run()
-    assert events and events[0]["group_id"]
-    group_id = events[0]["group_id"]
-    worker.ack_replaced(events[0]["container_url"], worker.session_id, group_id)
+    assert events and events[0]["type"] == "status"
+    container = next(e for e in events if e["type"] == "container")
+    assert container["group_id"]
+    assert container["row"] == 0
+    group_id = container["group_id"]
+    worker.ack_replaced(container["row"], worker.session_id, group_id)
     assert jd.removed == [["2"]]
     # second ack should be a no-op
-    worker.ack_replaced(events[0]["container_url"], worker.session_id, group_id)
+    worker.ack_replaced(container["row"], worker.session_id, group_id)
     assert jd.removed == [["2"]]
 
 
@@ -408,14 +557,18 @@ def test_jd_cleanup_logging(caplog):
     worker._start_time = 0.0
     caplog.set_level(logging.DEBUG)
     key = (worker.session_id, "gid")
-    worker.awaiting_ack[key] = {"remove_ids": ["1"]}
-    worker.ack_replaced("http://container", worker.session_id, "gid")
+    worker.awaiting_ack[key] = {
+        "remove_ids": ["1"],
+        "container_url": "http://container",
+        "row": 5,
+    }
+    worker.ack_replaced(5, worker.session_id, "gid")
     msgs = "\n".join(r.getMessage() for r in caplog.records)
     assert "JD CLEANUP" in msgs
     assert "group=gid" in msgs
 
 
-def test_single_host_mode_off_keeps_all_links(monkeypatch):
+def test_single_host_mode_off_skips_replace(monkeypatch, caplog):
     class JD(DummyJD):
         def query_links(self):
             return [
@@ -437,6 +590,7 @@ def test_single_host_mode_off_keeps_all_links(monkeypatch):
 
     monkeypatch.setattr(link_check_worker.time, "sleep", lambda _=None: None)
     jd = JD()
+    caplog.set_level(logging.DEBUG)
     worker = LinkCheckWorker(
         jd,
         [],
@@ -450,11 +604,16 @@ def test_single_host_mode_off_keeps_all_links(monkeypatch):
     worker.progress = types.SimpleNamespace(emit=lambda payload: events.append(payload))
     worker.run()
     assert jd.checked == ["1", "2"]
-    assert events and events[0]["replace"] is True
-    assert len(events[0]["siblings"]) == 1
+    assert events and events[0]["type"] == "status"
+    container = next(e for e in events if e["type"] == "container")
+    assert container["replace"] is False
+    assert len(container["siblings"]) == 1
+    msgs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "FLAGS" in msgs and "auto_replace=ON" in msgs and "single_host=OFF" in msgs
+    assert "REPLACE SKIP" in msgs and "single-host-check off" in msgs
 
 
-def test_auto_replace_flag_off(monkeypatch):
+def test_auto_replace_flag_off(monkeypatch, caplog):
     class JD(DummyJD):
         def __init__(self):
             super().__init__()
@@ -487,6 +646,7 @@ def test_auto_replace_flag_off(monkeypatch):
 
     monkeypatch.setattr(link_check_worker.time, "sleep", lambda _=None: None)
     jd = JD()
+    caplog.set_level(logging.DEBUG)
     worker = LinkCheckWorker(
         jd,
         [],
@@ -501,5 +661,71 @@ def test_auto_replace_flag_off(monkeypatch):
     worker.progress = types.SimpleNamespace(emit=lambda payload: events.append(payload))
     worker.run()
     assert jd.checked == ["1", "2"]
-    assert events and events[0]["replace"] is False
+    assert events and events[0]["type"] == "status"
+    container = next(e for e in events if e["type"] == "container")
+    assert container["replace"] is False
     assert worker.awaiting_ack == {}
+    msgs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "FLAGS" in msgs and "auto_replace=OFF" in msgs and "single_host=ON" in msgs
+    assert "REPLACE SKIP" in msgs and "auto-replace off" in msgs
+
+
+def test_container_flow_replaces_row_and_updates_status(monkeypatch):
+    class JD(DummyJD):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+            self.items = [
+                {
+                    "url": "https://rapidgator.net/file/abc",
+                    "host": "rapidgator.net",
+                    "availability": "UNKNOWN",
+                    "uuid": "1",
+                    "containerURL": "c",
+                },
+                {
+                    "url": "https://nitroflare.com/view/xyz",
+                    "host": "nitroflare.com",
+                    "availability": "UNKNOWN",
+                    "uuid": "2",
+                    "containerURL": "c",
+                },
+            ]
+
+        def query_links(self):
+            self.calls += 1
+            if self.calls < 2:
+                return []
+            return self.items
+
+        def start_online_check(self, ids):
+            super().start_online_check(ids)
+            for it in self.items:
+                if it["uuid"] in ids:
+                    it["availability"] = "ONLINE"
+            return True
+
+    monkeypatch.setattr(link_check_worker.time, "sleep", lambda _=None: None)
+    jd = JD()
+    visible_scope = {"c": {"hosts": ["rapidgator.net", "nitroflare.com"], "row": 7}}
+    worker = LinkCheckWorker(
+        jd,
+        [],
+        ["c"],
+        threading.Event(),
+        visible_scope=visible_scope,
+        poll_timeout_sec=1,
+        poll_interval=0,
+    )
+    worker.set_host_priority(["rapidgator.net", "nitroflare.com"])
+    worker.chosen_host = "rapidgator.net"
+    events: list = []
+    worker.progress = types.SimpleNamespace(emit=lambda payload: events.append(payload))
+    worker.run()
+    assert jd.checked == ["1"]
+    assert events and events[0]["type"] == "status"
+    container = next(e for e in events if e["type"] == "container")
+    assert container["row"] == 7
+    assert container["replace"] is True
+    assert container["chosen"]["host"] == "rapidgator.net"
+    assert container["chosen"]["status"] == "ONLINE"

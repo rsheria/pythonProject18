@@ -3566,14 +3566,7 @@ class ForumBotGUI(QMainWindow):
             )
             container_url = (payload.get("container_url") or "").strip()
             replace_flag = payload.get("replace", True)
-            # Prefer the row index supplied by the worker; fall back to a lookup
-            # based on the raw container URL when migrating older cached entries.
             row_idx = payload.get("row")
-            if row_idx is None:
-                row_idx = self.row_by_container.get(container_url)
-            if row_idx is None:
-                canon = self.canonical_url(container_url)
-                row_idx = self.row_by_container.get(canon)
             if row_idx is None:
                 self.log.debug(
                     "ROW NOT FOUND (container) | container=%s",
@@ -3630,7 +3623,7 @@ class ForumBotGUI(QMainWindow):
                     self.link_check_worker,
                     "ack_replaced",
                     QtCore.Qt.QueuedConnection,
-                    QtCore.Q_ARG(str, container_url),
+                    QtCore.Q_ARG(int, row_idx),
                     QtCore.Q_ARG(str, payload.get("session_id") or ""),
                     QtCore.Q_ARG(str, payload.get("group_id") or ""),
                 )
@@ -3669,19 +3662,21 @@ class ForumBotGUI(QMainWindow):
         if ptype == "status":
             url = (payload.get("url") or "").strip()
             status = (payload.get("status") or "UNKNOWN").upper()
-            canon = self.canonical_url(url)
-            row_idx = self.row_by_direct.get(canon)
+            row_idx = payload.get("row")
             if row_idx is None:
-                hid = self.host_id_key(url)
-                row_idx = self.row_by_direct.get(hid)
-            if row_idx is None:
-                self.log.debug(
-                    "UI STATUS MISS | session=%s | url=%s",
-                    payload.get("session_id"),
-                    canon or url,
-                )
-                self._lc_stats["rows_not_found"] += 1
-                return
+                canon = self.canonical_url(url)
+                row_idx = self.row_by_direct.get(canon)
+                if row_idx is None:
+                    hid = self.host_id_key(url)
+                    row_idx = self.row_by_direct.get(hid)
+                if row_idx is None:
+                    self.log.debug(
+                        "UI STATUS MISS | session=%s | url=%s",
+                        payload.get("session_id"),
+                        canon or url,
+                    )
+                    self._lc_stats["rows_not_found"] += 1
+                    return
             self.update_status_cell(row_idx, status)
             cache.setdefault(url, {}).update({"status": status})
             try:

@@ -24,3 +24,11 @@ def test_summary_cancelled():
     assert msg.startswith('Link check cancelled')
     assert '2 rows' in msg
     assert 'replaced 1' in msg
+
+
+def test_summary_single_row():
+    s = LinkCheckSummary()
+    s.update(5, 'ONLINE', replaced=True)
+    msg = s.message()
+    assert '1 rows' in msg
+    assert 'replaced 1' in msg

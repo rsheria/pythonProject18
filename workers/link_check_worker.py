@@ -33,10 +33,17 @@ NF_RE = re.compile(r"^/view/([A-Za-z0-9]+)")
 DD_RE = re.compile(r"^/(?:f|file)/([A-Za-z0-9]+)")
 TB_RE = re.compile(r"^/([A-Za-z0-9]+)")
 
-
+_HOST_ALIASES = {
+    "rapidgator": "rapidgator.net",
+    "nitroflare": "nitroflare.com",
+    "ddownload": "ddownload.com",
+    "turbobit": "turbobit.net",
+}
 def _clean_host(h: str) -> str:
     h = (h or "").lower().strip()
-    return h[4:] if h.startswith("www.") else h
+    if h.startswith("www."):
+        h = h[4:]
+    return _HOST_ALIASES.get(h, h)
 
 
 def canonical_url(s: str) -> str:
@@ -128,49 +135,55 @@ class LinkCheckWorker(QtCore.QThread):
         self.host_priority = []
         for h in (priority_list or []):
             if isinstance(h, str):
-                h = h.strip().lower()
-                if h.startswith("www."):
-                    h = h[4:]
-                self.host_priority.append(h)
+                self.host_priority.append(_clean_host(h))
 
-    @QtCore.pyqtSlot(str, str, str)
-    def ack_replaced(self, container_url: str, session_id: str, group_id: str):
-        """Ack from GUI that container_url has been replaced in the table."""
-        if session_id != self.session_id:
-            return
+        @QtCore.pyqtSlot(int, str, str)
+        def ack_replaced(self, row: int, session_id: str, group_id: str):
+            """Ack from GUI that the row at *row* has been replaced in the table."""
+            if session_id != self.session_id:
+                return
 
-        key = (session_id, group_id)
-        info = self.awaiting_ack.pop(key, None)
-        if not info:
-            return
+            key = (session_id, group_id)
+            info = self.awaiting_ack.pop(key, None)
+            if not info or info.get("row") != row:
+                    return
 
-        remove_ids = info.get("remove_ids") or []
-        try:
-            if remove_ids:
-                self.jd.remove_links(remove_ids)
-                log.debug(
-                    "JD CLEANUP | session=%s | group=%s | removed=%d | container=%s | dur=%.3f",
-                    self.session_id,
-                    group_id,
-                    len(remove_ids),
-                    canonical_url(container_url),
-                    time.monotonic() - self._start_time if self._start_time else 0.0,
-                )
-            else:
-                log.debug(
-                    "JD CLEANUP | session=%s | group=%s | removed=0 | container=%s | dur=%.3f",
-                    self.session_id,
-                    group_id,
-                    canonical_url(container_url),
-                    time.monotonic() - self._start_time if self._start_time else 0.0,
-                )
-        except Exception as e:
-            log.warning("remove container links failed: %s", e)
+            remove_ids = info.get("remove_ids") or []
+            container_url = info.get("container_url", "")
+            try:
+                if remove_ids:
+                    self.jd.remove_links(remove_ids)
+                    log.debug(
+                        "JD CLEANUP | session=%s | group=%s | row=%s | removed=%d | container=%s | dur=%.3f",
+                        self.session_id,
+                        group_id,
+                        row,
+                        len(remove_ids),
+                        canonical_url(container_url),
+                        time.monotonic() - self._start_time if self._start_time else 0.0,
+                    )
+                else:
+                    log.debug(
+                        "JD CLEANUP | session=%s | group=%s | row=%s | removed=0 | container=%s | dur=%.3f",
+                        self.session_id,
+                        group_id,
+                        row,
+                        canonical_url(container_url),
+                        time.monotonic() - self._start_time if self._start_time else 0.0,
+                    )
+            except Exception as e:
+                log.warning("remove container links failed: %s", e)
 
     def run(self):
         self._start_time = time.monotonic()
         self.awaiting_ack.clear()
         self._direct_ids.clear()
+        log.debug(
+            "FLAGS | session=%s | auto_replace=%s | single_host=%s",
+            self.session_id,
+            "ON" if self.auto_replace else "OFF",
+            "ON" if self.single_host_mode else "OFF",
+        )
         log.debug(
             "DETECT | session=%s | direct=%d | containers=%d | dur=%.3f",
             self.session_id,
@@ -179,6 +192,7 @@ class LinkCheckWorker(QtCore.QThread):
             0.0,
         )
         if self.chosen_host:
+            self.chosen_host = _clean_host(self.chosen_host)
             log.debug(
                 "CHOSEN HOST | session=%s | host=%s | dur=%.3f",
                 self.session_id,
@@ -310,7 +324,7 @@ class LinkCheckWorker(QtCore.QThread):
         allowed_direct = {canonical_url(u) for u in self.direct_urls}
         allowed_containers = {canonical_url(u): u for u in self.container_urls}
         scope_hosts = {
-            canonical_url(k): set(v.get("hosts", []))
+            canonical_url(k): {_clean_host(h) for h in v.get("hosts", [])}
             for k, v in (self.visible_scope or {}).items()
         }
         scope_rows = {
@@ -395,6 +409,7 @@ class LinkCheckWorker(QtCore.QThread):
                 ccanon = canonical_url(container_key)
                 allowed = scope_hosts.get(ccanon, set())
                 row_idx = scope_rows.get(ccanon)
+                all_hosts = sorted({_host_of(it) for it in gitems})
                 if self.single_host_mode:
                     filtered = [it for it in gitems if not allowed or _host_of(it) in allowed]
                     dropped = len(gitems) - len(filtered)
@@ -454,12 +469,43 @@ class LinkCheckWorker(QtCore.QThread):
                     all_ids = [it.get("uuid") for it in filtered if it.get("uuid")]
                     oset = set(ordered_ids)
                     remove_ids = [uid for uid in all_ids if uid not in oset]
-                    replace = self.auto_replace and bool(self.host_priority)
+                    replace = (
+                        self.auto_replace
+                        and self.single_host_mode
+                        and bool(self.host_priority)
+                    )
+                    kept_count = len(ordered_ids)
+                    log.debug(
+                        "DECRYPT SUMMARY | session=%s | row=%s | chosen=%s | decrypted=%d | hosts=%s | kept=%d | auto_replace=%s | single_host=%s",
+                        self.session_id,
+                        row_idx,
+                        host,
+                        len(gitems),
+                        all_hosts,
+                        kept_count,
+                        "ON" if self.auto_replace else "OFF",
+                        "ON" if self.single_host_mode else "OFF",
+                    )
+                    if not replace:
+                        reason = []
+                        if not self.auto_replace:
+                            reason.append("auto-replace off")
+                        if not self.single_host_mode:
+                            reason.append("single-host-check off")
+                        if reason:
+                            log.debug(
+                                "REPLACE SKIP | session=%s | row=%s | reason=%s | dur=%.3f",
+                                self.session_id,
+                                row_idx,
+                                ",".join(reason),
+                                time.monotonic() - self._start_time,
+                            )
                     group_id = uuid.uuid4().hex if replace else ""
                     if replace:
                         self.awaiting_ack[(self.session_id, group_id)] = {
                             "container_url": container_key,
                             "remove_ids": remove_ids,
+                            "row": row_idx,
                         }
                     sel = {
                         "container_url": container_key,
@@ -479,12 +525,40 @@ class LinkCheckWorker(QtCore.QThread):
                     for lst in host_map.values():
                         ordered.extend(lst)
                     ordered_ids = [it.get("uuid") for it in ordered if it.get("uuid")]
-                    replace = self.auto_replace
+                    replace = self.auto_replace and self.single_host_mode
+                    kept_count = len(ordered_ids)
+                    chosen = _host_of(ordered[0]) if ordered else ""
+                    log.debug(
+                        "DECRYPT SUMMARY | session=%s | row=%s | chosen=%s | decrypted=%d | hosts=%s | kept=%d | auto_replace=%s | single_host=%s",
+                        self.session_id,
+                        row_idx,
+                        chosen,
+                        len(gitems),
+                        all_hosts,
+                        kept_count,
+                        "ON" if self.auto_replace else "OFF",
+                        "ON" if self.single_host_mode else "OFF",
+                    )
+                    if not replace:
+                        reason = []
+                        if not self.auto_replace:
+                            reason.append("auto-replace off")
+                        if not self.single_host_mode:
+                            reason.append("single-host-check off")
+                        if reason:
+                            log.debug(
+                                "REPLACE SKIP | session=%s | row=%s | reason=%s | dur=%.3f",
+                                self.session_id,
+                                row_idx,
+                                ",".join(reason),
+                                time.monotonic() - self._start_time,
+                            )
                     group_id = uuid.uuid4().hex if replace else ""
                     if replace:
                         self.awaiting_ack[(self.session_id, group_id)] = {
                             "container_url": container_key,
                             "remove_ids": [],
+                            "row": row_idx,
                         }
                     sel = {
                         "container_url": container_key,
@@ -520,6 +594,24 @@ class LinkCheckWorker(QtCore.QThread):
                 )
                 chosen_status = _availability(chosen)
                 chosen_alias = chosen.get("name")
+                # Emit a status payload so the UI records availability before any replacement
+                status_payload = {
+                    "type": "status",
+                    "session_id": self.session_id,
+                    "url": chosen_url,
+                    "status": chosen_status,
+                    "scope_hosts": [sel["host"]],
+                    "row": sel["row"],
+                }
+                self.progress.emit(status_payload)
+                log.debug(
+                    "AVAIL RESULT | session=%s | url=%s | status=%s | dur=%.3f",
+                    self.session_id,
+                    canonical_url(chosen_url),
+                    chosen_status,
+                    time.monotonic() - self._start_time,
+                )
+
                 siblings = []
                 for alt in ordered_items[1:]:
                     aurl = (
