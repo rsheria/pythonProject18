@@ -78,7 +78,7 @@ from utils import sanitize_filename
 from utils.paths import get_data_folder
 from workers.login_thread import LoginThread
 from integrations.jd_client import JDClient
-from workers.link_check_worker import LinkCheckWorker, CONTAINER_HOSTS
+from workers.link_check_worker import LinkCheckWorker, CONTAINER_HOSTS, is_container_host
 RG_RE = re.compile(r"^/file/([A-Za-z0-9]+)(?:/.*)?$")
 NF_RE = re.compile(r"^/view/([A-Za-z0-9]+)(?:/.*)?$")
 DD_RE = re.compile(r"^/(?:f|file)/([A-Za-z0-9]+)(?:/.*)?$")
@@ -3275,7 +3275,9 @@ class ForumBotGUI(QMainWindow):
             for m in URL_RE.findall(text):
                 u = m.strip().strip('.,);]')
                 host = _clean_host(urlsplit(u).hostname or "")
-                if host in CONTAINER_HOSTS:
+                if is_container_host(host):
+                    # Remember the container URL so it can later be expanded via
+                    # JDownloader.
                     container_urls.append(u)
                     row_containers.append(u)
                 else:
@@ -3302,10 +3304,18 @@ class ForumBotGUI(QMainWindow):
 
             if row_containers:
                 for cu in row_containers:
-                    visible_scope[cu] = {"urls": row_urls, "hosts": sorted(hosts)}
+                    visible_scope[cu] = {
+                        "urls": row_urls,
+                        "hosts": sorted(hosts),
+                        "row": row,
+                    }
             else:
                 key = f"row:{row}"
-                visible_scope[key] = {"urls": row_urls, "hosts": sorted(hosts)}
+                visible_scope[key] = {
+                    "urls": row_urls,
+                    "hosts": sorted(hosts),
+                    "row": row,
+                }
 
         return direct_urls, container_urls, visible_scope
     def _get_myjd_credentials(self):
@@ -3541,7 +3551,11 @@ class ForumBotGUI(QMainWindow):
                 self._lc_total_groups, payload.get("total_groups", 0)
             )
             container_url = (payload.get("container_url") or "").strip()
-            row_idx = self.row_by_container.get(container_url)
+            # Prefer the row index supplied by the worker; fall back to a lookup
+            # based on the raw container URL when migrating older cached entries.
+            row_idx = payload.get("row")
+            if row_idx is None:
+                row_idx = self.row_by_container.get(container_url)
             if row_idx is None:
                 canon = self.canonical_url(container_url)
                 row_idx = self.row_by_container.get(canon)

@@ -7,7 +7,9 @@ from PyQt5 import QtCore
 import logging
 import time
 import re
-
+# Known hosts that act purely as container/redirect services.  Any URL whose
+# hostname matches one of these entries will be sent to JDownloader so that the
+# real file links can be extracted.
 CONTAINER_HOSTS = {
     "keeplinks.org",
     "kprotector.com",
@@ -16,7 +18,9 @@ CONTAINER_HOSTS = {
     "shorte.st",
     "shorteners",
 }
-
+def is_container_host(host: str) -> bool:
+    """Return True if *host* is considered a container/redirect service."""
+    return (host or "").lower() in CONTAINER_HOSTS
 # Number of consecutive polls with an unchanged result set before we give up
 # waiting for JDownloader to resolve every link.  This prevents the worker from
 # polling indefinitely when some items never transition to ONLINE/OFFLINE.
@@ -212,10 +216,17 @@ class LinkCheckWorker(QtCore.QThread):
         items = self.jd.query_links() or []
 
         allowed_direct = {canonical_url(u) for u in self.direct_urls}
+        # Map canonical form -> original URL so we can keep track of the exact
+        # container link that was provided by the user interface.
         allowed_containers = {canonical_url(u): u for u in self.container_urls}
         scope_hosts = {
             canonical_url(k): set(v.get("hosts", []))
             for k, v in (self.visible_scope or {}).items()
+        }
+        # Track row index for each container so the GUI can update the proper
+        # table cell without relying on string lookups.
+        scope_rows = {
+            canonical_url(k): v.get("row") for k, v in (self.visible_scope or {}).items()
         }
         def _availability(it):
             a = (it.get("availability") or "").upper()
@@ -259,11 +270,12 @@ class LinkCheckWorker(QtCore.QThread):
                 or ""
             )
             chost = _clean_host(urlsplit(container_url or item_url).hostname or "")
-            is_container = chost in CONTAINER_HOSTS or bool(it.get("containerURL"))
+            is_container = is_container_host(chost) or bool(it.get("containerURL"))
             if is_container:
                 ccanon = canonical_url(container_url)
                 if ccanon in allowed_containers:
-                    groups[container_url].append(it)
+                    orig = allowed_containers[ccanon]
+                    groups[orig].append(it)
             else:
                 canon_item = canonical_url(item_url)
                 if canon_item not in allowed_direct:
@@ -292,6 +304,7 @@ class LinkCheckWorker(QtCore.QThread):
         for idx, (container_key, gitems) in enumerate(groups.items(), start=1):
             ccanon = canonical_url(container_key)
             allowed = scope_hosts.get(ccanon, set())
+            row_idx = scope_rows.get(ccanon)
             filtered = [it for it in gitems if not allowed or _host_of(it) in allowed]
             dropped = len(gitems) - len(filtered)
             if allowed:
@@ -355,6 +368,7 @@ class LinkCheckWorker(QtCore.QThread):
                 "total_groups": total_groups,
                 "idx": idx,
                 "scope_hosts": sorted(allowed),
+                "row": row_idx,
             }
             if chosen_alias:
                 payload["chosen"]["alias"] = chosen_alias
