@@ -3255,7 +3255,8 @@ class ForumBotGUI(QMainWindow):
 
         for row in rows:
 
-            item = self.process_threads_table.item(row, 2)
+            # Rapidgator links are stored in column 3 of the table
+            item = self.process_threads_table.item(row, self.RG_LINKS_COL)
             if not item:
                 continue
             text = (item.text() or "").strip()
