@@ -265,6 +265,8 @@ class ForumBotGUI(QMainWindow):
     OTHER_ENV_FILE_EXTENSIONS = ('.dmg', '.deb', '.apk', '.exe', '.bin')  # Add more as needed
     LINK_STATUS_FILE = "link_status.json"
     LINK_STATUS_COL = 8
+    # Column index containing the thread's Rapidgator links
+    RG_LINKS_COL = 3
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -3254,9 +3256,10 @@ class ForumBotGUI(QMainWindow):
                 return direct_urls, container_urls, visible_scope
 
         for row in rows:
-
-            # Rapidgator links are stored in column 3 of the table
-            item = self.process_threads_table.item(row, self.RG_LINKS_COL)
+            # Rapidgator links are stored in column 3 of the table.
+            # Some environments may not define RG_LINKS_COL, so fall back to column 3.
+            rg_col = getattr(self, "RG_LINKS_COL", 3)
+            item = self.process_threads_table.item(row, rg_col)
             if not item:
                 continue
             text = (item.text() or "").strip()
