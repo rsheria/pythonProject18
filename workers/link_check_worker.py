@@ -338,11 +338,18 @@ class LinkCheckWorker(QtCore.QThread):
             # Keep only links from the chosen host so we don't emit other hosts
             ordered = [it for it in ordered if _host_of(it) == host]
             jd_ids = [it.get("uuid") for it in filtered if it.get("uuid")]
-            group_id = uuid.uuid4().hex
-            self.awaiting_ack[(self.session_id, group_id)] = {
-                "container_url": container_key,
-                "ids": jd_ids,
-            }
+            replace = bool(self.host_priority)
+            group_id = uuid.uuid4().hex if replace else ""
+            if replace:
+                self.awaiting_ack[(self.session_id, group_id)] = {
+                    "container_url": container_key,
+                    "ids": jd_ids,
+                }
+            elif jd_ids:
+                try:
+                    self.jd.remove_links(jd_ids)
+                except Exception as e:
+                    log.warning("remove container links failed: %s", e)
 
             chosen = ordered[0]
             chosen_url = (
@@ -374,7 +381,7 @@ class LinkCheckWorker(QtCore.QThread):
                     "host": host,
                 },
                 "siblings": siblings,
-                "replace": True,
+                "replace": replace,
                 "session_id": self.session_id,
                 "group_id": group_id,
                 "total_groups": total_groups,

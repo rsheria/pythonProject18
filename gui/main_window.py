@@ -3551,6 +3551,7 @@ class ForumBotGUI(QMainWindow):
                 self._lc_total_groups, payload.get("total_groups", 0)
             )
             container_url = (payload.get("container_url") or "").strip()
+            replace_flag = payload.get("replace", True)
             # Prefer the row index supplied by the worker; fall back to a lookup
             # based on the raw container URL when migrating older cached entries.
             row_idx = payload.get("row")
@@ -3570,43 +3571,59 @@ class ForumBotGUI(QMainWindow):
             chosen_url = chosen.get("url", "")
             status = (chosen.get("status") or "UNKNOWN").upper()
             siblings = payload.get("siblings") or []
-            links = [chosen_url] + [s.get("url") for s in siblings if s.get("url")]
-            rg_col = getattr(self, "RG_LINKS_COL", 3)
-            cell = self.process_threads_table.item(row_idx, rg_col)
-            if cell is None:
-                cell = QTableWidgetItem()
-                self.process_threads_table.setItem(row_idx, rg_col, cell)
-            cell.setText("\n".join(links))
+            if replace_flag:
+                links = [chosen_url] + [s.get("url") for s in siblings if s.get("url")]
+                rg_col = getattr(self, "RG_LINKS_COL", 3)
+                cell = self.process_threads_table.item(row_idx, rg_col)
+                if cell is None:
+                    cell = QTableWidgetItem()
+                    self.process_threads_table.setItem(row_idx, rg_col, cell)
+                cell.setText("\n".join(links))
 
-            display_status = "OFFLINE" if status == "UNKNOWN" else status
-            self.update_status_cell(row_idx, display_status)
+                display_status = "OFFLINE" if status == "UNKNOWN" else status
+                self.update_status_cell(row_idx, display_status)
 
-            for entry in links:
-                if entry:
-                    cache.setdefault(entry, {}).update({"status": status})
-            try:
-                self.user_manager.save_user_data(self.LINK_STATUS_FILE, cache)
-            except Exception as e:
-                self.log.warning("Failed to persist link_status.json: %s", e)
+                for entry in links:
+                    if entry:
+                        cache.setdefault(entry, {}).update({"status": status})
+                try:
+                    self.user_manager.save_user_data(self.LINK_STATUS_FILE, cache)
+                except Exception as e:
+                    self.log.warning("Failed to persist link_status.json: %s", e)
 
-            self.rebuild_row_index()
+                self.rebuild_row_index()
 
-            QtCore.QMetaObject.invokeMethod(
-                self.link_check_worker,
-                "ack_replaced",
-                QtCore.Qt.QueuedConnection,
-                QtCore.Q_ARG(str, container_url),
-                QtCore.Q_ARG(str, payload.get("session_id") or ""),
-                QtCore.Q_ARG(str, payload.get("group_id") or ""),
-            )
-            self.log.debug(
-                "GUI REPLACED | container=%s \u2192 direct=%s | status=%s (ack sent)",
-                self.canonical_url(container_url),
-                self.canonical_url(chosen_url),
-                status,
-            )
-            self._lc_stats["replaced"] += 1
-            return
+                QtCore.QMetaObject.invokeMethod(
+                    self.link_check_worker,
+                    "ack_replaced",
+                    QtCore.Qt.QueuedConnection,
+                    QtCore.Q_ARG(str, container_url),
+                    QtCore.Q_ARG(str, payload.get("session_id") or ""),
+                    QtCore.Q_ARG(str, payload.get("group_id") or ""),
+                )
+                self.log.debug(
+                    "GUI REPLACED | container=%s \u2192 direct=%s | status=%s (ack sent)",
+                    self.canonical_url(container_url),
+                    self.canonical_url(chosen_url),
+                    status,
+                )
+                self._lc_stats["replaced"] += 1
+                return
+            else:
+                display_status = "OFFLINE" if status == "UNKNOWN" else status
+                self.update_status_cell(row_idx, display_status)
+                cache.setdefault(container_url, {}).update({"status": status})
+                try:
+                    self.user_manager.save_user_data(self.LINK_STATUS_FILE, cache)
+                except Exception as e:
+                    self.log.warning("Failed to persist link_status.json: %s", e)
+                self.log.debug(
+                    "STATUS ONLY (container) | container=%s => %s",
+                    self.canonical_url(container_url),
+                    status,
+                )
+                self._lc_stats["status_updates"] += 1
+                return
 
         if ptype == "status":
             url = (payload.get("url") or "").strip()
