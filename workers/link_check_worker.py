@@ -55,7 +55,8 @@ def canonical_url(s: str) -> str:
             m = TB_RE.match(path)
             if m:
                 path = f"/{m.group(1)}"
-        return urlunsplit((sp.scheme.lower(), host, path, "", ""))
+        # Normalize scheme to https so http/https variants map to the same key
+        return urlunsplit(("https", host, path, "", ""))
     except Exception:
         return (s or "").strip().lower().rstrip("/").removesuffix(".html")
 
@@ -236,7 +237,10 @@ class LinkCheckWorker(QtCore.QThread):
                     idx, host, lst = sorted(online_hosts, key=lambda x: x[0])[0]
                 else:
                     idx, host, lst = sorted(offline_hosts, key=lambda x: x[0])[0]
-                lst.sort(key=lambda it: {"ONLINE": 0, "OFFLINE": 1, "UNKNOWN": 2}[_availability(it)])
+
+                lst.sort(
+                    key=lambda it: {"ONLINE": 0, "OFFLINE": 1, "UNKNOWN": 2}[_availability(it)]
+                )
                 return host, lst
 
         groups: dict[str, list] = defaultdict(list)
@@ -301,7 +305,8 @@ class LinkCheckWorker(QtCore.QThread):
                 )
                 continue
             host, ordered = pick_best(filtered, self.host_priority)
-
+            # Keep only links from the chosen host so we don't emit other hosts
+            ordered = [it for it in ordered if _host_of(it) == host]
             jd_ids = [it.get("uuid") for it in filtered if it.get("uuid")]
             group_id = uuid.uuid4().hex
             self.awaiting_ack[(self.session_id, group_id)] = {

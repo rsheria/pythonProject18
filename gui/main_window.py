@@ -3422,7 +3422,8 @@ class ForumBotGUI(QMainWindow):
             sp = urlsplit(s.strip())
             host = _clean_host(sp.hostname or "")
             path = canonicalize_path(host, sp.path or "")
-            return urlunsplit((sp.scheme.lower(), host, path, "", ""))
+            # Normalize scheme to https so http/https map to the same canonical key
+            return urlunsplit(("https", host, path, "", ""))
         except Exception:
             return (s or "").strip().lower().rstrip("/").removesuffix(".html")
 
