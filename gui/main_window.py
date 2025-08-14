@@ -3286,6 +3286,8 @@ class ForumBotGUI(QMainWindow):
                     direct_urls.extend(urls_to_keep)
 
                 row_urls = urls_to_keep + row_containers
+                if not row_urls:
+                    continue
 
             if row_containers:
                 for cu in row_containers:
