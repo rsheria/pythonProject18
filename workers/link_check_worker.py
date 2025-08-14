@@ -186,6 +186,9 @@ class LinkCheckWorker(QtCore.QThread):
 
         t0 = time.time()
 
+        # Track stability of poll results when dealing only with direct links
+        stable_hits = 0
+        last_count: int | None = None
         while time.time() - t0 < self.poll_timeout:
             if self.cancel_event.is_set():
                 self.finished.emit({"session_id": self.session_id})
