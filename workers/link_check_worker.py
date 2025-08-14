@@ -17,6 +17,11 @@ CONTAINER_HOSTS = {
     "shorteners",
 }
 
+# Number of consecutive polls with an unchanged result set before we give up
+# waiting for JDownloader to resolve every link.  This prevents the worker from
+# polling indefinitely when some items never transition to ONLINE/OFFLINE.
+MAX_STABLE_POLLS = 5
+
 RG_RE = re.compile(r"^/file/([A-Za-z0-9]+)")
 NF_RE = re.compile(r"^/view/([A-Za-z0-9]+)")
 DD_RE = re.compile(r"^/(?:f|file)/([A-Za-z0-9]+)")
@@ -198,7 +203,7 @@ class LinkCheckWorker(QtCore.QThread):
 
             log.debug("LinkCheckWorker: poll count=%d (stable=%d)", curr_count, stable_hits)
 
-            if all_resolved:
+            if all_resolved or stable_hits >= MAX_STABLE_POLLS:
                 break
 
             last_count = curr_count
