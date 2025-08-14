@@ -3458,24 +3458,28 @@ class ForumBotGUI(QMainWindow):
         self.row_by_container = {}
         self.row_by_direct = {}
         rows = self.process_threads_table.rowCount()
+        rg_col = getattr(self, "RG_LINKS_COL", 3)
+        link_cols = {rg_col, 4, 5}
         for r in range(rows):
-            cell = self.process_threads_table.item(r, 2)
-            if not cell:
-                continue
-            text = cell.text() or ""
-            if not text:
-                continue
-            for raw in URL_RE.findall(text):
-                raw = raw.strip().strip('.,);]')
-                canon = self.canonical_url(raw)
-                hid = self.host_id_key(raw)
-                self.row_by_container[raw] = r
-                if canon:
-                    self.row_by_container[canon] = r
-                    self.row_by_direct[canon] = r
-                self.row_by_direct[raw] = r
-                if hid:
-                    self.row_by_direct[hid] = r
+            for c in link_cols:
+                cell = self.process_threads_table.item(r, c)
+                if not cell:
+                    continue
+                text = cell.text() or ""
+                if not text:
+                    continue
+                for raw in URL_RE.findall(text):
+                    raw = raw.strip().strip('.,);]')
+                    canon = self.canonical_url(raw)
+                    hid = self.host_id_key(raw)
+                    self.row_by_container[raw] = r
+                    if canon:
+                        self.row_by_container[canon] = r
+                        self.row_by_direct[canon] = r
+                    self.row_by_direct[raw] = r
+                    if hid:
+                        self.row_by_direct[hid] = r
+                        self.row_by_container[hid] = r
 
     def find_row(self, url: str):
         if not url:
@@ -3552,10 +3556,11 @@ class ForumBotGUI(QMainWindow):
             status = (chosen.get("status") or "UNKNOWN").upper()
             siblings = payload.get("siblings") or []
             links = [chosen_url] + [s.get("url") for s in siblings if s.get("url")]
-            cell = self.process_threads_table.item(row_idx, 2)
+            rg_col = getattr(self, "RG_LINKS_COL", 3)
+            cell = self.process_threads_table.item(row_idx, rg_col)
             if cell is None:
                 cell = QTableWidgetItem()
-                self.process_threads_table.setItem(row_idx, 2, cell)
+                self.process_threads_table.setItem(row_idx, rg_col, cell)
             cell.setText("\n".join(links))
 
             display_status = "OFFLINE" if status == "UNKNOWN" else status
@@ -3627,6 +3632,10 @@ class ForumBotGUI(QMainWindow):
             self._lc_stats.get("replaced", 0),
             self._lc_stats.get("status_updates", 0),
             pending,
+        )
+        self.statusBar().showMessage(
+            f"Link check finished: {self._lc_stats.get('status_updates', 0)} updated",
+            5000,
         )
         self.link_check_worker = None
 
