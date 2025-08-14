@@ -3262,6 +3262,9 @@ class ForumBotGUI(QMainWindow):
             row_host_links: dict[str, list[str]] = {}
             row_containers: list[str] = []
             row_urls: list[str] = []
+            hosts: set[str] = set()
+            urls_to_keep: list[str] = []
+
 
             for m in URL_RE.findall(text):
                 u = m.strip().strip('.,);]')
@@ -3270,6 +3273,7 @@ class ForumBotGUI(QMainWindow):
                     container_urls.append(u)
                     row_containers.append(u)
                 else:
+
                     row_host_links.setdefault(host, []).append(u)
 
                 selected_host = None
