@@ -7,6 +7,7 @@ from PyQt5 import QtCore
 import logging
 import time
 import re
+log = logging.getLogger(__name__)
 # Known hosts that act purely as container/redirect services.  Any URL whose
 # hostname matches one of these entries will be sent to JDownloader so that the
 # real file links can be extracted.
@@ -143,7 +144,6 @@ class LinkCheckWorker(QtCore.QThread):
         if not info:
             return
 
-        log = logging.getLogger(__name__)
         remove_ids = info.get("remove_ids") or []
         try:
             if remove_ids:
@@ -168,7 +168,6 @@ class LinkCheckWorker(QtCore.QThread):
             log.warning("remove container links failed: %s", e)
 
     def run(self):
-        log = logging.getLogger(__name__)
         self._start_time = time.monotonic()
         self.awaiting_ack.clear()
         self._direct_ids.clear()

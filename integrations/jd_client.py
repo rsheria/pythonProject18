@@ -1,6 +1,6 @@
 import logging
 from myjdapi import Myjdapi
-
+log = logging.getLogger(__name__)
 class JDClient:
     """
     My.JDownloader client with compatibility for both linkgrabberv2 and linkgrabber.
@@ -18,7 +18,7 @@ class JDClient:
     def connect(self) -> bool:
         try:
             if not self.email or not self.password:
-                logging.error("JD.connect: missing email/password")
+                log.error("JD.connect: missing email/password")
                 return False
 
             try:
@@ -26,7 +26,7 @@ class JDClient:
             except Exception:
                 pass
 
-            logging.debug("JD.connect: logging in to My.JDownloader (via connect)")
+            log.debug("JD.connect: logging in to My.JDownloader (via connect)")
             self.api.connect(self.email, self.password)
 
             try:
@@ -45,11 +45,11 @@ class JDClient:
                 if devices:
                     sel = next(iter(devices.values()))
             if not sel:
-                logging.error("JD.connect: no devices found on account")
+                log.error("JD.connect: no devices found on account")
                 return False
 
             self.device = sel
-            logging.debug("JD.connect: selected device=%s", getattr(sel, "name", None) or "UNKNOWN")
+            log.debug("JD.connect: selected device=%s", getattr(sel, "name", None) or "UNKNOWN")
 
             # حاول نجيب linkgrabberv2 ثم ارجع لـ linkgrabber
             self._resolve_linkgrabber()
@@ -61,12 +61,12 @@ class JDClient:
                 pass
 
             if not self.lg:
-                logging.error("JD.connect: linkgrabber API not available on device")
+                log.error("JD.connect: linkgrabber API not available on device")
                 return False
 
             return True
         except Exception as e:
-            logging.exception("JD.connect: failed: %s", e)
+            log.exception("JD.connect: failed: %s", e)
             return False
 
     def _resolve_linkgrabber(self):
@@ -75,14 +75,14 @@ class JDClient:
         if lg:
             self.lg = lg
             self.lg_mode = "v2"
-            logging.debug("JD.connect: using linkgrabberv2")
+            log.debug("JD.connect: using linkgrabberv2")
             return
         # fallback: v1
         lg = getattr(self.device, "linkgrabber", None)
         if lg:
             self.lg = lg
             self.lg_mode = "v1"
-            logging.debug("JD.connect: using linkgrabber (v1)")
+            log.debug("JD.connect: using linkgrabber (v1)")
             return
         self.lg = None
         self.lg_mode = "none"
@@ -94,11 +94,11 @@ class JDClient:
         """
         try:
             if not self.device:
-                logging.error("JD.add_links: device not ready")
+                log.error("JD.add_links: device not ready")
                 return False
             urls = [u.strip() for u in (urls or []) if isinstance(u, str) and u.strip()]
             if not urls:
-                logging.error("JD.add_links: empty url list")
+                log.error("JD.add_links: empty url list")
                 return False
 
             payload = {
@@ -109,7 +109,7 @@ class JDClient:
             }
             # NOTE: /linkgrabberv2/* expects a LIST of params
             self.device.action("/linkgrabberv2/addLinks", [payload])
-            logging.debug("JD.add_links (raw): %d urls sent", len(urls))
+            log.debug("JD.add_links (raw): %d urls sent", len(urls))
             if start_check:
                 try:
                     self.device.action("/linkgrabberv2/startOnlineCheck", [])
@@ -117,7 +117,7 @@ class JDClient:
                     pass
             return True
         except Exception as e:
-            logging.exception("JD.add_links: failed: %s", e)
+            log.exception("JD.add_links: failed: %s", e)
             return False
 
     def query_links(self) -> list[dict]:
@@ -126,7 +126,7 @@ class JDClient:
         """
         try:
             if not self.device:
-                logging.error("JD.query_links: device not ready")
+                log.error("JD.query_links: device not ready")
                 return []
 
             q = {
@@ -174,17 +174,17 @@ class JDClient:
                     or ""
                 )
                 it["containerURL"] = container
-            logging.debug("JD.query_links (raw): %d items", len(resp))
+            log.debug("JD.query_links (raw): %d items", len(resp))
             return resp
         except Exception as e:
-            logging.exception("JD.query_links: failed: %s", e)
+            log.exception("JD.query_links: failed: %s", e)
             return []
 
     def start_online_check(self, link_ids) -> bool:
         """Trigger availability check for specific LinkGrabber entries."""
         try:
             if not self.device:
-                logging.error("JD.start_online_check: device not ready")
+                log.error("JD.start_online_check: device not ready")
                 return False
             ids = []
             for uid in link_ids or []:
@@ -197,13 +197,13 @@ class JDClient:
             self.device.action("/linkgrabberv2/startOnlineCheck", [ids])
             return True
         except Exception as e:
-            logging.exception("JD.start_online_check: failed: %s", e)
+            log.exception("JD.start_online_check: failed: %s", e)
             return False
     def remove_links(self, link_ids) -> bool:
         """Remove specific LinkGrabber entries by their UUIDs."""
         try:
             if not self.device:
-                logging.error("JD.remove_links: device not ready")
+                log.error("JD.remove_links: device not ready")
                 return False
             ids = []
             for uid in link_ids or []:
@@ -218,14 +218,14 @@ class JDClient:
 
             try:
                 self.device.action("/linkgrabberv2/removeLinks", [ids])
-                logging.debug("JD.remove_links: removed %d items via [ids]", len(ids))
+                log.debug("JD.remove_links: removed %d items via [ids]", len(ids))
                 return True
             except Exception:
                 pass
 
             try:
                 self.device.action("/linkgrabberv2/removeLinks", [{"linkIds": ids}])
-                logging.debug("JD.remove_links: removed %d items via {'linkIds': [...]}" , len(ids))
+                log.debug("JD.remove_links: removed %d items via {'linkIds': [...]}" , len(ids))
                 return True
             except Exception:
                 pass
@@ -234,14 +234,14 @@ class JDClient:
             if lg and hasattr(lg, "remove_links"):
                 try:
                     lg.remove_links(ids)
-                    logging.debug("JD.remove_links: removed %d items via wrapper.remove_links", len(ids))
+                    log.debug("JD.remove_links: removed %d items via wrapper.remove_links", len(ids))
                     return True
                 except Exception:
                     pass
-            logging.error("JD.remove_links: all removal attempts failed")
+            log.error("JD.remove_links: all removal attempts failed")
             return False
         except Exception as e:
-            logging.exception("JD.remove_links: failed: %s", e)
+            log.exception("JD.remove_links: failed: %s", e)
             return False
     def remove_all_from_linkgrabber(self) -> bool:
         """
@@ -249,12 +249,12 @@ class JDClient:
         """
         try:
             if not self.device:
-                logging.error("JD.clear: device not ready")
+                log.error("JD.clear: device not ready")
                 return False
 
             items = self.query_links()
             if not items:
-                logging.debug("JD.clear: nothing to remove (no items)")
+                log.debug("JD.clear: nothing to remove (no items)")
                 return True
 
             link_ids = []
@@ -268,13 +268,13 @@ class JDClient:
                     link_ids.append(uid)
 
             if not link_ids:
-                logging.debug("JD.clear: nothing to remove (no ids)")
+                log.debug("JD.clear: nothing to remove (no ids)")
                 return True
 
             # Try multiple shapes for compatibility
             try:
                 self.device.action("/linkgrabberv2/removeLinks", [link_ids])
-                logging.debug("JD.clear: removed %d items via [linkIds]", len(link_ids))
+                log.debug("JD.clear: removed %d items via [linkIds]", len(link_ids))
                 return True
 
             except Exception:
@@ -282,7 +282,7 @@ class JDClient:
 
             try:
                 self.device.action("/linkgrabberv2/removeLinks", [{"linkIds": link_ids}])
-                logging.debug("JD.clear: removed %d items via {'linkIds': [...]}" , len(link_ids))
+                log.debug("JD.clear: removed %d items via {'linkIds': [...]}" , len(link_ids))
                 return True
 
             except Exception:
@@ -292,7 +292,7 @@ class JDClient:
                 lg = self.lg or getattr(self.device, "linkgrabberv2", None) or getattr(self.device, "linkgrabber", None)
                 if lg and hasattr(lg, "remove_links"):
                     lg.remove_links(link_ids)
-                    logging.debug("JD.clear: removed %d items via wrapper.remove_links", len(link_ids))
+                    log.debug("JD.clear: removed %d items via wrapper.remove_links", len(link_ids))
                     return True
 
             except Exception:
@@ -323,20 +323,20 @@ class JDClient:
                 if pkg_ids:
                     try:
                         self.device.action("/linkgrabberv2/removePackages", [pkg_ids])
-                        logging.debug("JD.clear: removed %d packages via [pkgIds]", len(pkg_ids))
+                        log.debug("JD.clear: removed %d packages via [pkgIds]", len(pkg_ids))
                         return True
                     except Exception:
 
                         self.device.action("/linkgrabberv2/removePackages", [{"packageIds": pkg_ids}])
-                        logging.debug("JD.clear: removed %d packages via {'packageIds': [...]}" , len(pkg_ids))
+                        log.debug("JD.clear: removed %d packages via {'packageIds': [...]}" , len(pkg_ids))
                         return True
             except Exception:
                 pass
 
-            logging.error("JD.clear: all removal attempts failed")
+            log.error("JD.clear: all removal attempts failed")
             return False
 
         except Exception as e:
-            logging.exception("JD.clear: failed: %s", e)
+            log.exception("JD.clear: failed: %s", e)
             return False
 

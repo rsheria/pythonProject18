@@ -28,17 +28,6 @@ class FileProcessor:
         self.download_dir.mkdir(parents=True, exist_ok=True)
         self.banned_files_dir.mkdir(parents=True, exist_ok=True)
 
-        # Configure logging
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(os.path.join(DATA_DIR, "file_processor.log")),
-                logging.StreamHandler()
-            ]
-        )
-        logging.getLogger(__name__).setLevel(logging.DEBUG)
-
         # Load banned files from the banned_files directory
         self.banned_files = self._load_banned_files()
 

@@ -40,7 +40,8 @@ import xml.etree.ElementTree as ET
 from urllib.parse import urlencode
 import difflib
 import xml.etree.ElementTree as ET
-import os, logging, requests
+import os
+import requests
 from urllib.parse import urlparse
 
 def extract_version_title(post_element, main_thread_title):
@@ -212,24 +213,6 @@ class ForumBotSelenium:
         self.backup_host = self.load_backup_host()
         self.keep_links_credentials = self.load_keep_links_credentials()
         self.image_host_config = self.load_image_host_config()
-
-        # Set up logging with UTF-8 and replace errors for unsupported characters
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.StreamHandler(sys.stdout)
-            ]
-        )
-
-        # Override the default encoding for the handler to replace unsupported characters
-        for handler in logging.getLogger().handlers:
-            if isinstance(handler, logging.StreamHandler):
-                try:
-                    handler.setStream(
-                        open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1, errors='replace'))
-                except Exception as e:
-                    self.handle_exception("setting stream encoding", e)
 
         # Initialize WebDriver with retries
         self.headless = headless  # Ensure headless attribute is set before initialization

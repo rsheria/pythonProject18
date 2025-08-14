@@ -18,10 +18,7 @@ from workers.proceed_template_worker import ProceedTemplateWorker
 from ui_notifier import ui_notifier, suppress_popups
 
 from .themes import style_manager, theme_manager
-logging.basicConfig(level=logging.INFO, filename="forum_bot.log",
-                    filemode="a", format="%(asctime)s %(levelname)s %(message)s")
 import json
-import logging
 import os
 import random
 import re
