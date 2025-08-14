@@ -3239,10 +3239,14 @@ class ForumBotGUI(QMainWindow):
             # C) Show row only if both status and text match
             table.setRowHidden(row, not (status_ok and text_ok))
 
-    def collect_visible_scope_for_selected_threads(self):
+    def collect_visible_scope_for_selected_threads(self, host_priority=None):
+        """Collect links from selected threads and filter by host priority."""
         direct_urls: list[str] = []
         container_urls: list[str] = []
         visible_scope: dict[str, dict] = {}
+        priority = [
+            _clean_host(h) for h in (host_priority or []) if isinstance(h, str)
+        ]
         rows = {idx.row() for idx in self.process_threads_table.selectedIndexes()}
         if not rows:
             return direct_urls, container_urls, visible_scope
@@ -3255,19 +3259,33 @@ class ForumBotGUI(QMainWindow):
             text = (item.text() or "").strip()
             if not text:
                 continue
-            row_urls: list[str] = []
-            hosts: set[str] = set()
+            row_host_links: dict[str, list[str]] = {}
             row_containers: list[str] = []
             for m in URL_RE.findall(text):
                 u = m.strip().strip('.,);]')
-                row_urls.append(u)
                 host = _clean_host(urlsplit(u).hostname or "")
                 if host in CONTAINER_HOSTS:
                     container_urls.append(u)
                     row_containers.append(u)
                 else:
-                    direct_urls.append(u)
-                    hosts.add(host)
+                    row_host_links.setdefault(host, []).append(u)
+
+                selected_host = None
+                for h in priority:
+                    if h in row_host_links:
+                        selected_host = h
+                        break
+
+                if selected_host:
+                    hosts = {selected_host}
+                    urls_to_keep = row_host_links.get(selected_host, [])
+                    direct_urls.extend(urls_to_keep)
+                else:
+                    hosts = set(row_host_links.keys())
+                    urls_to_keep = [u for links in row_host_links.values() for u in links]
+                    direct_urls.extend(urls_to_keep)
+
+                row_urls = urls_to_keep + row_containers
 
             if row_containers:
                 for cu in row_containers:
@@ -3338,7 +3356,8 @@ class ForumBotGUI(QMainWindow):
             "rows_not_found": 0,
         }
         self._lc_total_groups = 0
-        direct_urls, container_urls, visible_scope = self.collect_visible_scope_for_selected_threads()
+        host_priority = self._get_download_host_priority()
+        direct_urls, container_urls, visible_scope = self.collect_visible_scope_for_selected_threads(host_priority)
         if not direct_urls and not container_urls:
             self.statusBar().showMessage("لا توجد روابط للفحص.")
             return
@@ -3374,7 +3393,6 @@ class ForumBotGUI(QMainWindow):
             visible_scope,
             poll_timeout_sec=600,
         )
-        host_priority = self._get_download_host_priority()
         self.link_check_worker.set_host_priority(host_priority)
         self.link_check_worker.progress.connect(self._on_link_progress)
         self.link_check_worker.finished.connect(self._on_link_finished)
