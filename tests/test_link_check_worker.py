@@ -4,7 +4,8 @@ import threading
 import types
 import sys
 import logging
-
+import json
+import re
 # Provide minimal PyQt5 stubs so link_check_worker can be imported without Qt.
 class _DummySignal:
     def connect(self, *args, **kwargs):
@@ -45,14 +46,15 @@ spec = importlib.util.spec_from_file_location(
 link_check_worker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(link_check_worker)
 LinkCheckWorker = link_check_worker.LinkCheckWorker
-
+from utils.link_cache import persist_link_replacement
+from utils.link_summary import LinkCheckSummary
 
 class DummyJD:
     def __init__(self):
         self.sent = None
         self.start_check = None
         self.checked = None
-
+        self.removed = []
     def connect(self):
         return True
 
@@ -69,7 +71,8 @@ class DummyJD:
         return True
 
     def remove_links(self, ids):
-        pass
+        self.removed.append(list(ids))
+        return 200
 
 
 def test_container_urls_only_added(monkeypatch):
@@ -220,7 +223,7 @@ def test_container_fallback_logs(monkeypatch, caplog):
     msgs = "\n".join(r.getMessage() for r in caplog.records)
     assert "HOST FALLBACK" in msgs
 
-def test_container_decrypt_summary_log(monkeypatch, caplog):
+def test_container_decrypt_chosen_log(monkeypatch, caplog):
     class JD(DummyJD):
         def query_links(self):
             return [
@@ -247,12 +250,10 @@ def test_container_decrypt_summary_log(monkeypatch, caplog):
     worker.set_host_priority(["rapidgator.net", "nitroflare.com"])
     worker.chosen_host = "rapidgator.net"
     worker.run()
-    msg = next(r.getMessage() for r in caplog.records if "DECRYPT SUMMARY" in r.getMessage())
+    msg = next(r.getMessage() for r in caplog.records if "DECRYPT CHOSEN" in r.getMessage())
     assert "chosen=rapidgator.net" in msg
     assert "nitroflare.com" in msg and "rapidgator.net" in msg
     assert "kept=1" in msg
-    assert "auto_replace=ON" in msg
-    assert "single_host=ON" in msg
 def test_container_decrypt_summary_log(monkeypatch, caplog):
     class JD(DummyJD):
         def query_links(self):
@@ -377,6 +378,8 @@ def test_container_availability_check_only_kept_links(monkeypatch):
     worker.run()
     assert jd.checked == ["1"]
     assert events and events[0]["type"] == "status"
+    assert events[0]["url"] == "c"
+    assert events[0]["status"] == "ONLINE"
     container = next(e for e in events if e["type"] == "container")
     assert container["chosen"]["status"] == "ONLINE"
 
@@ -477,7 +480,7 @@ def test_container_emits_status_before_replace(monkeypatch):
     assert events[0]["status"] == "ONLINE"
 
 
-def test_ack_removes_only_non_chosen(monkeypatch):
+def test_ack_removes_container_links_once(monkeypatch, caplog):
     class JD(DummyJD):
         def __init__(self):
             super().__init__()
@@ -498,7 +501,6 @@ def test_ack_removes_only_non_chosen(monkeypatch):
                     "containerURL": "c",
                 },
             ]
-            self.removed = []
 
         def query_links(self):
             self.calls += 1
@@ -506,8 +508,6 @@ def test_ack_removes_only_non_chosen(monkeypatch):
                 return []
             return self.items
 
-        def remove_links(self, ids):
-            self.removed.append(list(ids))
 
     monkeypatch.setattr(link_check_worker.time, "sleep", lambda _=None: None)
     jd = JD()
@@ -525,17 +525,21 @@ def test_ack_removes_only_non_chosen(monkeypatch):
     worker.chosen_host = "rapidgator.net"
     events: list = []
     worker.progress = types.SimpleNamespace(emit=lambda payload: events.append(payload))
+    caplog.set_level(logging.DEBUG)
     worker.run()
-    assert events and events[0]["type"] == "status"
+    assert jd.removed == []
     container = next(e for e in events if e["type"] == "container")
     assert container["group_id"]
     assert container["row"] == 0
     group_id = container["group_id"]
     worker.ack_replaced(container["row"], worker.session_id, group_id)
-    assert jd.removed == [["2"]]
+    assert len(jd.removed) == 1
+    assert sorted(jd.removed[0]) == ["1", "2"]
     # second ack should be a no-op
     worker.ack_replaced(container["row"], worker.session_id, group_id)
-    assert jd.removed == [["2"]]
+    assert len(jd.removed) == 1
+    msgs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "JD CLEANUP" in msgs and "rc=200" in msgs
 
 
 def test_detection_and_enqueue_logging(monkeypatch, caplog):
@@ -566,6 +570,7 @@ def test_jd_cleanup_logging(caplog):
     msgs = "\n".join(r.getMessage() for r in caplog.records)
     assert "JD CLEANUP" in msgs
     assert "group=gid" in msgs
+    assert "rc=200" in msgs
 
 
 def test_single_host_mode_off_skips_replace(monkeypatch, caplog):
@@ -610,7 +615,7 @@ def test_single_host_mode_off_skips_replace(monkeypatch, caplog):
     assert len(container["siblings"]) == 1
     msgs = "\n".join(r.getMessage() for r in caplog.records)
     assert "FLAGS" in msgs and "auto_replace=ON" in msgs and "single_host=OFF" in msgs
-    assert "REPLACE SKIP" in msgs and "single-host-check off" in msgs
+    assert "REPLACE SKIP" in msgs and "single-host-check=OFF" in msgs
 
 
 def test_auto_replace_flag_off(monkeypatch, caplog):
@@ -667,9 +672,45 @@ def test_auto_replace_flag_off(monkeypatch, caplog):
     assert worker.awaiting_ack == {}
     msgs = "\n".join(r.getMessage() for r in caplog.records)
     assert "FLAGS" in msgs and "auto_replace=OFF" in msgs and "single_host=ON" in msgs
-    assert "REPLACE SKIP" in msgs and "auto-replace off" in msgs
+    assert "REPLACE SKIP" in msgs and "auto-replace-container=OFF" in msgs
 
+def test_skip_replace_when_no_kept_links(monkeypatch, caplog):
+    class JD(DummyJD):
+        def query_links(self):
+            return [
+                {
+                    "url": "https://rapidgator.net/file/abc",
+                    "host": "rapidgator.net",
+                    "availability": "ONLINE",
+                    "containerURL": "c",
+                    "uuid": "1",
+                },
+                {
+                    "url": "https://nitroflare.com/view/xyz",
+                    "host": "nitroflare.com",
+                    "availability": "ONLINE",
+                    "containerURL": "c",
+                    "uuid": "2",
+                },
+            ]
 
+    monkeypatch.setattr(link_check_worker.time, "sleep", lambda _=None: None)
+    jd = JD()
+    caplog.set_level(logging.DEBUG)
+    scope = {"c": {"hosts": ["turbobit.net"], "row": 0}}
+    worker = LinkCheckWorker(
+        jd,
+        [],
+        ["c"],
+        threading.Event(),
+        poll_timeout_sec=0,
+        visible_scope=scope,
+    )
+    worker.set_host_priority(["rapidgator.net", "nitroflare.com"])
+    worker.chosen_host = "rapidgator.net"
+    worker.run()
+    msgs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "REPLACE SKIP" in msgs and "kept_count=0" in msgs
 def test_container_flow_replaces_row_and_updates_status(monkeypatch):
     class JD(DummyJD):
         def __init__(self):
@@ -729,3 +770,171 @@ def test_container_flow_replaces_row_and_updates_status(monkeypatch):
     assert container["replace"] is True
     assert container["chosen"]["host"] == "rapidgator.net"
     assert container["chosen"]["status"] == "ONLINE"
+
+def test_container_replacement_persists_and_survives_restart(monkeypatch):
+    class JD(DummyJD):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+            self.items = [
+                {
+                    "url": "https://rapidgator.net/file/abc",
+                    "host": "rapidgator.net",
+                    "availability": "UNKNOWN",
+                    "uuid": "1",
+                    "containerURL": "c",
+                },
+                {
+                    "url": "https://rapidgator.net/file/def",
+                    "host": "rapidgator.net",
+                    "availability": "UNKNOWN",
+                    "uuid": "2",
+                    "containerURL": "c",
+                },
+            ]
+
+        def query_links(self):
+            self.calls += 1
+            if self.calls < 2:
+                return []
+            return self.items
+
+        def start_online_check(self, ids):
+            super().start_online_check(ids)
+            for it in self.items:
+                if it["uuid"] in ids:
+                    it["availability"] = "ONLINE" if it["uuid"] == "1" else "OFFLINE"
+            return True
+
+    monkeypatch.setattr(link_check_worker.time, "sleep", lambda _=None: None)
+    jd = JD()
+    visible_scope = {"c": {"hosts": ["rapidgator.net"], "row": 0}}
+    worker = LinkCheckWorker(
+        jd,
+        [],
+        ["c"],
+        threading.Event(),
+        visible_scope=visible_scope,
+        poll_timeout_sec=1,
+        poll_interval=0,
+    )
+    worker.set_host_priority(["rapidgator.net"])
+    worker.chosen_host = "rapidgator.net"
+    events: list = []
+    worker.progress = types.SimpleNamespace(emit=lambda payload: events.append(payload))
+    worker.run()
+
+    container = next(e for e in events if e["type"] == "container")
+    assert container["row"] == 0
+
+    class DummyUserManager:
+        def __init__(self):
+            self.data = {}
+
+        def save_user_data(self, filename, data):
+            self.data[filename] = json.loads(json.dumps(data))
+            return True
+
+        def load_user_data(self, filename, default=None):
+            return json.loads(json.dumps(self.data.get(filename, default)))
+
+    class Item:
+        def __init__(self, text=""):
+            self._text = text
+
+        def text(self):
+            return self._text
+
+        def setText(self, text):
+            self._text = text
+
+        def setData(self, *args, **kwargs):
+            pass
+
+    class Table:
+        def __init__(self, rows, cols):
+            self.data = [[None for _ in range(cols)] for _ in range(rows)]
+
+        def setItem(self, r, c, item):
+            self.data[r][c] = item
+
+        def item(self, r, c):
+            return self.data[r][c]
+
+    def apply_cached_statuses(table, cache, status_col=8):
+        for r in range(len(table.data)):
+            for c in range(len(table.data[0])):
+                cell = table.item(r, c)
+                if not cell:
+                    continue
+                text = cell.text() or ""
+                for url in re.findall(r"https?://\S+", text, flags=re.IGNORECASE):
+                    url = url.strip().strip('.,);]')
+                    if url in cache:
+                        status_item = table.item(r, status_col)
+                        if not status_item:
+                            status_item = Item()
+                            table.setItem(r, status_col, status_item)
+                        status_item.setText(cache[url]["status"])
+                        break
+                else:
+                    continue
+                break
+
+    process_threads = {"cat": {"thr": {"links": {"keeplinks": ["http://container"]}}}}
+    um = DummyUserManager()
+
+    def save_pt():
+        um.save_user_data("process_threads.json", process_threads)
+
+    table = Table(1, 9)
+    table.setItem(0, 0, Item("thr"))
+    table.setItem(0, 1, Item("cat"))
+    table.setItem(0, 3, Item("http://container"))
+
+    summary = LinkCheckSummary()
+
+    chosen = container["chosen"]
+    siblings = container["siblings"]
+    links = [chosen["url"]] + [s.get("url") for s in siblings if s.get("url")]
+    status_map = {chosen["url"]: chosen["status"]}
+    for s in siblings:
+        surl = s.get("url")
+        if surl:
+            status_map[surl] = s.get("status", "UNKNOWN")
+
+    table.setItem(0, 3, Item("\n".join(links)))
+    status_item = table.item(0, 8)
+    if not status_item:
+        status_item = Item()
+        table.setItem(0, 8, status_item)
+    status_item.setText(chosen["status"])
+
+    cache = persist_link_replacement(
+        process_threads,
+        "cat",
+        "thr",
+        chosen.get("host") or "",
+        status_map,
+        save_pt,
+        um,
+    )
+
+    summary.update(0, chosen["status"], replaced=True)
+    msg = summary.message()
+    assert "1 rows" in msg and "replaced 1" in msg
+
+    saved_pt = um.load_user_data("process_threads.json")
+    assert saved_pt["cat"]["thr"]["links"]["rapidgator.net"] == links
+
+    table2 = Table(1, 9)
+    table2.setItem(0, 0, Item("thr"))
+    table2.setItem(0, 1, Item("cat"))
+    table2.setItem(0, 3, Item("\n".join(saved_pt["cat"]["thr"]["links"]["rapidgator.net"])))
+    table2.setItem(0, 8, Item(""))
+
+    cache_file = um.load_user_data("link_status.json")
+    apply_cached_statuses(table2, cache_file)
+
+    assert table2.item(0, 3).text() == "\n".join(links)
+    assert table2.item(0, 8).text() == "ONLINE"

@@ -3378,10 +3378,7 @@ class ForumBotGUI(QMainWindow):
             else None
         )
         direct_urls, container_urls, visible_scope = self.collect_visible_scope_for_selected_threads()
-        if single_host_mode and direct_urls and not container_urls:
-            direct_urls, visible_scope = filter_direct_links_for_host(
-                direct_urls, visible_scope, chosen_host
-            )
+
         if not direct_urls and not container_urls:
             self.statusBar().showMessage("لا توجد روابط للفحص.")
             return
@@ -3561,6 +3558,7 @@ class ForumBotGUI(QMainWindow):
 
         ptype = payload.get("type")
         if ptype == "container":
+
             self._lc_total_groups = max(
                 self._lc_total_groups, payload.get("total_groups", 0)
             )
@@ -3617,16 +3615,30 @@ class ForumBotGUI(QMainWindow):
                         time.monotonic() - getattr(self, "_lc_start_ts", 0.0),
                     )
 
+                # === إضافة الحفظ الدائم لاستبدال الكونتينر (يبقى بعد الريستارت) ===
+                try:
+                    self._persist_container_replacement(
+                        row_idx=row_idx,
+                        chosen_host=chosen.get("host") or "",
+                        chosen_url=chosen_url,
+                        siblings=siblings,
+                        status=status,
+                        container_url=container_url,
+                    )
+                except Exception as e:
+                    self.log.warning("PERSIST (container replacement) failed: %s", e)
+
                 self.rebuild_row_index()
 
                 QtCore.QMetaObject.invokeMethod(
                     self.link_check_worker,
                     "ack_replaced",
                     QtCore.Qt.QueuedConnection,
-                    QtCore.Q_ARG(int, row_idx),
+                    QtCore.Q_ARG(str, container_url),  # ← لازم يبقى الـcontainer_url (string)
                     QtCore.Q_ARG(str, payload.get("session_id") or ""),
                     QtCore.Q_ARG(str, payload.get("group_id") or ""),
                 )
+
                 self.log.debug(
                     "UI REPLACE | session=%s | group=%s | row=%s | title=%s | status=%s | dur=%.3f",
                     payload.get("session_id"),
@@ -3693,6 +3705,125 @@ class ForumBotGUI(QMainWindow):
                 status,
                 time.monotonic() - getattr(self, "_lc_start_ts", 0.0),
             )
+
+    from urllib.parse import urlsplit
+
+    def _persist_container_replacement(self,
+                                       row_idx: int,
+                                       chosen_host: str,
+                                       chosen_url: str,
+                                       siblings: list,
+                                       status: str,
+                                       container_url: str) -> None:
+        """Update self.process_threads so the direct link replaces the container
+        *persistently* (process_threads.json), and survives app restart.
+
+        - Finds the thread backing *row_idx* using Category (col 1), Title (col 0),
+          and falls back to matching Thread ID (col 2) if needed.
+        - Writes chosen_url under its hostname (e.g., 'rapidgator.net'),
+          clears 'keeplinks', and (in single-host mode) drops other hosts.
+        - Updates both the root-level thread_info['links'] and latest version
+          (if a versions list exists), then saves via save_process_threads_data().
+        """
+        log = getattr(self, 'log', None) or logging.getLogger(__name__)
+
+        try:
+            # 1) Read identifying columns from the table
+            title_item = self.process_threads_table.item(row_idx, 0)
+            cat_item = self.process_threads_table.item(row_idx, 1)
+            id_item = self.process_threads_table.item(row_idx, 2)
+            title = (title_item.text() if title_item else '').strip()
+            category = (cat_item.text() if cat_item else '').strip()
+            thread_id_txt = (id_item.text() if id_item else '').strip()
+
+            if not category:
+                log.debug("PERSIST SKIP | row=%s | reason=no_category", row_idx)
+                return
+
+            # 2) Locate thread_info in self.process_threads
+            pt = self.process_threads if hasattr(self, 'process_threads') else {}
+            if category not in pt:
+                log.debug("PERSIST SKIP | row=%s | category_missing=%s", row_idx, category)
+                return
+
+            thread_key = None
+            thread_info = None
+
+            # Preferred: direct key by title
+            if title and title in pt[category]:
+                thread_key = title
+                thread_info = pt[category][title]
+            else:
+                # Fallback: scan by thread_id
+                for k, info in pt[category].items():
+                    # latest version ID if versions exist; else direct
+                    vid = None
+                    if isinstance(info, dict) and 'versions' in info and info['versions']:
+                        vid = str(info['versions'][-1].get('thread_id', '')).strip()
+                    else:
+                        vid = str(info.get('thread_id', '')).strip()
+                    if thread_id_txt and vid and thread_id_txt == vid:
+                        thread_key = k
+                        thread_info = info
+                        break
+
+            if not isinstance(thread_info, dict):
+                log.debug(
+                    "PERSIST SKIP | row=%s | reason=thread_not_found | category=%s | title=%s | id=%s",
+                    row_idx, category, title, thread_id_txt,
+                )
+                return
+
+            # 3) Build the updated links payload
+            chosen_host_norm = (chosen_host or '').lower()
+            if chosen_host_norm.startswith('www.'):
+                chosen_host_norm = chosen_host_norm[4:]
+            if not chosen_host_norm:
+                # derive from URL if host is missing
+                try:
+                    chosen_host_norm = (urlsplit(chosen_url).hostname or '').lower()
+                    if chosen_host_norm.startswith('www.'):
+                        chosen_host_norm = chosen_host_norm[4:]
+                except Exception:
+                    pass
+
+            if not chosen_host_norm:
+                log.debug("PERSIST SKIP | row=%s | reason=no_host", row_idx)
+                return
+
+            # Keep only the chosen direct URL in single-host mode
+            new_links = {
+                chosen_host_norm: [l for l in [chosen_url] if l],
+                'rapidgator-backup': [],  # keep shape; don’t overwrite if you don’t want to
+                'keeplinks': ''
+            }
+
+            # 4) Write back into the model (root and latest version if present)
+            # Root
+            links_root = thread_info.setdefault('links', {})
+            links_root.clear()
+            links_root.update(new_links)
+
+            # Versions
+            versions_list = thread_info.setdefault('versions', [])
+            if versions_list:
+                last = versions_list[-1]
+                vlinks = last.setdefault('links', {})
+                vlinks.clear()
+                vlinks.update(new_links)
+
+            # 5) Persist to disk and refresh indices
+            if hasattr(self, 'save_process_threads_data'):
+                self.save_process_threads_data()
+            if hasattr(self, 'rebuild_row_index'):
+                self.rebuild_row_index()
+
+            log.debug(
+                "PERSIST OK | row=%s | category=%s | key=%s | host=%s | url=%s | status=%s",
+                row_idx, category, thread_key or title, chosen_host_norm, chosen_url, status,
+            )
+        except Exception as e:
+            log.warning("PERSIST FAILED | row=%s | %s", row_idx, e, exc_info=True)
 
     def _on_link_finished(self, info: dict):
         ui_notifier.suppress(False)
