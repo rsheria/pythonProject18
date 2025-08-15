@@ -72,7 +72,10 @@ class StatusWidget(QWidget):
     def on_cancel_clicked(self) -> None:
         """Signal the running worker to cancel and clean JDownloader."""
         self.cancel_event.set()
+        parent = self.parent()
         try:
-            stop_and_clear_jdownloader()
+            if parent and hasattr(parent, "cancel_downloads"):
+                parent.cancel_downloads()
+            stop_and_clear_jdownloader(getattr(parent, "config", None))
         except Exception:
             pass

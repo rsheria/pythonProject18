@@ -4306,11 +4306,14 @@ class ForumBotGUI(QMainWindow):
                     logging.warning(f"⚠️ Error cleaning up existing download worker: {e}")
 
             # Create the worker
+            # Ensure any previous cancel signal is cleared before starting
+            self.status_widget.cancel_event.clear()
             self.download_worker = DownloadWorker(
                 bot=self.bot,
                 file_processor=self.file_processor,
                 selected_rows=selected_rows,
-                gui=self
+                gui=self,
+                cancel_event=self.status_widget.cancel_event,
             )
             self.register_worker(self.download_worker)
 
