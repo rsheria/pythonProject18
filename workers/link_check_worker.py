@@ -249,6 +249,28 @@ class LinkCheckWorker(QtCore.QThread):
             # arrives through queryLinks.
             logging.getLogger(__name__).debug("JD startOnlineCheck not available; skipping")
 
+    def _query_links_scoped(self) -> list[dict]:
+        """Query JD for links in this session's package.
+
+        Falls back to an unscoped query if the scoped query either fails due to
+        signature mismatch or returns no items.  This guards against JD
+        filtering issues where querying by package yields zero results even
+        though links exist."""
+        try:
+            items = self.jd.query_links(package_uuid=self.package_uuid) or []
+        except TypeError:
+            items = self.jd.query_links() or []
+        if not items:
+            try:
+                items = self.jd.query_links() or []
+            except TypeError:
+                items = []
+        if self.package_uuid is None and items:
+            self.package_uuid = items[0].get("packageUUID")
+        return items
+
+
+
     # ------------------------------- direct processor -------------------------------
     def _process_direct_batch(self, items: list[dict], allowed_direct: set[str], scope_rows: dict[str, int]) -> None:
         """Process direct-only logic (also used as a safety fallback if containers exist but don't group)."""
@@ -323,9 +345,7 @@ class LinkCheckWorker(QtCore.QThread):
         self._safe_start_online_check(direct_ids)
 
         # Re-query to fetch availability and emit status with row mapping (if present)
-        items_now = self.jd.query_links(
-            package_uuid=self.package_uuid, package_name=self.package_name
-        ) or []
+        items_now = self._query_links_scoped()
         item_map = {it.get("uuid"): it for it in items_now}
         for uid in direct_ids:
             it = item_map.get(uid) or next((x for x in selected_items if x.get("uuid") == uid), None)
@@ -404,9 +424,14 @@ class LinkCheckWorker(QtCore.QThread):
         )
 
         start_check = not self.container_urls
-        if not self.jd.add_links_to_linkgrabber(
-            self.urls, start_check=start_check, package_name=self.package_name
-        ):
+        urls_to_add = self.container_urls if self.container_urls else self.direct_urls
+        try:
+            ok = self.jd.add_links_to_linkgrabber(
+                urls_to_add, start_check=start_check, package_name=self.package_name
+            )
+        except TypeError:
+            ok = self.jd.add_links_to_linkgrabber(urls_to_add, start_check=start_check)
+        if not ok:
             self.error.emit("Failed to add links to LinkGrabber.")
             self.finished.emit({"session_id": self.session_id})
             return
@@ -429,11 +454,7 @@ class LinkCheckWorker(QtCore.QThread):
                 self.finished.emit({"session_id": self.session_id})
                 return
 
-            items = self.jd.query_links(
-                package_uuid=self.package_uuid, package_name=self.package_name
-            ) or []
-            if self.package_uuid is None and items:
-                self.package_uuid = items[0].get("packageUUID")
+            items = self._query_links_scoped()
             curr_count = len(items)
             all_resolved = curr_count > 0 and all(
                 (it.get("availability") or "").upper() in ("ONLINE", "OFFLINE") for it in items
@@ -457,9 +478,7 @@ class LinkCheckWorker(QtCore.QThread):
                 break
             time.sleep(self.poll_interval)
 
-        items = self.jd.query_links(
-            package_uuid=self.package_uuid, package_name=self.package_name
-        ) or []
+        items = self._query_links_scoped()
 
         # Precompute scopes & allowed keys
         allowed_direct = {canonical_url(u) for u in self.direct_urls}
@@ -753,9 +772,9 @@ class LinkCheckWorker(QtCore.QThread):
 
         # Final safety cleanup: remove any leftover links from this session's package
         try:
-            remaining = self.jd.query_links(
-                package_uuid=self.package_uuid, package_name=self.package_name
-            ) or []
+            remaining = self.jd.query_links(package_uuid=self.package_uuid) or []
+        except TypeError:
+            remaining = self.jd.query_links() or []
             leftover_ids = [it.get("uuid") for it in remaining if it.get("uuid")]
             if leftover_ids:
                 self.jd.remove_links(leftover_ids)

@@ -139,15 +139,13 @@ class JDClient:
             log.exception("JD.add_links: failed: %s", e)
             return False
 
-    def query_links(
-        self, package_name: str | None = None, package_uuid: str | None = None
-    ) -> list[dict]:
+    def query_links(self, package_uuid: str | None = None) -> list[dict]:
         """Query LinkGrabber links.
 
-        When ``package_uuid`` (or ``package_name``) is provided, only items
-        belonging to that package are returned.  Each item returned will always
-        contain a canonical ``uuid`` field regardless of how the underlying API
-        names the identifier.
+        When ``package_uuid`` is provided, only items belonging to that package
+        are returned.  Each item returned will always contain a canonical
+        ``uuid`` field regardless of how the underlying API names the
+        identifier.
         """
         try:
             if not self.device:
@@ -217,14 +215,12 @@ class JDClient:
                     or ""
                 )
                 it["containerURL"] = container
-                if package_name and (it.get("packageName") or "") != package_name:
-                    continue
                 filtered.append(it)
 
             log.debug(
                 "JD.query_links (raw): %d items | package=%s",
                 len(filtered),
-                package_uuid or package_name or "",
+                package_uuid or "",
             )
             return filtered
         except Exception as e:
