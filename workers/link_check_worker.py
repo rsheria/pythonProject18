@@ -140,7 +140,7 @@ class LinkCheckWorker(QtCore.QThread):
         *,
         single_host_mode: bool = True,
         auto_replace: bool = True,
-        enable_jd_online_check: bool = False,
+        enable_jd_online_check: bool = True,
     ):
         super().__init__()
         self.jd = jd_client
@@ -155,13 +155,17 @@ class LinkCheckWorker(QtCore.QThread):
         self.chosen_host: str | None = None
         self.single_host_mode = bool(single_host_mode)
         self.auto_replace = bool(auto_replace)
-        # Disable JD's startOnlineCheck by default to avoid 404 stacktraces on devices that don't support it
+        # Allow JD startOnlineCheck by default; failures are handled gracefully
         self.enable_jd_online_check = bool(enable_jd_online_check)
 
         self.session_id: str | None = None
         # {(session_id, group_id): {"container_url": str, "remove_ids": [jd_ids], "row": int}}
         self.awaiting_ack: dict[tuple[str, str], dict] = {}
         self._direct_ids: list[str] = []
+
+        # session package isolation
+        self.package_name: str | None = None
+        self.package_uuid: str | None = None
 
         # summary counters
         self._rows = 0
@@ -319,7 +323,9 @@ class LinkCheckWorker(QtCore.QThread):
         self._safe_start_online_check(direct_ids)
 
         # Re-query to fetch availability and emit status with row mapping (if present)
-        items_now = self.jd.query_links() or []
+        items_now = self.jd.query_links(
+            package_uuid=self.package_uuid, package_name=self.package_name
+        ) or []
         item_map = {it.get("uuid"): it for it in items_now}
         for uid in direct_ids:
             it = item_map.get(uid) or next((x for x in selected_items if x.get("uuid") == uid), None)
@@ -366,6 +372,10 @@ class LinkCheckWorker(QtCore.QThread):
         self._rows = self._replaced = self._c_online = self._c_offline = self._c_unknown = 0
         self._start_time = time.monotonic()
 
+        # isolate this session in its own package inside JD
+        self.package_name = f"lcw_{self.session_id}"
+        self.package_uuid = None
+
         if not self.urls:
             msg = "No URLs to check."
             log.error("LinkCheckWorker: %s", msg)
@@ -382,17 +392,6 @@ class LinkCheckWorker(QtCore.QThread):
             self.finished.emit({"session_id": self.session_id})
             return
 
-        # Hard reset LinkGrabber to avoid cross-session contamination
-        try:
-            cleared = self.jd.remove_all_from_linkgrabber()
-            log.debug(
-                "SESSION RESET | session=%s | linkgrabber_cleared=%s",
-                self.session_id,
-                bool(cleared),
-            )
-        except Exception as e:
-            log.warning("SESSION RESET failed: %s", e)
-
         # Log flags effective at the start of the run
         log.debug(
             "FLAGS | session=%s | auto_replace=%s | single_host=%s | chosen_host=%s | host_priority=%s | online_check=%s",
@@ -404,15 +403,19 @@ class LinkCheckWorker(QtCore.QThread):
             "ON" if self.enable_jd_online_check else "OFF",
         )
 
-        if not self.jd.add_links_to_linkgrabber(self.urls):
+        start_check = not self.container_urls
+        if not self.jd.add_links_to_linkgrabber(
+            self.urls, start_check=start_check, package_name=self.package_name
+        ):
             self.error.emit("Failed to add links to LinkGrabber.")
             self.finished.emit({"session_id": self.session_id})
             return
 
         log.debug(
-            "JD.ADD | direct=%d | containers=%d",
+            "JD.ADD | direct=%d | containers=%d | package=%s",
             len(self.direct_urls),
             len(self.container_urls),
+            self.package_name,
         )
 
         time.sleep(2)
@@ -426,7 +429,11 @@ class LinkCheckWorker(QtCore.QThread):
                 self.finished.emit({"session_id": self.session_id})
                 return
 
-            items = self.jd.query_links() or []
+            items = self.jd.query_links(
+                package_uuid=self.package_uuid, package_name=self.package_name
+            ) or []
+            if self.package_uuid is None and items:
+                self.package_uuid = items[0].get("packageUUID")
             curr_count = len(items)
             all_resolved = curr_count > 0 and all(
                 (it.get("availability") or "").upper() in ("ONLINE", "OFFLINE") for it in items
@@ -450,7 +457,9 @@ class LinkCheckWorker(QtCore.QThread):
                 break
             time.sleep(self.poll_interval)
 
-        items = self.jd.query_links() or []
+        items = self.jd.query_links(
+            package_uuid=self.package_uuid, package_name=self.package_name
+        ) or []
 
         # Precompute scopes & allowed keys
         allowed_direct = {canonical_url(u) for u in self.direct_urls}
@@ -651,24 +660,20 @@ class LinkCheckWorker(QtCore.QThread):
                         "row": row_idx,
                     }
 
-                # Emit status event for the chosen item including row for UI to match
+                ordered_ids = [it.get("uuid") for it in ordered if it.get("uuid")]
+                # Trigger JD availability check for selected items (synchronous in tests)
+                self._safe_start_online_check(ordered_ids)
                 siblings = []
                 chosen_status = "UNKNOWN"
                 chosen_url = ""
+                first_host = None
                 for j, it in enumerate(ordered):
                     url_v = it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
                     st = self._availability(it)
                     if j == 0:
                         chosen_status = st
                         chosen_url = url_v
-                        self.progress.emit({
-                            "type": "status",
-                            "session_id": self.session_id,
-                            "row": row_idx,
-                            "url": url_v,
-                            "status": st,
-                            "scope_hosts": [self._host_of(it)],
-                        })
+                        first_host = self._host_of(it)
                         if st == "ONLINE":
                             self._c_online += 1
                         elif st == "OFFLINE":
@@ -677,6 +682,16 @@ class LinkCheckWorker(QtCore.QThread):
                             self._c_unknown += 1
                     else:
                         siblings.append({"url": url_v, "status": st})
+
+                # Emit status for the container URL before replacement
+                self.progress.emit({
+                    "type": "status",
+                    "session_id": self.session_id,
+                    "row": row_idx,
+                    "url": container_key,
+                    "status": chosen_status,
+                    "scope_hosts": [first_host] if first_host else [],
+                })
 
                 # Emit container replacement instruction (row included)
                 payload = {
@@ -709,10 +724,6 @@ class LinkCheckWorker(QtCore.QThread):
                     sorted(allowed),
                 )
 
-                # Optional JD-side online check for any UNKNOWNs (guarded)
-                unknown_ids = [it.get("uuid") for it in ordered if self._availability(it) == "UNKNOWN" and it.get("uuid")]
-                self._safe_start_online_check(unknown_ids)
-
                 if replace:
                     self._rows += 1
                     self._replaced += 1
@@ -740,10 +751,19 @@ class LinkCheckWorker(QtCore.QThread):
                 log.warning("AUTO CLEANUP failed for container=%s: %s", info.get("container_url"), e)
         self.awaiting_ack.clear()
 
-        # Final safety cleanup to leave LinkGrabber empty at end of session
+        # Final safety cleanup: remove any leftover links from this session's package
         try:
-            self.jd.remove_all_from_linkgrabber()
-            log.debug("SESSION FINALIZE | session=%s | linkgrabber_cleared=1", self.session_id)
+            remaining = self.jd.query_links(
+                package_uuid=self.package_uuid, package_name=self.package_name
+            ) or []
+            leftover_ids = [it.get("uuid") for it in remaining if it.get("uuid")]
+            if leftover_ids:
+                self.jd.remove_links(leftover_ids)
+            log.debug(
+                "SESSION FINALIZE | session=%s | removed=%d",
+                self.session_id,
+                len(leftover_ids),
+            )
         except Exception as e:
             log.warning("SESSION FINALIZE clear failed: %s", e)
 

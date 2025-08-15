@@ -87,10 +87,23 @@ class JDClient:
         self.lg = None
         self.lg_mode = "none"
 
-    def add_links_to_linkgrabber(self, urls: list[str], start_check: bool = True) -> bool:
-        """
-        Send URLs (including keeplinks) to LinkGrabber with deepDecrypt=True.
-                Optionally trigger the availability check immediately.
+    def add_links_to_linkgrabber(
+        self, urls: list[str], start_check: bool = True, package_name: str | None = None
+    ) -> bool:
+        """Send URLs to LinkGrabber.
+
+        Parameters
+        ----------
+        urls:
+            URLs or container links to push to JD.
+        start_check:
+            Whether to immediately trigger JD's ``startOnlineCheck`` after adding
+            the links.  Some devices do not support this endpoint so failures are
+            swallowed.
+        package_name:
+            Optional package name used to isolate links per session.  When
+            provided, all added links are grouped under this package so that
+            parallel sessions do not interfere with each other.
         """
         try:
             if not self.device:
@@ -107,9 +120,15 @@ class JDClient:
                 "deepDecrypt": True,
                 "checkAvailability": True,
             }
+            if package_name:
+                payload["packageName"] = package_name
             # NOTE: /linkgrabberv2/* expects a LIST of params
             self.device.action("/linkgrabberv2/addLinks", [payload])
-            log.debug("JD.add_links (raw): %d urls sent", len(urls))
+            log.debug(
+                "JD.add_links (raw): %d urls sent | package=%s",
+                len(urls),
+                package_name or "",
+            )
             if start_check:
                 try:
                     self.device.action("/linkgrabberv2/startOnlineCheck", [])
@@ -120,9 +139,15 @@ class JDClient:
             log.exception("JD.add_links: failed: %s", e)
             return False
 
-    def query_links(self) -> list[dict]:
-        """
-        Query LinkGrabber links after JD expands containers (keeplinks etc.).
+    def query_links(
+        self, package_name: str | None = None, package_uuid: str | None = None
+    ) -> list[dict]:
+        """Query LinkGrabber links.
+
+        When ``package_uuid`` (or ``package_name``) is provided, only items
+        belonging to that package are returned.  Each item returned will always
+        contain a canonical ``uuid`` field regardless of how the underlying API
+        names the identifier.
         """
         try:
             if not self.device:
@@ -150,15 +175,33 @@ class JDClient:
                 "startAt": 0,
                 "maxResults": -1,
             }
+            if package_uuid:
+                q["packageUUIDs"] = [package_uuid]
             try:
                 resp = self.device.action("/linkgrabberv2/queryLinks", [q]) or []
             except Exception:
-                lg = self.lg or getattr(self.device, "linkgrabberv2", None) or getattr(self.device, "linkgrabber", None)
+                lg = (
+                    self.lg
+                    or getattr(self.device, "linkgrabberv2", None)
+                    or getattr(self.device, "linkgrabber", None)
+                )
                 if lg and hasattr(lg, "query_links"):
                     resp = lg.query_links(q) or []
                 else:
                     raise
+            filtered: list[dict] = []
+
             for it in resp:
+                # Normalise UUID field
+                uid = it.get("uuid") or it.get("linkUUID") or it.get("id")
+                if uid is not None:
+                    it["uuid"] = str(uid)
+
+                # Normalise availability
+                av = (it.get("availability") or it.get("status") or "").upper()
+                if av not in {"ONLINE", "OFFLINE"}:
+                    av = "UNKNOWN"
+                it["availability"] = av
                 it["url"] = (
                     it.get("url")
                     or it.get("contentURL")
@@ -174,8 +217,16 @@ class JDClient:
                     or ""
                 )
                 it["containerURL"] = container
-            log.debug("JD.query_links (raw): %d items", len(resp))
-            return resp
+                if package_name and (it.get("packageName") or "") != package_name:
+                    continue
+                filtered.append(it)
+
+            log.debug(
+                "JD.query_links (raw): %d items | package=%s",
+                len(filtered),
+                package_uuid or package_name or "",
+            )
+            return filtered
         except Exception as e:
             log.exception("JD.query_links: failed: %s", e)
             return []
