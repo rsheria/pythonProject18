@@ -1,5 +1,6 @@
 # integrations/jd_client.py
 # -*- coding: utf-8 -*-
+import time
 import logging
 import os
 from typing import List, Iterable, Optional
@@ -279,20 +280,39 @@ class JDClient:
                 ok = True
             except Exception:
                 pass
+
+        # تأكد من تعطيل كل الحزم حتى لا تستمر التحميلات
+        pkg_ids: List[str] = []
+        try:
+            pkgs = self.device.action("/downloadsV2/queryPackages", [{"uuid": True}]) or []
+        except Exception:
+            try:
+                pkgs = self.device.downloads.query_packages() or []
+            except Exception:
+                pkgs = []
+        for p in pkgs:
+            uid = p.get("uuid") or p.get("packageUUID")
+            if uid:
+                pkg_ids.append(uid)
+        if pkg_ids:
+            try:
+                self.device.action(
+                    "/downloadsV2/setEnabled",
+                    [{"packageUUIDs": pkg_ids, "enabled": False}],
+                )
+                log.debug("JD.stop_downloads: disabled %d packages", len(pkg_ids))
+                ok = True
+            except Exception:
+                pass
         return ok
 
     def clear_download_list(self) -> bool:
         """إزالة كل العناصر من قائمة التحميلات."""
         if not self.device:
             return False
-        try:
-            self.device.action("/downloadsV2/clearList", [])
-            log.debug("JD.clear_downloads: cleared via /downloadsV2/clearList")
-            return True
-        except Exception:
-            pass
-        # Fallback: enumerate packages and disable/remove
         pkg_ids = []
+        ok = False
+        pkg_ids: List[str] = []
         try:
             pkgs = self.device.action("/downloadsV2/queryPackages", [{"uuid": True}]) or []
         except Exception:
@@ -311,8 +331,18 @@ class JDClient:
                     [{"packageUUIDs": pkg_ids, "enabled": False}],
                 )
                 log.debug("JD.clear_downloads: disabled %d packages", len(pkg_ids))
+                ok = True
             except Exception:
                 pass
+
+        try:
+            self.device.action("/downloadsV2/clearList", [])
+            log.debug("JD.clear_downloads: cleared via /downloadsV2/clearList")
+            return True
+        except Exception:
+            pass
+
+        if pkg_ids:
             try:
                 self.device.action("/downloadsV2/removePackages", [{"packageUUIDs": pkg_ids}])
                 log.debug("JD.clear_downloads: removed %d packages", len(pkg_ids))
@@ -324,7 +354,7 @@ class JDClient:
                 except Exception:
                     pass
         log.debug("JD.clear_downloads: nothing to remove")
-        return False
+        return ok
 
     def stop_and_clear(self) -> bool:
         """أوقف التحميلات ونظف قوائم التحميل و الـ LinkGrabber"""
@@ -344,6 +374,14 @@ class JDClient:
                 ok = True
         except Exception:
             pass
+        try:
+            self.device.downloads.cleanup(
+                "DELETE_FINISHED", "REMOVE_LINKS_AND_DELETE_FILES", "ALL"
+            )
+            ok = True
+        except Exception:
+            pass
+
         try:
             self.device.downloads.cleanup(
                 "DELETE_FINISHED", "REMOVE_LINKS_AND_DELETE_FILES", "ALL"
@@ -391,3 +429,124 @@ def stop_and_clear_jdownloader(config: Optional[dict] = None) -> None:
             jd.stop_and_clear()
         except Exception:
             pass
+
+# === ضع الدالة التالية بعد تعريف كلاس JDClient مباشرة (خارج الكلاس) ===
+def stop_and_clear_jdownloader(cfg_or_client=None, wait_timeout=7.0):
+    """
+    يوقف كل التحميلات فى JDownloader ويمسح Download List و LinkGrabber.
+    يقبل:
+      - JDClient جاهز
+      - dict من الإعدادات فيه مفاتيح myjd_email / myjd_password / myjd_device / myjd_app_key
+    """
+    log = logging.getLogger(__name__)
+
+    # 1) جهّز عميل JD
+    if isinstance(cfg_or_client, JDClient):
+        jd = cfg_or_client
+    else:
+        jd = None
+        if isinstance(cfg_or_client, dict):
+            email = cfg_or_client.get("myjd_email") or cfg_or_client.get("jdownloader_email") or ""
+            password = cfg_or_client.get("myjd_password") or cfg_or_client.get("jdownloader_password") or ""
+            device_name = cfg_or_client.get("myjd_device") or cfg_or_client.get("jdownloader_device") or ""
+            app_key = cfg_or_client.get("myjd_app_key") or cfg_or_client.get("jdownloader_app_key") or "PyForumBot"
+            if email and password:
+                jd = JDClient(email=email, password=password, device_name=device_name, app_key=app_key)
+
+        if jd is None:
+            log.debug("stop_and_clear_jdownloader: no client/credentials supplied")
+            return False
+
+    if not getattr(jd, "device", None):
+        if not jd.connect():
+            log.debug("stop_and_clear_jdownloader: connect() failed")
+            return False
+
+    dev = jd.device
+
+    # 2) أوقف أى تحميلات + Pause كمان للاحتياط
+    for path, payload in [
+        ("/downloadcontroller/stop", []),
+        ("/downloadsV2/stop", []),
+        ("/downloads/stop", []),
+        ("/downloadcontroller/pause", [True]),
+        ("/downloads/pause", [True]),
+    ]:
+        try:
+            dev.action(path, payload)
+            log.debug("JD stop via %s", path)
+        except Exception:
+            pass
+
+    # 3) ألغِ أى كراول/ديكربت فى LinkGrabber
+    try:
+        dev.action("/linkgrabberv2/abort", [])
+    except Exception:
+        pass
+
+    # 4) امسح قائمة التحميلات (Downloads)
+    try:
+        pkgs = dev.action("/downloadsV2/queryPackages", [{"packageUUIDs": True}]) or []
+    except Exception:
+        pkgs = dev.action("/downloads/queryPackages", [{"packageUUIDs": True}]) or []
+    pids = [p.get("packageUUID") for p in pkgs if p.get("packageUUID")]
+
+    if pids:
+        removed = False
+        for path, payload in [
+            ("/downloadsV2/removePackages", [{"packageIds": pids}]),
+            ("/downloadsV2/removeLinks", [[], pids]),
+            ("/downloads/removeLinks", [[], pids]),
+        ]:
+            try:
+                dev.action(path, payload)
+                log.debug("JD removed downloads via %s", path)
+                removed = True
+                break
+            except Exception:
+                pass
+        if not removed:
+            log.debug("could not remove downloads packages (may already be empty)")
+
+    # 5) امسح الـ LinkGrabber بالكامل
+    try:
+        dev.action("/linkgrabberv2/clearList", [])
+        log.debug("LinkGrabber cleared via /linkgrabberv2/clearList")
+    except Exception:
+        try:
+            lpkgs = dev.action("/linkgrabberv2/queryPackages", [{"packageUUIDs": True}]) or []
+            lpids = [p.get("packageUUID") for p in lpkgs if p.get("packageUUID")]
+            if lpids:
+                for path, payload in [
+                    ("/linkgrabberv2/removeLinks", [[], lpids]),
+                    ("/linkgrabberv2/removePackages", [{"packageIds": lpids}]),
+                ]:
+                    try:
+                        dev.action(path, payload)
+                        log.debug("LinkGrabber cleared via %s", path)
+                        break
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    # 6) انتظر لحد ما يبقى مفيش أى باكدجز فى القائمتين (تفريغ فعلى)
+    deadline = time.time() + float(wait_timeout)
+    while time.time() < deadline:
+        try:
+            dpkgs = dev.action("/downloadsV2/queryPackages", [{"packageUUIDs": True}]) or []
+        except Exception:
+            try:
+                dpkgs = dev.action("/downloads/queryPackages", [{"packageUUIDs": True}]) or []
+            except Exception:
+                dpkgs = []
+        try:
+            lpkgs = dev.action("/linkgrabberv2/queryPackages", [{"packageUUIDs": True}]) or []
+        except Exception:
+            lpkgs = []
+        if not dpkgs and not lpkgs:
+            break
+        time.sleep(0.2)
+
+    log.info("✅ JDownloader controller stopped & lists cleared.")
+    return True

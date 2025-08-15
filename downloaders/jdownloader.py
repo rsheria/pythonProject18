@@ -3,6 +3,7 @@
 import os
 import time
 import logging
+import threading
 import shutil
 import re
 from typing import Optional, Dict, Any
@@ -59,10 +60,13 @@ class JDownloaderDownloader(BaseDownloader):
         import time
         self.current_session_id = None
         self.active_downloads = {}  # Track active downloads by session
+        self._cancel_event = threading.Event()
         
         # Only initialize if JDownloader is available and credentials exist
         if JDOWNLOADER_AVAILABLE and self.email and self.password:
             self._initialize_connection()
+
+
     
     def _extract_host_name(self, url: str) -> str:
         """Extract host name from URL for display purposes"""
@@ -166,6 +170,65 @@ class JDownloaderDownloader(BaseDownloader):
                 self.password and 
                 self.is_connected)
 
+    def request_cancel(self):
+        """
+        يُستدعى عند الضغط على Cancel:
+        - يعلِّم كلاس التنزيل إن فيه إلغاء.
+        - يوقف أى تنزيلات نشطة ويعمل Clear للـDownloads والـLinkGrabber على جهاز JD.
+        """
+        try:
+            self._cancel_event.set()
+        except Exception:
+            pass
+        try:
+            self._stop_and_clear_device()
+        except Exception:
+            pass
+
+    def _stop_and_clear_device(self):
+        """
+        يوقف ويحذف كل شيء داخل JDownloader (الجهاز المحدد فقط).
+        متوافق مع واجهات مختلفة: downloadsV2/* و linkgrabberv2/*.
+        """
+        dev = getattr(self, "device", None)
+        if not dev:
+            return
+
+        # 1) أوقف أى تنزيلات شغّالة
+        for path, payload in [
+            ("/downloadsV2/stopDownloads", []),
+            ("/downloadsV2/stop", []),
+            ("/downloads/stopAllDownloads", []),
+            ("/downloads/stop", []),
+        ]:
+            try:
+                dev.action(path, payload)
+                break
+            except Exception:
+                continue
+
+        # 2) نظّف قائمة الـDownloads
+        for path, payload in [
+            ("/downloadsV2/clearList", []),
+            ("/downloadsV2/removeLinks", [{"linkIds": []}]),
+            ("/downloadsV2/removePackages", [{"packageIds": []}]),
+        ]:
+            try:
+                dev.action(path, payload)
+                break
+            except Exception:
+                continue
+
+        # 3) امسح الـLinkGrabber
+        try:
+            dev.action("/linkgrabberv2/clearList", [])
+        except Exception:
+            try:
+                # بعض إصدارات myjdapi
+                dev.linkgrabber.clear_list()
+            except Exception:
+                pass
+
     def download(
         self,
         url: str,
@@ -260,7 +323,13 @@ class JDownloaderDownloader(BaseDownloader):
             
             # Add links to linkgrabber
             self.device.linkgrabber.add_links(links_to_add)
-            
+
+            # reset cancel flag for new session
+            try:
+                self._cancel_event.clear()
+            except Exception:
+                pass
+
             # Wait a moment for processing
             time.sleep(3)
             
@@ -325,6 +394,30 @@ class JDownloaderDownloader(BaseDownloader):
             
             # 🧠 SMART TIMEOUT: Initial timeout OR inactivity timeout
             while True:
+                # ✅ التقط إشارة الإلغاء من أى مكان:
+                # - لو حد نادى request_cancel()
+                # - أو لو الواجهة عندها status_widget.cancel_event متعلم
+                try:
+                    ui_cancelled = False
+                    bot = getattr(self, "bot", None)
+                    sw = getattr(getattr(bot, "status_widget", None), "cancel_event", None)
+                    if sw is not None:
+                        try:
+                            ui_cancelled = sw.is_set()
+                        except Exception:
+                            ui_cancelled = False
+
+                    if (getattr(self, "_cancel_event", None) and self._cancel_event.is_set()) or ui_cancelled:
+                        logging.info("🛑 Cancel detected — stopping & clearing JDownloader, then exiting monitor loop.")
+                        try:
+                            self._stop_and_clear_device()
+                        except Exception:
+                            pass
+                        return []
+                except Exception:
+                    # لا تعطّل الحلقة لو حصلت مشكلة فى الفحص
+                    pass
+
                 # Check if we should timeout
                 if not download_started and elapsed_time >= initial_timeout:
                     logging.warning(f"⏰ No download activity detected after {initial_timeout}s")
