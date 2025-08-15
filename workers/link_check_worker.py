@@ -1,113 +1,84 @@
+# -*- coding: utf-8 -*-
+import logging
+import re
+import time
 import uuid
 from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
 
 from PyQt5 import QtCore
-import logging
-import time
-import re
 
-# ================================
-# Constants & helpers
-# ================================
-# Known hosts that act purely as container/redirect services. Any URL whose
-# hostname matches one of these entries will be sent to JDownloader so that the
-# real file links can be extracted.
+from integrations.jd_client import JDClient
+
+
+log = logging.getLogger(__name__)
+
+# ======= ثوابت وأدوات =======
 CONTAINER_HOSTS = {
     "keeplinks.org",
-    "kprotector.com",
-    "linkvertise",
-    "ouo.io",
-    "shorte.st",
-    "shorteners",
+    "filecrypt.cc",
+    "linksafe.me",
+    "pastehere.xyz",
 }
 
-# Number of consecutive polls with an unchanged result set before we give up
-# waiting for JDownloader to resolve links when no containers are involved.
-MAX_STABLE_POLLS = 5
-
-# Direct hosts canonicalization regexes
-RG_RE = re.compile(r"^/file/([A-Za-z0-9]+)")
-NF_RE = re.compile(r"^/view/([A-Za-z0-9]+)")
-DD_RE = re.compile(r"^/(?:f|file)/([A-Za-z0-9]+)")
-TB_RE = re.compile(r"^/([A-Za-z0-9]+)")
-
-# Container path variants (e.g., keeplinks uses /p16/<id> or /p/<id>)
-KLP_RE = re.compile(r"^/p\d*/([A-Za-z0-9]+)")
-
-# Host aliases (user might set "rapidgator" or JD may report aliased forms)
 _HOST_ALIASES = {
+    "rg.to": "rapidgator.net",
     "rapidgator": "rapidgator.net",
-    "rg.to": "rapidgator.net",  # short domain alias seen in JD
     "nitroflare": "nitroflare.com",
     "ddownload": "ddownload.com",
     "turbobit": "turbobit.net",
 }
 
-def is_container_host(host: str) -> bool:
-    """Return True if *host* is considered a container/redirect service."""
-    return (host or "").lower() in CONTAINER_HOSTS
+RG_RE = re.compile(r"^/file/([A-Za-z0-9]+)")
+NF_RE = re.compile(r"^/view/([A-Za-z0-9]+)")
+DD_RE = re.compile(r"^/(?:f|file)/([A-Za-z0-9]+)")
+TB_RE = re.compile(r"^/([A-Za-z0-9]+)")
+KLP_RE = re.compile(r"/p(?:10)?/([a-fA-F0-9]+)")
+ROW_KEY_RE = re.compile(r"^row:(\d+)$", re.I)
 
-
-def _clean_host(h: str) -> str:
-    h = (h or "").lower().strip()
+def _clean_host(host: Optional[str]) -> str:
+    h = (host or "").strip().lower()
     if h.startswith("www."):
         h = h[4:]
     return _HOST_ALIASES.get(h, h)
 
+def is_container_host(host: str) -> bool:
+    return _clean_host(host) in CONTAINER_HOSTS
 
 def canonical_url(s: str) -> str:
-    """Normalize URL so that semantically identical URLs map to the same key.
-
-    - Lowercase host, strip www.
-    - Drop trailing slash / .html
-    - Normalize known direct-host paths to stable forms (id extracted).
-    - Force https scheme so http/https variants collide.
-    - For known container hosts (keeplinks), normalize /pXX/<id> => /p/<id>.
-    """
     if not s:
         return ""
     try:
         sp = urlsplit(s.strip())
         host = _clean_host(sp.hostname or "")
-        path = sp.path or ""
-        if path.endswith("/"):
-            path = path[:-1]
-        if path.endswith(".html"):
-            path = path[:-5]
-
-        # Containers (keeplinks variants)
-        if host.endswith("keeplinks.org"):
-            m = KLP_RE.match(path)
+        path = sp.path or "/"
+        if host == "keeplinks.org":
+            m = KLP_RE.search(path)
             if m:
-                path = f"/p/{m.group(1)}"
-
-        # Direct hosts
-        if host.endswith("rapidgator.net"):
+                return f"https://keeplinks.org/p/{m.group(1).lower()}"
+        # normalize some file hosts ID in path
+        if host == "rapidgator.net":
             m = RG_RE.match(path)
             if m:
                 path = f"/file/{m.group(1)}"
-        elif host.endswith("nitroflare.com"):
+        elif host == "nitroflare.com":
             m = NF_RE.match(path)
             if m:
                 path = f"/view/{m.group(1)}"
-        elif host.endswith("ddownload.com"):
+        elif host == "ddownload.com":
             m = DD_RE.match(path)
             if m:
                 path = f"/{m.group(1)}"
-        elif host.endswith("turbobit.net"):
+        elif host == "turbobit.net":
             m = TB_RE.match(path)
             if m:
                 path = f"/{m.group(1)}"
-
-        # Normalize scheme to https so http/https variants map to the same key
-        return urlunsplit(("https", host, path, "", ""))
+        return urlunsplit(("https", host, path.rstrip("/"), "", ""))
     except Exception:
         return (s or "").strip().lower().rstrip("/").removesuffix(".html")
 
-
 def host_id_key(s: str) -> str:
-    """Return a stable key host|id for known direct hosts if possible."""
     if not s:
         return ""
     try:
@@ -122,7 +93,7 @@ def host_id_key(s: str) -> str:
         pass
     return ""
 
-
+# ======= الوركر (QThread) =======
 class LinkCheckWorker(QtCore.QThread):
     progress = QtCore.pyqtSignal(dict)
     finished = QtCore.pyqtSignal(dict)
@@ -130,62 +101,63 @@ class LinkCheckWorker(QtCore.QThread):
 
     def __init__(
         self,
-        jd_client,
-        direct_urls,
-        container_urls,
+        jd_client: JDClient,
+        direct_urls: Optional[List[str]],
+        container_urls: Optional[List[str]],
         cancel_event,
-        visible_scope=None,
-        poll_timeout_sec=120,
-        poll_interval=1.0,
+        visible_scope: Optional[Dict] = None,
+        poll_timeout_sec: float = 120.0,
+        poll_interval: float = 1.0,
         *,
         single_host_mode: bool = True,
         auto_replace: bool = True,
-        enable_jd_online_check: bool = True,
+        enable_jd_online_check: bool = False,
     ):
         super().__init__()
         self.jd = jd_client
-        self.direct_urls = direct_urls or []
-        self.container_urls = container_urls or []
-        self.urls = (self.direct_urls + self.container_urls) or []
+        self.direct_urls = list(direct_urls or [])
+        self.container_urls = list(container_urls or [])
+        self.urls = self.direct_urls + self.container_urls
         self.visible_scope = visible_scope or {}
         self.cancel_event = cancel_event
-        self.poll_timeout = poll_timeout_sec
-        self.poll_interval = poll_interval
-        self.host_priority: list[str] = []
-        self.chosen_host: str | None = None
+
+        self.poll_timeout = float(poll_timeout_sec)
+        self.poll_interval = float(poll_interval)
+
         self.single_host_mode = bool(single_host_mode)
         self.auto_replace = bool(auto_replace)
-        # Allow JD startOnlineCheck by default; failures are handled gracefully
         self.enable_jd_online_check = bool(enable_jd_online_check)
 
-        self.session_id: str | None = None
-        # {(session_id, group_id): {"container_url": str, "remove_ids": [jd_ids], "row": int}}
-        self.awaiting_ack: dict[tuple[str, str], dict] = {}
-        self._direct_ids: list[str] = []
+        self.host_priority: List[str] = []
+        self.chosen_host: Optional[str] = None
 
-        # session package isolation
-        self.package_name: str | None = None
-        self.package_uuid: str | None = None
-
-        # summary counters
+        # runtime state
+        self.session_id: Optional[str] = None
+        self.awaiting_ack: Dict[Tuple[str, str], dict] = {}
         self._rows = 0
         self._replaced = 0
         self._c_online = 0
         self._c_offline = 0
         self._c_unknown = 0
+        self._start_time = 0.0
 
-    def set_host_priority(self, priority_list: list):
+        # per-row prefs/map
+        self._row_prefs: Dict[int, dict] = {}   # row -> {"priority":[...], "chosen_host":str|None, "allowed_hosts":set[str]}
+        self._url_to_row: Dict[str, int] = {}   # canonical(url) -> row
+
+    # ======= إعدادات الأولويات =======
+    def set_host_priority(self, priority_list: List[str]):
         self.host_priority = []
         for h in (priority_list or []):
             if isinstance(h, str):
-                h = h.strip().lower()
-                if h.startswith("www."):
-                    h = h[4:]
-                self.host_priority.append(_HOST_ALIASES.get(h, h))
+                self.host_priority.append(_clean_host(h))
 
+    def set_chosen_host(self, host: Optional[str]):
+        self.chosen_host = _clean_host(host or "")
+
+    # ======= ACK من الـGUI لما يتم الاستبدال =======
     @QtCore.pyqtSlot(str, str, str)
     def ack_replaced(self, container_url: str, session_id: str, group_id: str):
-        """Ack from GUI that container_url has been replaced in the table."""
         if session_id != self.session_id:
             return
         key = (session_id, group_id)
@@ -196,663 +168,467 @@ class LinkCheckWorker(QtCore.QThread):
         if ids:
             try:
                 rc = self.jd.remove_links(ids)
-                logging.getLogger(__name__).debug(
-                    "JD CLEANUP | session=%s | group=%s | rc=%s | removed=%d",
-                    session_id,
-                    group_id,
-                    rc if rc is not None else 200,
-                    len(ids),
-                )
+                log.debug("JD CLEANUP | session=%s | group=%s | rc=%s | removed=%d",
+                          session_id, group_id, rc if rc is not None else 200, len(ids))
             except Exception as e:
-                logging.getLogger(__name__).warning(
-                    "JD remove failed for container=%s: %s", container_url, e
-                )
+                log.warning("JD remove failed for container=%s: %s", container_url, e)
 
-    # ------------------------ internal helpers ------------------------
+    # ======= Helpers =======
     def _availability(self, it: dict) -> str:
         a = (it.get("availability") or "").upper()
-        if a in ("ONLINE", "OFFLINE"):
-            return a
+        s = (it.get("status") or "").upper()
+        if a == "ONLINE" or s in {"ONLINE", "CHECKED"}:
+            return "ONLINE"
+        if a == "OFFLINE" or s in {"OFFLINE", "FILE_UNAVAILABLE"}:
+            return "OFFLINE"
         return "UNKNOWN"
 
     def _host_of(self, it: dict) -> str:
-        return _clean_host(it.get("host"))
+        url = it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
+        return _clean_host(urlsplit(url).hostname or "")
 
-    def _pick_best(self, items: list[dict], priority: list[str]) -> tuple[str, list[dict]]:
-        hosts: dict[str, list[dict]] = defaultdict(list)
-        for it in items:
-            hosts[self._host_of(it)].append(it)
-        priority_map = {h: i for i, h in enumerate(priority or [])}
-        online_hosts: list[tuple[int, str, list[dict]]] = []
-        offline_hosts: list[tuple[int, str, list[dict]]] = []
-        for h, lst in hosts.items():
-            idx = priority_map.get(h, len(priority_map))
-            if any(self._availability(x) == "ONLINE" for x in lst):
-                online_hosts.append((idx, h, lst))
-            else:
-                offline_hosts.append((idx, h, lst))
-        if online_hosts:
-            _idx, host, lst = sorted(online_hosts, key=lambda x: x[0])[0]
-        else:
-            _idx, host, lst = sorted(offline_hosts, key=lambda x: x[0])[0]
-        lst.sort(key=lambda it: {"ONLINE": 0, "OFFLINE": 1, "UNKNOWN": 2}[self._availability(it)])
-        return host, lst
+    def _pick_best_host(self, host_map: Dict[str, List[dict]], *, row_prio: List[str], row_chosen: Optional[str]) -> str:
+        # حماية من الفراغ لتجنب StopIteration وقت الكانسل/العدم
+        if not host_map:
+            return ""
+        # 1) chosen_host (row override > global)
+        prefer = _clean_host(row_chosen or "") or _clean_host(self.chosen_host or "")
+        if prefer and prefer in host_map:
+            return prefer
+        # 2) row priority then global priority
+        prio = [*row_prio] if row_prio else []
+        for h in self.host_priority:
+            if h not in prio:
+                prio.append(h)
+        for h in prio:
+            if h in host_map:
+                return h
+        # 3) fallback: أي هوست موجود
+        return next(iter(host_map.keys()))
 
-    def _safe_start_online_check(self, ids: list[str]):
-        """Start online check if enabled and supported; swallow unsupported errors."""
+    def _safe_start_online_check(self, ids: List[str]):
         if not (self.enable_jd_online_check and ids):
             return
         try:
             self.jd.start_online_check(ids)
         except Exception:
-            # Silent: device may not expose this endpoint; availability still
-            # arrives through queryLinks.
-            logging.getLogger(__name__).debug("JD startOnlineCheck not available; skipping")
+            log.debug("JD startOnlineStatusCheck not available; skipping")
 
-    def _query_links_scoped(self) -> list[dict]:
-        """Query JD for links in this session's package.
+    # ======= بناء فهرس نطاق الرؤية (اختياري) =======
+    def _build_scope_index(self):
+        """
+        يدعم:
+        - visible_scope مفاتيحه URLs أو 'row:<N>'
+        بنستخرج:
+          self._url_to_row[canon_url] = row
+          self._row_prefs[row] = {priority, chosen_host, allowed_hosts}
+        """
+        url_to_row: Dict[str, int] = {}
+        row_prefs: Dict[int, dict] = {}
 
-        Falls back to an unscoped query if the scoped query either fails due to
-        signature mismatch or returns no items.  This guards against JD
-        filtering issues where querying by package yields zero results even
-        though links exist."""
-        try:
-            items = self.jd.query_links(package_uuid=self.package_uuid) or []
-        except TypeError:
-            items = self.jd.query_links() or []
-        if not items:
-            try:
-                items = self.jd.query_links() or []
-            except TypeError:
-                items = []
-        if self.package_uuid is None and items:
-            self.package_uuid = items[0].get("packageUUID")
-        return items
-
-
-
-    # ------------------------------- direct processor -------------------------------
-    def _process_direct_batch(self, items: list[dict], allowed_direct: set[str], scope_rows: dict[str, int]) -> None:
-        """Process direct-only logic (also used as a safety fallback if containers exist but don't group)."""
-        log = logging.getLogger(__name__)
-
-        # Group matched items by their row (canonical direct URL)
-        groups: dict[str, list] = defaultdict(list)
-        for it in items:
-            item_url = it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
-            key = canonical_url(item_url)
-            if key in allowed_direct:
-                groups[key].append(it)
-
-        # Fallback: if nothing matched but items exist, attribute all items to
-        # the first provided direct URL so we still emit a status.
-        if not groups and items and allowed_direct:
-            first = next(iter(allowed_direct))
-            groups[first] = items[:]
-            log.debug(
-                "DIRECT FALLBACK | session=%s | using_all_items=%d | allowed=%d",
-                self.session_id,
-                len(items),
-                len(allowed_direct),
-            )
-
-        if not groups:
-            log.debug(
-                "DIRECT FLOW | session=%s | matched=0 | allowed=%d",
-                self.session_id,
-                len(allowed_direct),
-            )
-            return
-
-        chosen_by_row: dict[str, dict] = {}
-        direct_ids: list[str] = []
-
-        for key, gitems in groups.items():
-            host_map: dict[str, list] = defaultdict(list)
-            for it in gitems:
-                host_map[self._host_of(it)].append(it)
-
-            available_hosts = sorted(host_map.keys())
-            picked_host = None
-            selected_items: list[dict]
-            if self.single_host_mode:
-                if self.chosen_host and _clean_host(self.chosen_host) in host_map:
-                    picked_host = _clean_host(self.chosen_host)
-                else:
-                    for h in self.host_priority:
-                        if h in host_map:
-                            picked_host = h
-                            break
-                    if picked_host is None and host_map:
-                        picked_host = next(iter(host_map))
-                if self.chosen_host and picked_host != _clean_host(self.chosen_host):
-                    log.debug(
-                        "DIRECT HOST FALLBACK | session=%s | preferred=%s | picked=%s",
-                        self.session_id,
-                        self.chosen_host,
-                        picked_host,
-                    )
-                selected_items = host_map.get(picked_host, [])
-            else:
-                selected_items = [it for lst in host_map.values() for it in lst]
-                picked_host, _ = self._pick_best(selected_items, self.host_priority)
-
-            if not selected_items:
+        for k, v in (self.visible_scope or {}).items():
+            if not isinstance(v, dict):
                 continue
 
-            first = selected_items[0]
-            cid = first.get("uuid")
-            if cid:
-                direct_ids.append(cid)
-            chosen_by_row[key] = {
-                "item": first,
-                "host": self._host_of(first),
-                "available": available_hosts,
-                "picked": picked_host,
-                "total": len(gitems),
-            }
+            m = ROW_KEY_RE.match(str(k))
+            if m:
+                row = int(m.group(1))
+                pref = row_prefs.setdefault(row, {"priority": None, "chosen_host": None, "allowed_hosts": set()})
+                # hosts/priority/chosen_host
+                for h in (v.get("hosts") or []):
+                    hh = _clean_host(h)
+                    if hh:
+                        pref["allowed_hosts"].add(hh)
+                pr = v.get("priority") or None
+                if pr:
+                    pref["priority"] = [_clean_host(x) for x in pr if isinstance(x, str)]
+                ch = v.get("chosen_host")
+                if isinstance(ch, str):
+                    pref["chosen_host"] = _clean_host(ch)
+                for u in (v.get("urls") or v.get("links") or []):
+                    cu = canonical_url(u)
+                    if cu:
+                        url_to_row[cu] = row
+                continue
+
+            cu = canonical_url(k)
+            row = v.get("row")
+            if cu and row is not None:
+                url_to_row[cu] = row
+                pref = row_prefs.setdefault(row, {"priority": None, "chosen_host": None, "allowed_hosts": set()})
+                for h in (v.get("hosts") or []):
+                    hh = _clean_host(h)
+                    if hh:
+                        pref["allowed_hosts"].add(hh)
+                pr = v.get("priority") or None
+                if pr and pref.get("priority") is None:
+                    pref["priority"] = [_clean_host(x) for x in pr if isinstance(x, str)]
+                ch = v.get("chosen_host")
+                if isinstance(ch, str) and pref.get("chosen_host") is None:
+                    pref["chosen_host"] = _clean_host(ch)
+
+        self._url_to_row = url_to_row
+        self._row_prefs = row_prefs
+
+    def _get_row_pref(self, row: int) -> Tuple[List[str], Optional[str], List[str]]:
+        p = self._row_prefs.get(row) or {}
+        prio = p.get("priority") or []
+        chosen = p.get("chosen_host")
+        allowed = list(p.get("allowed_hosts") or [])
+        return prio, chosen, allowed
+
+    # ======= DIRECT: معالجة لكل صف بدون إسقاط هوست غير مُعرّف =======
+    def _process_direct_batch(self, items: List[dict], allowed_direct: set) -> None:
+        # طابق الـitems مع direct_urls (لو محددة)، لكن لو فاضية هنفحص أي لينك
+        matched: List[dict] = []
+        for it in items:
+            item_url = it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
+            cu = canonical_url(item_url)
+            if not allowed_direct or cu in allowed_direct:
+                matched.append(it)
+        if not matched:
+            log.debug("DIRECT FLOW | session=%s | matched=0 | allowed=%d", self.session_id, len(allowed_direct))
+            return
+
+        # جروّب حسب الصف
+        row_map: Dict[int, List[dict]] = defaultdict(list)
+        for it in matched:
+            item_url = it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
+            row = self._url_to_row.get(canonical_url(item_url), -1)
+            row_map[row].append(it)
+
+        for row, row_items in row_map.items():
+            host_map: Dict[str, List[dict]] = defaultdict(list)
+            for it in row_items:
+                host_map[self._host_of(it)].append(it)
+
+            if not host_map:
+                log.debug("DIRECT SUMMARY (per-row) | session=%s | row=%s | host_map=EMPTY", self.session_id, row)
+                continue
+
+            row_prio, row_chosen, allowed_hosts = self._get_row_pref(row)
+
+            # لا نُسقِط أي هوست لو allowed_hosts مش متضمنه — نستعملها كتفضيل فقط
+            picked = self._pick_best_host(host_map, row_prio=row_prio, row_chosen=row_chosen)
+            if allowed_hosts and picked not in allowed_hosts:
+                # لو فيه قائمة مُفضّلة، جرّب أول مُفضّل موجود
+                for h in allowed_hosts:
+                    if h in host_map:
+                        picked = h
+                        break
+
+            selected = host_map.get(picked, [])
+            ids = [it.get("uuid") for it in selected if it.get("uuid")]
 
             log.debug(
-                "DIRECT SUMMARY | session=%s | row=%s | available_hosts=%s | chosen=%s | kept=1 | total=%d",
-                self.session_id,
-                scope_rows.get(key),
-                available_hosts,
-                picked_host,
-                len(gitems),
+                "DIRECT SUMMARY (per-row) | session=%s | row=%s | available_hosts=%s | chosen=%s | kept=%d | total=%d",
+                self.session_id, row, sorted(host_map.keys()), picked, len(ids), len(row_items)
             )
 
-        # Optional JD-side online check (guarded to avoid 404s)
-        self._safe_start_online_check(direct_ids)
+            self._safe_start_online_check(ids)
 
-        # Re-query to fetch availability and emit status with row mapping (if present)
-        items_now = self._query_links_scoped()
-        item_map = {it.get("uuid"): it for it in items_now}
-
-        for key, info in chosen_by_row.items():
-            it = info["item"]
-            uid = it.get("uuid")
-            it = item_map.get(uid) or it
-            item_url = it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
-            status = self._availability(it)
-            row_idx = scope_rows.get(key)
-            self.progress.emit(
-                {
+            # أبلغ الـGUI بالحالة (لأول عنصر مختار على الأقل)
+            now = self.jd.query_links() or []
+            imap = {it.get("uuid"): it for it in now}
+            for uid in ids:
+                it = imap.get(uid) or next((x for x in selected if x.get("uuid") == uid), None)
+                if not it:
+                    continue
+                item_url = it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
+                status = self._availability(it)
+                self.progress.emit({
                     "type": "status",
                     "session_id": self.session_id,
-                    "row": row_idx,
+                    "row": row,
                     "url": item_url,
                     "status": status,
-                    "scope_hosts": [info["host"]],
-                }
-            )
-            if status == "ONLINE":
-                self._c_online += 1
-            elif status == "OFFLINE":
-                self._c_offline += 1
-            else:
-                self._c_unknown += 1
-            log.debug(
-                "AVAIL RESULT | session=%s | row=%s | url=%s | status=%s | dur=%.3f",
-                self.session_id,
-                row_idx,
-                canonical_url(item_url),
-                status,
-                time.monotonic() - self._start_time,
-            )
+                    "dur": time.monotonic() - self._start_time,
+                })
+                log.debug("AVAIL RESULT | session=%s | row=%s | url=%s | status=%s | dur=%.3f",
+                          self.session_id, row, canonical_url(item_url), status, time.monotonic() - self._start_time)
 
-        if direct_ids:
-            try:
-                self.jd.remove_links(direct_ids)
-            except Exception as e:
-                log.warning("remove direct links failed: %s", e)
+            # نظّف المختارين
+            if ids:
+                try:
+                    self.jd.remove_links(ids)
+                except Exception as e:
+                    log.warning("remove direct links failed: %s", e)
 
-    # ------------------------------- run -------------------------------
+    # ======= RUN =======
     def run(self):
-        log = logging.getLogger(__name__)
         self.session_id = uuid.uuid4().hex
         self.awaiting_ack.clear()
-        self._direct_ids.clear()
         self._rows = self._replaced = self._c_online = self._c_offline = self._c_unknown = 0
         self._start_time = time.monotonic()
 
-        # isolate this session in its own package inside JD
-        self.package_name = f"lcw_{self.session_id}"
-        self.package_uuid = None
+        # لوج نطاق الرؤية
+        log.debug("SCOPE START | rows=%d", len(self.visible_scope or {}))
+        for k, v in (self.visible_scope or {}).items():
+            key = k
+            urls = len(v.get("urls") or [])
+            hosts = v.get("hosts") or []
+            log.debug("SCOPE ROW | key=%s | hosts=%s | urls=%d", key, hosts, urls)
 
-        if not self.urls:
-            msg = "No URLs to check."
-            log.error("LinkCheckWorker: %s", msg)
-            self.error.emit(msg)
-            self.finished.emit({"session_id": self.session_id})
-            return
+        # اكتشف النوع
+        direct_ct = len(self.direct_urls)
+        cont_ct = len(self.container_urls)
+        self._build_scope_index()
 
-        if self.cancel_event.is_set():
-            self.finished.emit({"session_id": self.session_id})
-            return
+        # DETECT
+        log.debug(
+            "DETECT | session=%s | direct=%d | containers=%d | chosen_host=%s",
+            self.session_id, direct_ct, cont_ct, (self.chosen_host or "")
+        )
 
+        # اتصل بـ JD
         if not self.jd.connect():
             self.error.emit("JDownloader connection failed.")
             self.finished.emit({"session_id": self.session_id})
             return
 
-        # Log flags effective at the start of the run
+        # نظّف LinkGrabber في بداية الجلسة
+        try:
+            cleared = self.jd.remove_all_from_linkgrabber()
+            log.debug("SESSION RESET | session=%s | linkgrabber_cleared=%s", self.session_id, bool(cleared))
+        except Exception as e:
+            log.warning("SESSION RESET failed: %s", e)
+
+        # لو اتعمل Cancel بدري
+        if self.cancel_event.is_set():
+            log.debug("CANCEL REQUEST | session=%s", self.session_id)
+            try:
+                self.jd.abort_linkgrabber()
+            except Exception:
+                pass
+            self.finished.emit({"session_id": self.session_id})
+            return
+
         log.debug(
             "FLAGS | session=%s | auto_replace=%s | single_host=%s | chosen_host=%s | host_priority=%s | online_check=%s",
             self.session_id,
             "ON" if self.auto_replace else "OFF",
             "ON" if self.single_host_mode else "OFF",
             (self.chosen_host or ""),
-            ",".join(self.host_priority),
+            ",".join(self.host_priority or []),
             "ON" if self.enable_jd_online_check else "OFF",
         )
 
-        start_check = not self.container_urls
-        urls_to_add = self.container_urls if self.container_urls else self.direct_urls
-        try:
-            ok = self.jd.add_links_to_linkgrabber(
-                urls_to_add, start_check=start_check, package_name=self.package_name
-            )
-        except TypeError:
-            ok = self.jd.add_links_to_linkgrabber(urls_to_add, start_check=start_check)
-        if not ok:
-            self.error.emit("Failed to add links to LinkGrabber.")
-            self.finished.emit({"session_id": self.session_id})
-            return
+        # polling helper
+        def poll_until_ready(expected_min_items: int = 1) -> List[dict]:
+            time.sleep(1.5)
+            t0 = time.time()
+            stable_hits = 0
+            last_count = None
+            items: List[dict] = []
+            while time.time() - t0 < self.poll_timeout:
+                if self.cancel_event.is_set():
+                    # إيقاف فوري لـ JD
+                    try:
+                        self.jd.abort_linkgrabber()
+                    except Exception:
+                        pass
+                    return []
+                cur = self.jd.query_links() or []
+                c = len(cur)
+                if last_count is None or c != last_count:
+                    stable_hits = 0
+                else:
+                    stable_hits += 1
+                last_count = c
+                items = cur
+                # اكتفى عند ثبات بسيط وعدد كفاية
+                if stable_hits >= 2 and c >= expected_min_items:
+                    break
+                time.sleep(self.poll_interval)
+            log.debug("LinkCheckWorker: poll count=%d%s", len(items), f" (stable={stable_hits})")
+            return items
 
-        log.debug(
-            "JD.ADD | direct=%d | containers=%d | package=%s",
-            len(self.direct_urls),
-            len(self.container_urls),
-            self.package_name,
-        )
-
-        time.sleep(2)
-
-        # Poll LinkGrabber until items appear / resolve or timeout
-        t0 = time.time()
-        stable_hits = 0
-        last_count: int | None = None
-        while time.time() - t0 < self.poll_timeout:
+        # ======= (1) DIRECT (لو فيه) =======
+        allowed_direct = {canonical_url(u) for u in self.direct_urls}
+        if self.direct_urls:
             if self.cancel_event.is_set():
+                log.debug("CANCEL REQUEST | session=%s", self.session_id)
+                try:
+                    self.jd.abort_linkgrabber()
+                except Exception:
+                    pass
                 self.finished.emit({"session_id": self.session_id})
                 return
 
-            items = self._query_links_scoped()
-            curr_count = len(items)
-            all_resolved = curr_count > 0 and all(
-                (it.get("availability") or "").upper() in ("ONLINE", "OFFLINE") for it in items
-            )
+            if not self.jd.add_links_to_linkgrabber(self.direct_urls):
+                self.error.emit("Failed to add direct links to LinkGrabber.")
+                self.finished.emit({"session_id": self.session_id})
+                return
+            log.debug("JD.ADD | direct=%d | containers=%d", len(self.direct_urls), 0)
 
-            if not self.container_urls:
-                if curr_count == last_count:
-                    stable_hits += 1
-                else:
-                    stable_hits = 0
-                last_count = curr_count
-                if stable_hits >= MAX_STABLE_POLLS:
-                    log.debug("LinkCheckWorker: poll count=%d (stable=%d)", curr_count, stable_hits)
-                    break
-            log.debug(
-                "LinkCheckWorker: poll count=%d%s",
-                curr_count,
-                f" (stable={stable_hits})" if not self.container_urls else "",
-            )
-            if all_resolved:
-                break
-            time.sleep(self.poll_interval)
-
-        items = self._query_links_scoped()
-
-        # Precompute scopes & allowed keys
-        allowed_direct = {canonical_url(u) for u in self.direct_urls}
-        allowed_containers = {canonical_url(u): u for u in self.container_urls}
-        scope_hosts = {canonical_url(k): set(v.get("hosts", [])) for k, v in (self.visible_scope or {}).items()}
-        scope_rows = {canonical_url(k): v.get("row") for k, v in (self.visible_scope or {}).items()}
-
-        # -------------------------- direct-only OR safety-fallback --------------------------
-        if not self.container_urls:
-            self._process_direct_batch(items, allowed_direct, scope_rows)
-            log.info(
-                "SUMMARY | session=%s | rows=%d | replaced=%d | online=%d | offline=%d | unknown=%d | cancelled=%s | dur=%.3f",
-                self.session_id,
-                self._rows,
-                self._replaced,
-                self._c_online,
-                self._c_offline,
-                self._c_unknown,
-                False,
-                time.monotonic() - self._start_time,
-            )
-            self.finished.emit({"session_id": self.session_id})
-            return
-
-        # -------------------------- container flow (multi-pass with per-container wait) --------------------------
-        pending = {orig for orig in
-                   allowed_containers.values()}  # keep ORIGINAL keys (not canonical) to resolve row mapping
-        processed = set()
-        t_loop0 = time.time()
-
-        # Stall detection across the whole pass
-        loops_no_groups = 0
-
-        # Per-container wait limits (don’t emit UNKNOWN too early)
-        container_first_seen: dict[str, float] = {}
-        container_unknown_hits: dict[str, int] = {}
-        UNKNOWN_MAX_POLLS = 8  # consecutive loops allowed while everything is UNKNOWN
-        UNKNOWN_MAX_SECS = 30  # or max seconds per container before giving up
-
-        while pending and (time.time() - t_loop0) < self.poll_timeout:
             if self.cancel_event.is_set():
-                break
+                log.debug("CANCEL REQUEST | session=%s", self.session_id)
+                try:
+                    self.jd.abort_linkgrabber()
+                except Exception:
+                    pass
+                self.finished.emit({"session_id": self.session_id})
+                return
 
-            # Query only our session/package (if jd_client supports it); otherwise returns all LinkGrabber items
+            items = poll_until_ready(expected_min_items=min(1, len(self.direct_urls)))
+            if items:
+                self._process_direct_batch(items, allowed_direct)
+
             try:
-                items = self._query_links_scoped()
-            except AttributeError:
-                items = self.jd.query_links() or []
+                self.jd.remove_all_from_linkgrabber()
+            except Exception:
+                pass
 
-            groups: dict[str, list] = defaultdict(list)
+        # ======= (2) CONTAINERS — بالتتابع بدون تضارب =======
+        for idx, container_url in enumerate(self.container_urls, start=1):
+            if self.cancel_event.is_set():
+                log.debug("CANCEL REQUEST | session=%s", self.session_id)
+                try:
+                    self.jd.abort_linkgrabber()
+                except Exception:
+                    pass
+                self.finished.emit({"session_id": self.session_id})
+                return
 
-            # Group only items that belong to containers still pending
-            for it in items:
-                item_url = it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
-                container_url = (
-                        it.get("containerURL") or it.get("origin") or it.get("pluginURL") or it.get("url") or ""
+            if not self.jd.add_links_to_linkgrabber([container_url]):
+                self.error.emit(f"Failed to add container to LinkGrabber: {container_url}")
+                break
+            log.debug("JD.ADD | direct=%d | containers=%d", 0, 1)
+
+            if self.cancel_event.is_set():
+                log.debug("CANCEL REQUEST | session=%s", self.session_id)
+                try:
+                    self.jd.abort_linkgrabber()
+                except Exception:
+                    pass
+                self.finished.emit({"session_id": self.session_id})
+                return
+
+            items = poll_until_ready(expected_min_items=1)
+
+            # في التتابع، كل العناصر اللي رجعت دلوقتي تخص الكونتينر ده
+            row_idx = self._url_to_row.get(canonical_url(container_url), -1)
+            row_prio, row_chosen, allowed_hosts = self._get_row_pref(row_idx)
+
+            # بِنَى خريطة هوست -> عناصر
+            host_map: Dict[str, List[dict]] = defaultdict(list)
+            for it in (items or []):
+                host_map[self._host_of(it)].append(it)
+
+            if not host_map:
+                log.debug(
+                    "DECRYPT SUMMARY | session=%s | row=%s | host_map=EMPTY (likely cancel/empty container)",
+                    self.session_id, row_idx
                 )
-                chost = _clean_host(urlsplit(container_url or item_url).hostname or "")
-                if is_container_host(chost) or bool(it.get("containerURL")):
-                    ccanon = canonical_url(container_url)
-                    if ccanon in allowed_containers:
-                        orig = allowed_containers[ccanon]
-                        if orig in pending:
-                            groups[orig].append(it)
+                try:
+                    self.jd.remove_all_from_linkgrabber()
+                except Exception:
+                    pass
+                continue
 
-            # If no groups this loop, try an orphan fallback (only when one pending remains); else count as a stall
-            if not groups:
-                loops_no_groups += 1
-
-                if len(pending) == 1 and items:
-                    sole = next(iter(pending))
-                    orphans = []
-                    for it in items:
-                        c_url = it.get("containerURL") or it.get("origin") or it.get("pluginURL") or it.get("url") or ""
-                        ccanon = canonical_url(c_url)
-                        # take items that don’t clearly map to another pending container
-                        if ccanon not in allowed_containers or allowed_containers.get(ccanon) not in pending:
-                            orphans.append(it)
-                    if orphans:
-                        groups[sole] = orphans
-                        loops_no_groups = 0  # progress happened
-
-                # still nothing? check for stall/time budget
-                if not groups:
-                    if loops_no_groups >= 10 or (time.time() - t_loop0) >= self.poll_timeout:
-                        # close all remaining as UNKNOWN (don’t loop forever)
-                        for ck in list(pending):
-                            row_idx = scope_rows.get(canonical_url(ck))
-                            self.progress.emit({
-                                "type": "status",
-                                "session_id": self.session_id,
-                                "row": row_idx,
-                                "url": ck,
-                                "status": "UNKNOWN",
-                            })
-                            pending.discard(ck)
+            # اختَر هوست — نستخدم allowed_hosts كتفضيل فقط
+            picked = self._pick_best_host(host_map, row_prio=row_prio, row_chosen=row_chosen)
+            if allowed_hosts and picked not in allowed_hosts:
+                for h in allowed_hosts:
+                    if h in host_map:
+                        picked = h
                         break
 
-                    time.sleep(self.poll_interval)
-                    continue
-            else:
-                loops_no_groups = 0  # progress
+            selected = host_map.get(picked, []) or []
+            selected_ids = [it.get("uuid") for it in selected if it.get("uuid")]
+            all_ids = [it.get("uuid") for its in host_map.values() for it in its if it.get("uuid")]
 
-            total_groups = len(groups)
+            log.debug(
+                "DECRYPT SUMMARY | session=%s | row=%s | chosen=%s | hosts=%s | kept=%d",
+                self.session_id, row_idx, picked, sorted(host_map.keys()), len(selected_ids),
+            )
 
-            for container_key, gitems in groups.items():
-                if container_key not in pending:
-                    continue
-
-                ccanon = canonical_url(container_key)
-                allowed = scope_hosts.get(ccanon, set())
-                row_idx = scope_rows.get(ccanon)
-                all_hosts = sorted({self._host_of(it) for it in gitems})
-
-                # Per-container wait: if everything is still UNKNOWN, give JD a bit more time
-                now = time.time()
-                known_items = [it for it in gitems if (it.get("availability") or "").upper() in ("ONLINE", "OFFLINE")]
-                unknown_items = [it for it in gitems if
-                                 (it.get("availability") or "").upper() not in ("ONLINE", "OFFLINE")]
-
-                if container_key not in container_first_seen:
-                    container_first_seen[container_key] = now
-
-                if unknown_items and not known_items:
-                    # ask JD to check unknowns (if supported)
-                    self._safe_start_online_check([it.get("uuid") for it in unknown_items if it.get("uuid")])
-
-                    container_unknown_hits[container_key] = container_unknown_hits.get(container_key, 0) + 1
-                    waited_polls = container_unknown_hits[container_key]
-                    waited_secs = now - container_first_seen[container_key]
-
-                    log.debug(
-                        "WAIT CONTAINER | container=%s | unknown=%d | polls=%d | secs=%.1f",
-                        canonical_url(container_key), len(unknown_items), waited_polls, waited_secs
-                    )
-
-                    if waited_polls < UNKNOWN_MAX_POLLS and waited_secs < UNKNOWN_MAX_SECS:
-                        # don’t process this container yet; try next loop
-                        continue
-                    # fell through: we’ll proceed and likely emit UNKNOWN (timeout reached)
-
-                # Host filtering (respect single_host_mode + scope)
-                if self.single_host_mode:
-                    filtered = [it for it in gitems if not allowed or self._host_of(it) in allowed]
-                    dropped = len(gitems) - len(filtered)
-                else:
-                    filtered = gitems
-                    dropped = 0
-                    if not allowed:
-                        allowed = {self._host_of(it) for it in gitems}
-
-                if not filtered:
-                    # nothing usable → report UNKNOWN on the row and mark done
-                    self.progress.emit({
-                        "type": "status",
-                        "session_id": self.session_id,
-                        "row": row_idx,
-                        "url": container_key,
-                        "status": "UNKNOWN",
+            # أرسل حالة أول اختيار + الأشقاء
+            chosen_url = ""
+            chosen_status = "UNKNOWN"
+            siblings: List[dict] = []
+            if selected:
+                first = selected[0]
+                chosen_url = first.get("url") or first.get("contentURL") or first.get("pluginURL") or ""
+                chosen_status = self._availability(first)
+                for it in selected[1:]:
+                    siblings.append({
+                        "url": it.get("url") or it.get("contentURL") or it.get("pluginURL") or "",
+                        "status": self._availability(it),
                     })
-                    pending.discard(container_key)
-                    continue
 
-                # Choose best host
-                host_map: dict[str, list] = defaultdict(list)
-                for it in filtered:
-                    host_map[self._host_of(it)].append(it)
-
-                if self.single_host_mode:
-                    if self.chosen_host and _clean_host(self.chosen_host) in host_map:
-                        host = _clean_host(self.chosen_host)
-                    else:
-                        host = None
-                        for h in self.host_priority:
-                            if h in host_map:
-                                host = h
-                                break
-                        if host is None:
-                            host = next(iter(host_map))
-                else:
-                    host, _ = self._pick_best(filtered, self.host_priority)
-
-                ordered = host_map.get(host, []) if self.single_host_mode else [it for lst in host_map.values() for it
-                                                                                in lst]
-                ordered_ids = [it.get("uuid") for it in ordered if it.get("uuid")]
-                all_ids = [it.get("uuid") for it in filtered if it.get("uuid")]
-
-                replace = self.auto_replace and self.single_host_mode and bool(self.host_priority)
-
-                # Optional JD online-check for remaining UNKNOWNs (guarded)
-                unknown_ids = [it.get("uuid") for it in ordered if
-                               self._availability(it) == "UNKNOWN" and it.get("uuid")]
-                self._safe_start_online_check(unknown_ids)
-
-                # Emit chosen + siblings
-                siblings, chosen_status, chosen_url, first_host = [], "UNKNOWN", "", None
-                for j, it in enumerate(ordered):
-                    url_v = it.get("url") or it.get("contentURL") or it.get("pluginURL") or ""
-                    st = self._availability(it)
-                    if j == 0:
-                        chosen_status = st
-                        chosen_url = url_v
-                        first_host = self._host_of(it)
-                        if st == "ONLINE":
-                            self._c_online += 1
-                        elif st == "OFFLINE":
-                            self._c_offline += 1
-                        else:
-                            self._c_unknown += 1
-                    else:
-                        siblings.append({"url": url_v, "status": st})
-
-                # Report container row status (so UI shows something while we replace)
                 self.progress.emit({
                     "type": "status",
                     "session_id": self.session_id,
                     "row": row_idx,
-                    "url": container_key,
+                    "url": chosen_url,
                     "status": chosen_status,
-                    "scope_hosts": [first_host] if first_host else [],
+                    "dur": time.monotonic() - self._start_time,
                 })
+                log.debug("AVAIL RESULT | session=%s | row=%s | url=%s | status=%s | dur=%.3f",
+                          self.session_id, row_idx, canonical_url(chosen_url), chosen_status,
+                          time.monotonic() - self._start_time)
 
-                group_id = uuid.uuid4().hex if replace else ""
-                if replace:
-                    self.awaiting_ack[(self.session_id, group_id)] = {
-                        "container_url": container_key,
-                        "remove_ids": all_ids,
-                        "row": row_idx,
-                    }
-
-                # Replace instruction
-                self.progress.emit({
-                    "type": "container",
-                    "container_url": container_key,
-                    "final_url": chosen_url,
-                    "chosen": {"url": chosen_url, "status": chosen_status, "host": host or ""},
-                    "siblings": siblings,
-                    "replace": replace,
-                    "session_id": self.session_id,
-                    "group_id": group_id,
-                    "total_groups": total_groups,
-                    "idx": 1,  # index within current loop — cosmetic for logs/UI
-                    "scope_hosts": sorted(allowed),
+            # تحضير استبدال تلقائي (يحترم الـACK)
+            group_id = ""
+            do_replace = self.auto_replace and bool(selected_ids)
+            if do_replace:
+                group_id = uuid.uuid4().hex
+                self.awaiting_ack[(self.session_id, group_id)] = {
+                    "container_url": container_url,
+                    "remove_ids": all_ids,  # هنمسح الكل بعد ما الـGUI تأكد
                     "row": row_idx,
-                })
+                }
 
-                if replace:
-                    self._rows += 1
-                    self._replaced += 1
+            # باكدج للـGUI (نوع=container) لو الـGUI محتاجه
+            self.progress.emit({
+                "type": "container",
+                "container_url": container_url,
+                "final_url": chosen_url,
+                "chosen": {"url": chosen_url, "status": chosen_status, "host": picked or ""},
+                "siblings": siblings,
+                "replace": do_replace,
+                "session_id": self.session_id,
+                "group_id": group_id,
+                "idx": idx,
+                "total_groups": len(self.container_urls),
+                "row": row_idx,
+            })
 
-                # If no replace, tidy up just this container’s items (optional)
-                if not replace and all_ids:
-                    try:
-                        self.jd.remove_links(all_ids)
-                    except Exception:
-                        pass
+            # Optional: شغل فحص للأUNKNOWN
+            unknown_ids = [it.get("uuid") for it in selected if self._availability(it) == "UNKNOWN" and it.get("uuid")]
+            self._safe_start_online_check(unknown_ids)
 
-                # Done with this container
-                pending.discard(container_key)
-                processed.add(container_key)
+            # في نهاية الكونتينر ده: نظّف كل حاجة قبل ما تنتقل للي بعده
+            try:
+                self.jd.remove_all_from_linkgrabber()
+                log.debug("SESSION STEP CLEAR | session=%s | idx=%d", self.session_id, idx)
+            except Exception:
+                pass
 
-            # still pending? give JD a tick
-            if pending:
-                time.sleep(self.poll_interval)
-
-        # Auto-cleanup for any pending ACKs to avoid LinkGrabber clutter
+        # Auto cleanup لأي pending ACKs (لو الـGUI ما بعتتش ACK لأي سبب)
         for key, info in list(self.awaiting_ack.items()):
             ids = info.get("remove_ids") or []
             if not ids:
                 continue
             try:
                 rc = self.jd.remove_links(ids)
-                log.debug(
-                    "AUTO CLEANUP | session=%s | row=%s | removed=%d | rc=%s",
-                    self.session_id,
-                    info.get("row"),
-                    len(ids),
-                    rc if rc is not None else 200,
-                )
+                log.debug("AUTO CLEANUP | session=%s | row=%s | removed=%d | rc=%s",
+                          self.session_id, info.get("row"), len(ids), rc if rc is not None else 200)
             except Exception as e:
+                log.warning("AUTO CLEANUP failed for container=%s: %s", info.get("container_url"), e)
+        self.awaiting_ack.clear()
 
-                log.warning("Auto cleanup failed: %s", e)
-        # If both containers and directs were provided, now process the direct URLs
-        if self.container_urls and self.direct_urls:
-            try:
-                ok = self.jd.add_links_to_linkgrabber(
-                    self.direct_urls, start_check=True, package_name=self.package_name
-                )
-            except TypeError:
-                ok = self.jd.add_links_to_linkgrabber(self.direct_urls, start_check=True)
-            if ok:
-                time.sleep(2)
-                t0 = time.time()
-                stable_hits = 0
-                last_count: int | None = None
-                while time.time() - t0 < self.poll_timeout:
-                    if self.cancel_event.is_set():
-                        self.finished.emit({"session_id": self.session_id})
-                        return
-                    items = self._query_links_scoped()
-                    curr_count = len(items)
-                    if curr_count == last_count:
-                        stable_hits += 1
-                    else:
-                        stable_hits = 0
-                    last_count = curr_count
-                    all_resolved = curr_count > 0 and all(
-                        (it.get("availability") or "").upper() in ("ONLINE", "OFFLINE")
-                        for it in items
-                    )
-                    if stable_hits >= MAX_STABLE_POLLS or all_resolved:
-                        log.debug(
-                            "LinkCheckWorker: poll count=%d (stable=%d)",
-                            curr_count,
-                            stable_hits,
-                        )
-                        break
-                    time.sleep(self.poll_interval)
-
-                items = self._query_links_scoped()
-                self._process_direct_batch(items, allowed_direct, scope_rows)
-            else:
-                log.warning("Failed to add direct links to LinkGrabber in mixed run")
-
-
-        # Final safety cleanup: remove any leftover links from this session's package
+        # Final clear
         try:
-            remaining = self.jd.query_links(package_uuid=self.package_uuid) or []
-        except TypeError:
-            remaining = self.jd.query_links() or []
-            leftover_ids = [it.get("uuid") for it in remaining if it.get("uuid")]
-            if leftover_ids:
-                self.jd.remove_links(leftover_ids)
-            log.debug(
-                "SESSION FINALIZE | session=%s | removed=%d",
-                self.session_id,
-                len(leftover_ids),
-            )
-        except Exception as e:
-            log.warning("SESSION FINALIZE clear failed: %s", e)
+            self.jd.remove_all_from_linkgrabber()
+            log.debug("SESSION FINALIZE | session=%s | linkgrabber_cleared=1", self.session_id)
+        except Exception:
+            pass
 
         log.info(
             "SUMMARY | session=%s | rows=%d | replaced=%d | online=%d | offline=%d | unknown=%d | cancelled=%s | dur=%.3f",
-            self.session_id,
-            self._rows,
-            self._replaced,
-            self._c_online,
-            self._c_offline,
-            self._c_unknown,
-            False,
-            time.monotonic() - self._start_time,
+            self.session_id, self._rows, self._replaced, self._c_online, self._c_offline, self._c_unknown,
+            False, time.monotonic() - self._start_time,
         )
-
         self.finished.emit({"session_id": self.session_id})

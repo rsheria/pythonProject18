@@ -3291,20 +3291,20 @@ class ForumBotGUI(QMainWindow):
             if not row_urls:
                 continue
 
-            for cu in row_containers:
-                visible_scope[cu] = {
-                    "urls": row_urls,
-                    "hosts": sorted(hosts),
-                    "row": row,
-                }
-            for links in row_host_links.values():
-                for u in links:
-                    visible_scope[u] = {
+            if row_containers:
+                for cu in row_containers:
+                    visible_scope[cu] = {
                         "urls": row_urls,
                         "hosts": sorted(hosts),
                         "row": row,
                     }
-
+            else:
+                key = f"row:{row}"
+                visible_scope[key] = {
+                    "urls": row_urls,
+                    "hosts": sorted(hosts),
+                    "row": row,
+                }
 
         return direct_urls, container_urls, visible_scope
     def _get_myjd_credentials(self):
@@ -5932,12 +5932,33 @@ class ForumBotGUI(QMainWindow):
             logging.warning(f"Thread '{thread_title}' not found in category '{category_name}'")
 
     def replace_links(self, thread_title, category_name):
-        """Clear existing links and prompt user to add a new manual link or create a folder."""
+        """Clear existing links (root + latest version) then prompt user for next action, and refresh the UI immediately."""
         try:
-            if category_name in self.process_threads and thread_title in self.process_threads[category_name]:
-                self.process_threads[category_name][thread_title]['links'] = {}
-                self.save_process_threads_data()
+            # نظّف الروابط من الجذر ومن آخر نسخة (لو موجودة)
+            info = (self.process_threads.get(category_name, {}) or {}).get(thread_title)
+            if info is not None:
+                # 1) الجذر
+                try:
+                    info.setdefault('links', {})
+                    info['links'].clear()
+                except Exception:
+                    pass
 
+                # 2) آخر نسخة فى versions (لو متاحة)
+                try:
+                    versions_list = info.get('versions', [])
+                    if versions_list:
+                        latest_version = versions_list[-1]
+                        latest_version.setdefault('links', {})
+                        latest_version['links'].clear()
+                except Exception:
+                    pass
+
+                # حفظ + تحديث الجدول فورًا عشان الواجهة والـ scope يتنضفوا حالًا
+                self.save_process_threads_data()
+                self.populate_process_threads_table(self.process_threads)
+
+            # نفس الدايالوج القديم
             msg_box = QtMessageBox(self)
             msg_box.setWindowTitle("Replace Links")
             msg_box.setText(
@@ -7254,149 +7275,229 @@ class ForumBotGUI(QMainWindow):
                 self.create_manual_folder(thread_title, from_section, category)
 
     def add_manual_link(self, thread_title, from_section, category):
-        """Allow user to manually add a download link for a thread."""
+        """Allow user to manually add one or more download links for a thread (multi-line paste)."""
         from PyQt5.QtWidgets import (QComboBox, QDialog, QHBoxLayout,
-                                     QInputDialog, QLabel, QLineEdit,
-                                     QPushButton, QVBoxLayout)
-        
-        # Create custom dialog for adding manual link
+                                     QInputDialog, QLabel, QPlainTextEdit,
+                                     QPushButton, QVBoxLayout, QMessageBox)
+        import re
+
+        # Dialog
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"Add Manual Link - {thread_title}")
+        dialog.setWindowTitle(f"Add Manual Link(s) - {thread_title}")
         dialog.setModal(True)
-        dialog.resize(500, 200)
-        
+        dialog.resize(600, 320)
+
         layout = QVBoxLayout(dialog)
-        
+
         # Thread title label
         title_label = QLabel(f"Thread: {thread_title}")
-        title_label.setStyleSheet("font-weight: bold; margin-bottom: 10px;")
         layout.addWidget(title_label)
-        
-        # Host selection
+
+        # Host selector
         host_layout = QHBoxLayout()
-        host_layout.addWidget(QLabel("File Host:"))
+        host_layout.addWidget(QLabel("Host:"))
         host_combo = QComboBox()
-        # Populate combo with the currently active upload hosts so user settings
-        # are respected. Fall back to common defaults if list is empty.
-        combo_hosts = [
-            h if h != "rapidgator" else "rapidgator.net" for h in self.active_upload_hosts
-        ]
-        if not combo_hosts:
-            combo_hosts = ["rapidgator.net", "katfile.com", "nitroflare.com", "ddownload.com"]
-        if "rapidgator-backup" in self.active_upload_hosts and "rapidgator-backup" not in combo_hosts:
+
+        # قائمة المضيفين المعروفة + other
+        combo_hosts = []
+        try:
+            combo_hosts = list(getattr(self.bot, "known_file_hosts", []) or [])
+        except Exception:
+            combo_hosts = []
+
+        # ضمان وجود أشهر المضيفين مرة واحدة فقط
+        base_hosts = ["rapidgator.net", "nitroflare.com", "ddownload.com", "turbobit.net", "mega.nz",
+                      "filespayouts.com", "katfile.com", "uploady.io", "f2h.io", "xup.in"]
+        for h in base_hosts:
+            if h not in combo_hosts:
+                combo_hosts.append(h)
+        # دعم بعض المسميات الشائعة فى الإعدادات
+        if "rapidgator" in combo_hosts and "rapidgator.net" not in combo_hosts:
+            combo_hosts.append("rapidgator.net")
+        if "nitroflare" in combo_hosts and "nitroflare.com" not in combo_hosts:
+            combo_hosts.append("nitroflare.com")
+        if "ddownload" in combo_hosts and "ddownload.com" not in combo_hosts:
+            combo_hosts.append("ddownload.com")
+        if "rg.to" in combo_hosts and "rapidgator.net" not in combo_hosts:
+            combo_hosts.append("rapidgator.net")
+        if "rapidgator-backup" not in combo_hosts:
             combo_hosts.append("rapidgator-backup")
-        host_combo.addItems(combo_hosts + ["other"])
+
+        # إزالة التكرارات مع الحفاظ على الترتيب
+        seen = set()
+        ordered_hosts = []
+        for h in combo_hosts:
+            if h not in seen and isinstance(h, str) and h.strip():
+                seen.add(h)
+                ordered_hosts.append(h)
+
+        host_combo.addItems(ordered_hosts + ["other"])
         host_layout.addWidget(host_combo)
         layout.addLayout(host_layout)
-        
-        # Link input
-        link_layout = QHBoxLayout()
-        link_layout.addWidget(QLabel("Download Link:"))
-        link_input = QLineEdit()
-        link_input.setPlaceholderText("Enter the download link here...")
+
+        # Multi-line links input
+        link_layout = QVBoxLayout()
+        link_layout.addWidget(QLabel("Download Links (one per line):"))
+        link_input = QPlainTextEdit()
+        link_input.setPlaceholderText(
+            "Paste one or more links here...\nExample:\nhttps://rapidgator.net/file/AAA\nhttps://rapidgator.net/file/BBB")
+        link_input.setTabChangesFocus(True)
         link_layout.addWidget(link_input)
         layout.addLayout(link_layout)
-        
+
         # Buttons
-        button_layout = QHBoxLayout()
-        add_btn = QPushButton("Add Link")
+        btn_layout = QHBoxLayout()
+        add_btn = QPushButton("Add")
         cancel_btn = QPushButton("Cancel")
-        button_layout.addWidget(add_btn)
-        button_layout.addWidget(cancel_btn)
-        layout.addLayout(button_layout)
-        
-        # Connect buttons
+        btn_layout.addWidget(add_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+        # Helpers
+        def _canon_host(h: str) -> str:
+            h = (h or "").strip().lower()
+            if h.startswith("www."):
+                h = h[4:]
+            alias = {
+                "rg.to": "rapidgator.net",
+                "rapidgator": "rapidgator.net",
+                "nitroflare": "nitroflare.com",
+                "ddownload": "ddownload.com",
+                "turbobit": "turbobit.net",
+            }
+            return alias.get(h, h)
+
+        def _extract_urls(text: str) -> list:
+            # ناخد بس الروابط الصحيحة http/https ونحافظ على ترتيبها ونشيل التكرارات
+            urls = re.findall(r"https?://[^\s<>\"']+", text or "")
+            uniq, seen = [], set()
+            for u in urls:
+                u = u.strip()
+                if u and u not in seen:
+                    seen.add(u)
+                    uniq.append(u)
+            return uniq
+
+        def _unique_extend(dst_list: list, to_add: list) -> list:
+            # بيدمج بدون تكرار مع الحفاظ على ترتيب الموجود ثم الجديد
+            seen = set(dst_list)
+            for x in to_add:
+                if x not in seen:
+                    dst_list.append(x)
+                    seen.add(x)
+            return dst_list
+
         def add_link():
-            host = host_combo.currentText()
-            link = link_input.text().strip()
-            if not link:
-                QMessageBox.warning(dialog, "Invalid Input", "Please enter a download link.")
+            chosen_host = host_combo.currentText().strip()
+            raw = link_input.toPlainText()
+            urls = _extract_urls(raw)
+            if not urls:
+                QMessageBox.warning(dialog, "Invalid Input", "Please paste at least one valid URL.")
                 return
 
-            # If user selected "other", automatically extract host from URL
-            if host == "other":
-                parsed = re.findall(r"https?://(?:www\.)?([^/]+)/", link)
-                if parsed:
-                    host = parsed[0].lower()
-                else:
-                    host = "other"
-
-            # Normalize host by stripping leading 'www.'
-            if host:
-                host = re.sub(r"^www\.", "", host.lower())
-
-            # If user selected "other", automatically extract host from URL
-            if host == "other":
-                parsed = re.findall(r"https?://([^/]+)/", link)
-                if parsed:
-                    host = parsed[0].lower()
-                else:
-                    host = "other"
-            # Add link to thread data
-            if from_section == 'Process Threads' and category:
+            # تأكيد وجود مكان التخزين
+            try:
                 if category not in self.process_threads:
                     self.process_threads[category] = {}
                 if thread_title not in self.process_threads[category]:
                     self.process_threads[category][thread_title] = {'links': {}}
-                
-                # Add the link to the root level structure
-                if 'links' not in self.process_threads[category][thread_title]:
-                    self.process_threads[category][thread_title]['links'] = {}
-                if host not in self.process_threads[category][thread_title]['links']:
-                    self.process_threads[category][thread_title]['links'][host] = []
-                
-                self.process_threads[category][thread_title]['links'][host].append(link)
+                thread_info = self.process_threads[category][thread_title]
+                thread_info.setdefault('links', {})
 
-                # Also update the latest version if versions tracking is used
-                versions_list = self.process_threads[category][thread_title].get('versions', [])
+                # Map: host -> list(urls)
+                host_to_urls = {}
+
+                if chosen_host != "other":
+                    # ضيف الكل تحت المضيف المختار مباشرة
+                    host_to_urls[_canon_host(chosen_host)] = urls
+                else:
+                    # Auto-detect لكل لينك
+                    from urllib.parse import urlsplit
+                    for u in urls:
+                        host = _canon_host(urlsplit(u).hostname or "")
+                        if not host:
+                            host = "other"
+                        host_to_urls.setdefault(host, []).append(u)
+
+                # تحديث الجذر + آخر نسخة (لو موجودة)
+                versions_list = thread_info.get('versions', [])
+                latest_links = None
                 if versions_list:
                     latest_version = versions_list[-1]
                     latest_links = latest_version.setdefault('links', {})
-                    latest_links.setdefault(host, [])
-                    latest_links[host].append(link)
 
-                # Dynamically add new host to bot known hosts for future support
-                if host != "other" and host not in self.bot.known_file_hosts:
-                    self.bot.known_file_hosts.append(host)
-                    logging.info(f"🆕 Added new host to known hosts: {host}")
-                    # Also append to download hosts priority at the bottom
-                    try:
-                        if self.user_manager.get_current_user():
-                            priority = self.user_manager.get_user_setting(
-                                'download_hosts_priority', []
-                            )
-                        else:
-                            priority = self.config.get('download_hosts_priority', [])
-                        if host not in priority:
-                            priority.append(host)
-                            if self.user_manager.get_current_user():
-                                self.user_manager.set_user_setting('download_hosts_priority', priority)
+                added_total = 0
+                affected_hosts = []
+
+                for host, lst in host_to_urls.items():
+                    if host not in thread_info['links']:
+                        thread_info['links'][host] = []
+                    before = len(thread_info['links'][host])
+                    thread_info['links'][host] = _unique_extend(thread_info['links'][host], lst)
+                    after = len(thread_info['links'][host])
+                    added = after - before
+                    if added > 0:
+                        added_total += added
+                        affected_hosts.append(host)
+
+                    if latest_links is not None:
+                        latest_links.setdefault(host, [])
+                        latest_links[host] = _unique_extend(latest_links[host], lst)
+
+                    # إضافة المضيف لقائمة known_file_hosts و priority لو مش موجود
+                    if host != "other":
+                        try:
+                            if host not in getattr(self.bot, "known_file_hosts", []):
+                                self.bot.known_file_hosts.append(host)
+                                logging.info(f"🆕 Added new host to known hosts: {host}")
+                            # ضيف للمفضلة (الأولوية) لو مش موجود
+                            if hasattr(self, 'user_manager') and self.user_manager.get_current_user():
+                                priority = self.user_manager.get_user_setting('download_hosts_priority', [])
+                                if host not in priority:
+                                    priority.append(host)
+                                    self.user_manager.set_user_setting('download_hosts_priority', priority)
+                                    if hasattr(self, 'settings_tab') and hasattr(self.settings_tab,
+                                                                                 'append_host_to_priority'):
+                                        self.settings_tab.append_host_to_priority(host)
                             else:
-                                self.config['download_hosts_priority'] = priority
-                                from config.config import save_configuration
-                                save_configuration(self.config)
-                            if hasattr(self, 'settings_tab') and hasattr(self.settings_tab, 'append_host_to_priority'):
-                                self.settings_tab.append_host_to_priority(host)
-                            logging.info(f"📥 Priority updated with new host: {host}")
-                    except Exception as e:
-                        logging.error(f"Failed to update priority with host {host}: {e}")
-                # Save data
+                                pr = self.config.get('download_hosts_priority', [])
+                                if host not in pr:
+                                    pr.append(host)
+                                    self.config['download_hosts_priority'] = pr
+                                    from config.config import save_configuration
+                                    save_configuration(self.config)
+                                    if hasattr(self, 'settings_tab') and hasattr(self.settings_tab,
+                                                                                 'append_host_to_priority'):
+                                        self.settings_tab.append_host_to_priority(host)
+                        except Exception as e:
+                            logging.error(f"Failed to update known hosts/priority for {host}: {e}")
+
+                # حفظ + تحديث الجدول فورًا
                 self.save_process_threads_data()
-                
-                # Refresh UI to show the manual link immediately
                 self.populate_process_threads_table(self.process_threads)
-                
-                QMessageBox.information(dialog, "Success", f"Link added successfully to {host}!")
-                logging.info(f"Manual link added for thread '{thread_title}' in category '{category}': {host} -> {link}")
-                dialog.accept()
-            else:
-                QMessageBox.warning(dialog, "Error", "Could not add link to this thread.")
-        
+
+                if added_total > 0:
+                    if chosen_host != "other":
+                        QMessageBox.information(dialog, "Success", f"Added {added_total} link(s) to {chosen_host}.")
+                    else:
+                        QMessageBox.information(dialog, "Success",
+                                                f"Added {added_total} link(s) to: {', '.join(affected_hosts)}")
+                    logging.info(
+                        f"Manual links added for thread '{thread_title}' in '{category}': total={added_total}, hosts={affected_hosts or [chosen_host]}")
+                    dialog.accept()
+                else:
+                    QMessageBox.information(dialog, "No Change", "All pasted links already exist.")
+                    dialog.reject()
+
+            except Exception as e:
+                logging.error(f"add_manual_link failed: {e}", exc_info=True)
+                QMessageBox.critical(dialog, "Error", f"Failed to add links: {e}")
+
         add_btn.clicked.connect(add_link)
         cancel_btn.clicked.connect(dialog.reject)
-        
+
         dialog.exec_()
-    
+
     def create_manual_folder(self, thread_title, from_section, category):
         """Create a download folder for manually downloaded files using thread_id for consistent naming."""
         import os
