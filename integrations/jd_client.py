@@ -271,6 +271,7 @@ class JDClient:
             ("/downloadsV2/abort", []),
             ("/downloadcontroller/stop", []),
             ("/downloadcontroller/abort", []),
+            ("/toolbar/stopDownloads", []),
         ]:
             try:
                 self.device.action(ep, body)
@@ -290,7 +291,7 @@ class JDClient:
             return True
         except Exception:
             pass
-        # Fallback: enumerate packages and remove
+        # Fallback: enumerate packages and disable/remove
         pkg_ids = []
         try:
             pkgs = self.device.action("/downloadsV2/queryPackages", [{"uuid": True}]) or []
@@ -304,6 +305,14 @@ class JDClient:
             if uid:
                 pkg_ids.append(uid)
         if pkg_ids:
+            try:
+                self.device.action(
+                    "/downloadsV2/setEnabled",
+                    [{"packageUUIDs": pkg_ids, "enabled": False}],
+                )
+                log.debug("JD.clear_downloads: disabled %d packages", len(pkg_ids))
+            except Exception:
+                pass
             try:
                 self.device.action("/downloadsV2/removePackages", [{"packageUUIDs": pkg_ids}])
                 log.debug("JD.clear_downloads: removed %d packages", len(pkg_ids))
@@ -333,6 +342,13 @@ class JDClient:
         try:
             if self.remove_all_from_linkgrabber():
                 ok = True
+        except Exception:
+            pass
+        try:
+            self.device.downloads.cleanup(
+                "DELETE_FINISHED", "REMOVE_LINKS_AND_DELETE_FILES", "ALL"
+            )
+            ok = True
         except Exception:
             pass
         return ok
