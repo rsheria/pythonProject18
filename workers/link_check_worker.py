@@ -397,7 +397,7 @@ class LinkCheckWorker(QtCore.QThread):
         if self.cancel_event.is_set():
             log.debug("CANCEL REQUEST | session=%s", self.session_id)
             try:
-                self.jd.abort_linkgrabber()
+                self.jd.stop_and_clear()
             except Exception:
                 pass
             self.finished.emit({"session_id": self.session_id})
@@ -424,7 +424,7 @@ class LinkCheckWorker(QtCore.QThread):
                 if self.cancel_event.is_set():
                     # إيقاف فوري لـ JD
                     try:
-                        self.jd.abort_linkgrabber()
+                        self.jd.stop_and_clear()
                     except Exception:
                         pass
                     return []
@@ -449,7 +449,7 @@ class LinkCheckWorker(QtCore.QThread):
             if self.cancel_event.is_set():
                 log.debug("CANCEL REQUEST | session=%s", self.session_id)
                 try:
-                    self.jd.abort_linkgrabber()
+                    self.jd.stop_and_clear()
                 except Exception:
                     pass
                 self.finished.emit({"session_id": self.session_id})
@@ -464,7 +464,7 @@ class LinkCheckWorker(QtCore.QThread):
             if self.cancel_event.is_set():
                 log.debug("CANCEL REQUEST | session=%s", self.session_id)
                 try:
-                    self.jd.abort_linkgrabber()
+                    self.jd.stop_and_clear()
                 except Exception:
                     pass
                 self.finished.emit({"session_id": self.session_id})
@@ -484,7 +484,7 @@ class LinkCheckWorker(QtCore.QThread):
             if self.cancel_event.is_set():
                 log.debug("CANCEL REQUEST | session=%s", self.session_id)
                 try:
-                    self.jd.abort_linkgrabber()
+                    self.jd.stop_and_clear()
                 except Exception:
                     pass
                 self.finished.emit({"session_id": self.session_id})
@@ -498,7 +498,7 @@ class LinkCheckWorker(QtCore.QThread):
             if self.cancel_event.is_set():
                 log.debug("CANCEL REQUEST | session=%s", self.session_id)
                 try:
-                    self.jd.abort_linkgrabber()
+                    self.jd.stop_and_clear()
                 except Exception:
                     pass
                 self.finished.emit({"session_id": self.session_id})

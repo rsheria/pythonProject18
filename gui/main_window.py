@@ -80,7 +80,7 @@ from utils.host_priority import (
 from utils.link_cache import persist_link_replacement
 from utils.link_summary import LinkCheckSummary
 from workers.login_thread import LoginThread
-from integrations.jd_client import JDClient
+from integrations.jd_client import JDClient, stop_and_clear_jdownloader
 from workers.link_check_worker import LinkCheckWorker, CONTAINER_HOSTS, is_container_host
 RG_RE = re.compile(r"^/file/([A-Za-z0-9]+)(?:/.*)?$")
 NF_RE = re.compile(r"^/view/([A-Za-z0-9]+)(?:/.*)?$")
@@ -3549,7 +3549,10 @@ class ForumBotGUI(QMainWindow):
                 "CANCEL REQUEST | session=%s", getattr(self.link_check_worker, "session_id", "")
             )
             self.statusBar().showMessage("تم طلب إلغاء فحص الروابط…")
-
+            try:
+                stop_and_clear_jdownloader(self.config)
+            except Exception:
+                pass
     def _on_link_progress(self, payload: dict):
         cache = getattr(self, "_link_check_cache", None)
         if cache is None:
@@ -4344,7 +4347,11 @@ class ForumBotGUI(QMainWindow):
         """🔒 Cancel downloads and release session lock"""
         if self.download_worker:
             self.download_worker.cancel_downloads()
-        
+
+        try:
+            stop_and_clear_jdownloader(self.config)
+        except Exception:
+            pass
         # 🔓 Release download lock when cancelled
         if hasattr(self, '_download_in_progress'):
             self._download_in_progress = False
@@ -4938,6 +4945,11 @@ class ForumBotGUI(QMainWindow):
                     pass
 
             self.statusBar().showMessage("Auto process cancelled.")
+            try:
+                stop_and_clear_jdownloader(self.config)
+            except Exception:
+                pass
+
         finally:
             if hasattr(self, "cancel_auto_button"):
                 self.cancel_auto_button.setEnabled(False)

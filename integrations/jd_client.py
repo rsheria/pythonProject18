@@ -1,6 +1,7 @@
 # integrations/jd_client.py
 # -*- coding: utf-8 -*-
 import logging
+import os
 from typing import List, Iterable, Optional
 
 try:
@@ -144,7 +145,13 @@ class JDClient:
                 "packageUUID": True,
                 "uuid": True,
             }
-            res = self.device.action("/linkgrabberv2/queryLinks", [query]) or []
+            try:
+                res = self.device.action("/linkgrabberv2/queryLinks", [query]) or []
+            except Exception:
+                try:
+                    res = self.device.linkgrabberv2.query_links(query) or []
+                except Exception:
+                    res = []
             if isinstance(res, dict):
                 res = [res]
             log.debug("JD.query_links (raw): %d items", len(res))
@@ -253,3 +260,118 @@ class JDClient:
                 self.remove_links(ids)
                 ok = True
         return ok
+    # ====== إيقاف التحميلات ومسح قوائم التحميل والـ LinkGrabber ======
+    def stop_all_downloads(self) -> bool:
+        """حاول إيقاف كل التحميلات الجارية."""
+        if not self.device:
+            return False
+        ok = False
+        for ep, body in [
+            ("/downloadsV2/stop", []),
+            ("/downloadsV2/abort", []),
+            ("/downloadcontroller/stop", []),
+            ("/downloadcontroller/abort", []),
+        ]:
+            try:
+                self.device.action(ep, body)
+                log.debug("JD.stop_downloads: called %s", ep)
+                ok = True
+            except Exception:
+                pass
+        return ok
+
+    def clear_download_list(self) -> bool:
+        """إزالة كل العناصر من قائمة التحميلات."""
+        if not self.device:
+            return False
+        try:
+            self.device.action("/downloadsV2/clearList", [])
+            log.debug("JD.clear_downloads: cleared via /downloadsV2/clearList")
+            return True
+        except Exception:
+            pass
+        # Fallback: enumerate packages and remove
+        pkg_ids = []
+        try:
+            pkgs = self.device.action("/downloadsV2/queryPackages", [{"uuid": True}]) or []
+        except Exception:
+            try:
+                pkgs = self.device.downloads.query_packages() or []
+            except Exception:
+                pkgs = []
+        for p in pkgs:
+            uid = p.get("uuid") or p.get("packageUUID")
+            if uid:
+                pkg_ids.append(uid)
+        if pkg_ids:
+            try:
+                self.device.action("/downloadsV2/removePackages", [{"packageUUIDs": pkg_ids}])
+                log.debug("JD.clear_downloads: removed %d packages", len(pkg_ids))
+                return True
+            except Exception:
+                try:
+                    self.device.downloads.remove_packages(pkg_ids)
+                    return True
+                except Exception:
+                    pass
+        log.debug("JD.clear_downloads: nothing to remove")
+        return False
+
+    def stop_and_clear(self) -> bool:
+        """أوقف التحميلات ونظف قوائم التحميل و الـ LinkGrabber"""
+        ok = False
+        try:
+            if self.stop_all_downloads():
+                ok = True
+        except Exception:
+            pass
+        try:
+            if self.clear_download_list():
+                ok = True
+        except Exception:
+            pass
+        try:
+            if self.remove_all_from_linkgrabber():
+                ok = True
+        except Exception:
+            pass
+        return ok
+
+
+def stop_and_clear_jdownloader(config: Optional[dict] = None) -> None:
+    """Helper to stop running downloads and clear all JD lists."""
+    cfg = config or {}
+    email = (
+        cfg.get("myjd_email")
+        or cfg.get("jdownloader_email")
+        or os.getenv("MYJD_EMAIL")
+        or os.getenv("JDOWNLOADER_EMAIL", "")
+    )
+    password = (
+        cfg.get("myjd_password")
+        or cfg.get("jdownloader_password")
+        or os.getenv("MYJD_PASSWORD")
+        or os.getenv("JDOWNLOADER_PASSWORD", "")
+    )
+    device = (
+        cfg.get("myjd_device")
+        or cfg.get("jdownloader_device")
+        or os.getenv("MYJD_DEVICE")
+        or os.getenv("JDOWNLOADER_DEVICE", "")
+    )
+    app_key = (
+        cfg.get("myjd_app_key")
+        or cfg.get("jdownloader_app_key")
+        or os.getenv("MYJD_APP_KEY")
+        or os.getenv("JDOWNLOADER_APP_KEY", "PyForumBot")
+    )
+
+    if not email or not password:
+        return
+
+    jd = JDClient(email, password, device, app_key)
+    if jd.connect():
+        try:
+            jd.stop_and_clear()
+        except Exception:
+            pass

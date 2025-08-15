@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QStyleOptionProgressBar,
     QPushButton,
 )
-
+from integrations.jd_client import stop_and_clear_jdownloader
 from .status_model import StatusTableModel
 class ProgressBarDelegate(QStyledItemDelegate):
     """Display integer progress values as a green progress bar."""
@@ -70,5 +70,9 @@ class StatusWidget(QWidget):
             worker.progress_update.connect(self.model.upsert)
 
     def on_cancel_clicked(self) -> None:
-            """Signal the running worker to cancel."""
-            self.cancel_event.set()
+        """Signal the running worker to cancel and clean JDownloader."""
+        self.cancel_event.set()
+        try:
+            stop_and_clear_jdownloader()
+        except Exception:
+            pass

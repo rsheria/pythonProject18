@@ -21,7 +21,7 @@ from downloaders.rapidgator import RapidgatorDownloader
 from models.operation_status import OperationStatus, OpStage, OpType
 
 from .worker_thread import WorkerThread
-
+from integrations.jd_client import stop_and_clear_jdownloader
 
 def get_downloader_for(url: str, bot):
     """
@@ -332,7 +332,10 @@ class DownloadWorker(QThread):
                         
         except Exception as e:
             logging.warning(f"⚠️ Error during download cleanup: {e}")
-
+        try:
+            stop_and_clear_jdownloader(getattr(self.bot, "config", None))
+        except Exception:
+            logging.exception("JDownloader cleanup failed during cancel")
     def initialize_download_queue(self):
         logging.debug("Selected rows: %s", self.selected_rows)
         logging.debug("Available categories: %s", list(self.gui.process_threads.keys()))

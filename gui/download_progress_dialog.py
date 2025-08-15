@@ -9,6 +9,7 @@ from PyQt5.QtCore import Qt, pyqtSignal
 
 from HostDownloadWidget import HostDownloadWidget
 
+from integrations.jd_client import stop_and_clear_jdownloader
 class DownloadProgressDialog(QDialog):
     """
     A multi-file download progress dialog that displays:
@@ -84,7 +85,10 @@ class DownloadProgressDialog(QDialog):
 
     def on_cancel_clicked(self):
         self.cancel_clicked.emit()
-
+        try:
+            stop_and_clear_jdownloader()
+        except Exception:
+            pass
     def create_file_widget(self, link_id: str, file_name: str):
         """
         Slot called by the worker's file_created signal => create the HostDownloadWidget for this link.
