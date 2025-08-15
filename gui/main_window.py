@@ -3291,20 +3291,20 @@ class ForumBotGUI(QMainWindow):
             if not row_urls:
                 continue
 
-            if row_containers:
-                for cu in row_containers:
-                    visible_scope[cu] = {
-                        "urls": row_urls,
-                        "hosts": sorted(hosts),
-                        "row": row,
-                    }
-            else:
-                key = f"row:{row}"
-                visible_scope[key] = {
+            for cu in row_containers:
+                visible_scope[cu] = {
                     "urls": row_urls,
                     "hosts": sorted(hosts),
                     "row": row,
                 }
+            for links in row_host_links.values():
+                for u in links:
+                    visible_scope[u] = {
+                        "urls": row_urls,
+                        "hosts": sorted(hosts),
+                        "row": row,
+                    }
+
 
         return direct_urls, container_urls, visible_scope
     def _get_myjd_credentials(self):
