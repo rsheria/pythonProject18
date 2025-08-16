@@ -24,40 +24,49 @@ def hard_cancel(post, logger=None):
             warn(f"JD POST failed: {path} -> {e}")
             return None
 
-    log("🛑 Hard-cancel JD: stop/remove/clear")
+    attempt = 0
+    while attempt < 3:
+        attempt += 1
+        log(f"🛑 Hard-cancel JD: stop/remove/clear (try {attempt})")
 
-    # 1) أوقف التحميلات الجارية
-    if _call("downloadcontroller/stop", []) is None:
-        return False
-    if _call("toolbar/stopDownloads", []) is None:
-        return False
-
-    # 2) استرجع كل الـ link IDs الحالية ثم احذفها
-    links = _call("downloadsV2/queryLinks", [{"maxResults": -1, "uuid": True, "status": True}])
-    if links is None:
-        return False
-    link_ids = [l.get("uuid") for l in (links or []) if l.get("uuid")]
-
-    if link_ids:
-        if _call("downloadsV2/removeLinks", [link_ids, None]) is None:
+        # 1) أوقف التحميلات الجارية
+        if _call("downloadcontroller/stop", []) is None:
             return False
-        log(f"🧹 Removed {len(link_ids)} active JD links")
+        if _call("toolbar/stopDownloads", []) is None:
+            return False
 
-    # 3) امسح الـ LinkGrabber
-    if _call("linkgrabberv2/abort", []) is None:
-        return False
-    if _call("linkgrabberv2/clearList", []) is None:
-        return False
+        # 2) استرجع كل الـ link IDs الحالية ثم احذفها
+        links = _call("downloadsV2/queryLinks", [{"maxResults": -1, "uuid": True}])
+        if links is None:
+            return False
+        link_ids = [l.get("uuid") for l in (links or []) if l.get("uuid")]
 
-    # 4) تحقق من أن القوائم أصبحت فارغة قبل المتابعة
-    left_links = _call("downloadsV2/queryLinks", [{"maxResults": 1, "uuid": True}]) or []
-    left_pkgs = _call("linkgrabberv2/queryPackages", [{"packageUUIDs": True}]) or []
-    if left_links or left_pkgs:
-        warn("JD not clean after hard cancel")
-        return False
+        if link_ids:
+            if _call("downloadsV2/removeLinks", [link_ids, None]) is None:
+                return False
+            log(f"🧹 Removed {len(link_ids)} active JD links")
 
-    log("✅ JD hard-cancel done")
-    return True
+        # 3) امسح الـ LinkGrabber
+        if _call("linkgrabberv2/abort", []) is None:
+            return False
+        if _call("linkgrabberv2/clearList", []) is None:
+            return False
+
+        # 4) تحقق من أن القوائم أصبحت فارغة قبل المتابعة
+        left_links = _call("downloadsV2/queryLinks", [{"maxResults": 1, "uuid": True}]) or []
+        pkg_count = _call("linkgrabberv2/getPackageCount", [])
+        if pkg_count is None:
+            return False
+        if left_links or pkg_count:
+            warn("JD not clean after hard cancel; retrying")
+            time.sleep(0.3)
+            continue
+
+        log("✅ JD hard-cancel done")
+        return True
+
+    warn("JD not clean after hard cancel")
+    return False
 
 class JDClient:
     """

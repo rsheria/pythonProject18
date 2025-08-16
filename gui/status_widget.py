@@ -133,9 +133,12 @@ class StatusWidget(QWidget):
             worker = getattr(parent, "download_worker", None)
             if worker and hasattr(worker, "_jd_post") and callable(worker._jd_post):
                 from integrations.jd_client import hard_cancel
-                hard_cancel(worker._jd_post, logger=log)
-                log.info("✅ Local JD hard-cancel done (downloads + linkgrabber cleared).")
-                return  # ما تكملش على السحابة لو المحلي نجح
+                ok = hard_cancel(worker._jd_post, logger=log)
+                if ok:
+                    log.info("✅ Local JD hard-cancel done (downloads + linkgrabber cleared).")
+                    return  # ما تكملش على السحابة لو المحلي نجح
+                else:
+                    log.warning("❌ JD hard-cancel failed to clean device")
         except Exception as e:
             log.debug("Local hard_cancel failed, will try helper/fallback: %s", e)
 
