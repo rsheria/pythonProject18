@@ -167,9 +167,20 @@ class JDownloaderDownloader(BaseDownloader):
         """
         return (JDOWNLOADER_AVAILABLE and 
                 self.email and 
-                self.password and 
+                self.password and
                 self.is_connected)
 
+    def post(self, path: str, payload=None):
+        """Direct POST helper using the active JDownloader device."""
+        try:
+            if not path.startswith("/"):
+                path = "/" + path
+            if payload is None:
+                payload = []
+            return self.device.action(path, payload)
+        except Exception as e:
+            logging.debug(f"JD post failed: {path} -> {e}")
+            return None
     def request_cancel(self):
         """
         يُستدعى عند الضغط على Cancel:
@@ -271,7 +282,12 @@ class JDownloaderDownloader(BaseDownloader):
                 logging.info("⏳ Waited for JDownloader cleanup to complete")
             except Exception as cleanup_error:
                 logging.warning(f"⚠️ Could not clean JDownloader queues: {cleanup_error}")
-            
+
+            # Attach JD direct post to worker for hard cancel capability
+            if hasattr(self, "worker") and hasattr(self.worker, "attach_jd_post"):
+                self.worker.attach_jd_post(self.post)
+                logging.debug("🔗 Attached JD direct post to worker (_jd_post)")
+
             logging.info(f"📥 Starting JDownloader download: {url}")
             
             # Set download directory first if specified

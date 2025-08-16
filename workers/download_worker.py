@@ -632,6 +632,11 @@ class DownloadWorker(QThread):
                 info["completed"] = True
                 return
 
+            # Provide worker reference to downloader for JD hard cancel support
+            try:
+                dl.worker = self
+            except Exception:
+                pass
             # Try calling with download_info first
             try:
                 sig = inspect.signature(dl.download)
