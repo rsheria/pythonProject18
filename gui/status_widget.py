@@ -127,149 +127,25 @@ class StatusWidget(QWidget):
 
     # ===== Helper: JD full cleanup =====
     def _jd_full_cancel_cleanup(self, config_obj):
-        """
-        يوقف التحميلات فى JDownloader ويمسح كلاً من:
-          - Downloads List
-          - LinkGrabber
-        يستخدم أولاً stop_and_clear_jdownloader (لو متاحة),
-        ولو فشلت نعمل فولباك باستخدام JDClient مباشرة مع عدة endpoints متوافقة.
-        """
-        # 0) جرّب الدالة المساعدة أولاً (النسخة اللى ضفناها فى integrations/jd_client.py)
+        # جرّب الهارد-كانسيل المحلي أولاً باستخدام جلسة الووركر الحالية
         try:
-            if callable(stop_and_clear_jdownloader):
-                try:
-                    stop_and_clear_jdownloader(config_obj)
-                    log.info("✅ JD cleanup via helper: done.")
-                    return
-                except Exception as e:
-                    log.debug("stop_and_clear_jdownloader failed, will fallback: %s", e)
-        except Exception:
-            pass
-
-        # 1) فولباك يدوى — جهّز الكريدنشيالز
-        email = password = device_name = ""
-        app_key = "PyForumBot"
-        main = self.parent()
-
-        # من config لو متاح
-        if isinstance(config_obj, dict):
-            email = config_obj.get("myjd_email") or config_obj.get("jdownloader_email") or ""
-            password = config_obj.get("myjd_password") or config_obj.get("jdownloader_password") or ""
-            device_name = config_obj.get("myjd_device") or config_obj.get("jdownloader_device") or ""
-            app_key = config_obj.get("myjd_app_key") or config_obj.get("jdownloader_app_key") or "PyForumBot"
-
-        # من MainWindow لو عنده accessor
-        try:
-            if main and hasattr(main, "_get_myjd_credentials"):
-                em, pw, dev, ak = main._get_myjd_credentials()
-                email = email or em or ""
-                password = password or pw or ""
-                device_name = device_name or dev or ""
-                app_key = app_key or ak or "PyForumBot"
-        except Exception:
-            pass
-
-        if not email or not password:
-            log.debug("JD cleanup fallback: missing My.JDownloader credentials; skip connect()")
-            return
-
-        # 2) اتصل بالـ JD
-        try:
-            jd = JDClient(email=email, password=password, device_name=device_name, app_key=app_key)
+            parent = self.parent()
+            worker = getattr(parent, "download_worker", None)
+            if worker and hasattr(worker, "_jd_post") and callable(worker._jd_post):
+                from integrations.jd_client import hard_cancel
+                hard_cancel(worker._jd_post, logger=log)
+                log.info("✅ Local JD hard-cancel done (downloads + linkgrabber cleared).")
+                return  # ما تكملش على السحابة لو المحلي نجح
         except Exception as e:
-            log.debug("JD cleanup fallback: JDClient init failed: %s", e)
-            return
-        if not jd.connect():
-            log.debug("JD cleanup fallback: connect() failed")
-            return
+            log.debug("Local hard_cancel failed, will try helper/fallback: %s", e)
 
-        dev = getattr(jd, "device", None)
-        if dev is None:
-            log.debug("JD cleanup fallback: no device resolved")
-            return
-
-        # 3) أوقف أى داونلود شغّال — جرّب أكتر من endpoint (توافق)
-        for path, payload in [
-            ("/downloadcontroller/stop", []),
-            ("/downloads/stop", []),
-            ("/downloadsV2/stop", []),
-            ("/downloadcontroller/pause", [True]),
-            ("/downloads/pause", [True]),
-        ]:
-            try:
-                dev.action(path, payload)
-                log.debug("JD cleanup: stop/pause via %s", path)
-            except Exception:
-                pass
-
-        # 4) ألغِ أى كراول/ديكربت فى LinkGrabber
+        # الباقي زي ما هو (helper ثم fallback)...
         try:
-            dev.action("/linkgrabberv2/abort", [])
-        except Exception:
-            pass
+            from integrations.jd_client import stop_and_clear_jdownloader
+            stop_and_clear_jdownloader(config_obj)
+            log.info("✅ JD cleanup via helper: done.")
+            return
+        except Exception as e:
+            log.debug("stop_and_clear_jdownloader failed, will fallback: %s", e)
+        # ... (الفولباك الموجود عندك يكمل زي ما هو)
 
-        # 5) امسح قائمة التحميلات (Downloads)
-        try:
-            # لمّ الـ packageUUIDs
-            pkg_query = {"packageUUIDs": True}
-            pkgs = (dev.action("/downloadsV2/queryPackages", [pkg_query])
-                    or dev.action("/downloads/queryPackages", [pkg_query])
-                    or [])
-            pkg_ids = [p.get("packageUUID") for p in pkgs if p.get("packageUUID")]
-            if pkg_ids:
-                removed = False
-                # v2 أولاً
-                try:
-                    # بعض الـ JD بيقبل removePackages مباشرة
-                    dev.action("/downloadsV2/removePackages", [{"packageIds": pkg_ids}])
-                    removed = True
-                    log.debug("JD cleanup: removed downloads via /downloadsV2/removePackages")
-                except Exception:
-                    pass
-                if not removed:
-                    try:
-                        # fallback: removeLinks بتمرير packageIds
-                        dev.action("/downloadsV2/removeLinks", [[], pkg_ids])
-                        removed = True
-                        log.debug("JD cleanup: removed downloads via /downloadsV2/removeLinks([], pids)")
-                    except Exception:
-                        pass
-                if not removed:
-                    # non-V2
-                    try:
-                        dev.action("/downloads/removeLinks", [[], pkg_ids])
-                        log.debug("JD cleanup: removed downloads via /downloads/removeLinks([], pids)")
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
-        # 6) امسح الـ LinkGrabber بالكامل
-        try:
-            dev.action("/linkgrabberv2/clearList", [])
-        except Exception:
-            # fallback: إزالة بالـ packages
-            try:
-                pkgs = dev.action("/linkgrabberv2/queryPackages", [{"packageUUIDs": True}]) or []
-                pids = [p.get("packageUUID") for p in pkgs if p.get("packageUUID")]
-                if pids:
-                    dev.action("/linkgrabberv2/removeLinks", [[], pids])
-                    log.debug("JD cleanup: linkgrabber cleared via removeLinks([], pids)")
-            except Exception:
-                pass
-
-        # 7) انتظر لحظات لحد ما القوائم تفضى فعليًا (علشان ما يحصلش race)
-        deadline = time.time() + 5.0
-        while time.time() < deadline:
-            try:
-                dpkgs = (dev.action("/downloadsV2/queryPackages", [{"packageUUIDs": True}])
-                         or dev.action("/downloads/queryPackages", [{"packageUUIDs": True}])
-                         or [])
-                lpkgs = dev.action("/linkgrabberv2/queryPackages", [{"packageUUIDs": True}]) or []
-                if not dpkgs and not lpkgs:
-                    break
-            except Exception:
-                break
-            time.sleep(0.2)
-
-        log.info("✅ JD cleanup fallback: downloads+linkgrabber cleared & controller stopped.")

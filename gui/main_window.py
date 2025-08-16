@@ -3,7 +3,8 @@
 import hashlib
 import logging
 from pathlib import Path
-
+from integrations import jd_client
+from integrations.jd_client import JDClient, hard_cancel
 from PyQt5.QtWidgets import QAction, QApplication, QPlainTextEdit
 
 from config.config import DATA_DIR, save_configuration
@@ -4261,10 +4262,10 @@ class ForumBotGUI(QMainWindow):
                 "⚠️ Another download is already running!\n\nPlease wait for the current download to complete or cancel it first.",
             )
             return
-            
+
         # 🔒 Set download lock
         self._download_in_progress = True
-        
+
         try:
             selected_rows = set(index.row() for index in self.process_threads_table.selectedIndexes())
             if not selected_rows:
@@ -4272,7 +4273,7 @@ class ForumBotGUI(QMainWindow):
                 # 🔓 Release lock if no rows selected
                 self._download_in_progress = False
                 return
-            
+
             # 📋 Track selected threads for status update after completion
             self._current_download_threads = []
             for row in selected_rows:
@@ -4280,7 +4281,7 @@ class ForumBotGUI(QMainWindow):
                     # Get thread info from table
                     title_item = self.process_threads_table.item(row, 0)  # Thread Title column
                     category_item = self.process_threads_table.item(row, 1)  # Category column
-                    
+
                     if title_item and category_item:
                         thread_title = title_item.text()
                         category_name = category_item.text()
@@ -4288,25 +4289,20 @@ class ForumBotGUI(QMainWindow):
                         logging.info(f"📝 Tracking download for: {category_name}/{thread_title}")
                 except Exception as e:
                     logging.warning(f"Could not track thread for row {row}: {e}")
-                    
+
             logging.info(f"📋 Tracking {len(self._current_download_threads)} threads for download completion")
 
             # Cleanup any existing download worker
-
             if hasattr(self, 'download_worker') and self.download_worker:
                 try:
                     self.download_worker.cancel_downloads()
-
                     QApplication.processEvents()
-
                     self.download_worker.deleteLater()
                     self.download_worker = None
-
                 except Exception as e:
                     logging.warning(f"⚠️ Error cleaning up existing download worker: {e}")
 
             # Create the worker
-            # Ensure any previous cancel signal is cleared before starting
             self.status_widget.cancel_event.clear()
             self.download_worker = DownloadWorker(
                 bot=self.bot,
@@ -4316,6 +4312,17 @@ class ForumBotGUI(QMainWindow):
                 cancel_event=self.status_widget.cancel_event,
             )
             self.register_worker(self.download_worker)
+
+            # ✅ Attach JDClient session for hard cancel support
+            try:
+                jd = jd_client.JDClient(self.config)
+                if hasattr(self.download_worker, "attach_jd_post"):
+                    self.download_worker.attach_jd_post(jd.post)
+                    logging.debug("JDClient attached to DownloadWorker for hard cancel support")
+                else:
+                    logging.warning("DownloadWorker does not support attach_jd_post")
+            except Exception as e:
+                logging.error(f"Failed to attach JDClient to worker: {e}")
 
             # Connect status and completion signals
             self.download_worker.status_update.connect(self.update_download_status)
@@ -4327,7 +4334,7 @@ class ForumBotGUI(QMainWindow):
             # Start the worker
             self.download_worker.start()
             self.statusBar().showMessage("Starting downloads...")
-            
+
         except Exception as e:
             # 😱 Critical error during download setup
             logging.error(f"⚠️ Critical error in download setup: {e}")
@@ -4349,12 +4356,24 @@ class ForumBotGUI(QMainWindow):
     def cancel_downloads(self):
         """🔒 Cancel downloads and release session lock"""
         if self.download_worker:
-            self.download_worker.cancel_downloads()
+            try:
+                # أبلغ الـ worker يتوقف
+                self.download_worker.cancel_downloads()
+                # إجبار إيقاف الـ thread
+                self.download_worker.terminate()
+                self.download_worker.wait()
+                self.download_worker = None
+                logging.info("✅ DownloadWorker forcibly terminated")
+            except Exception as e:
+                logging.error(f"⚠️ Error terminating DownloadWorker: {e}")
 
         try:
+            # 🛑 كمان نظف JD من أي تحميلات
             stop_and_clear_jdownloader(self.config)
-        except Exception:
-            pass
+            logging.info("✅ JDownloader stop_and_clear executed")
+        except Exception as e:
+            logging.error(f"⚠️ Error stopping JD: {e}")
+
         # 🔓 Release download lock when cancelled
         if hasattr(self, '_download_in_progress'):
             self._download_in_progress = False

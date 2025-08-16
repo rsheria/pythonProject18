@@ -10,6 +10,11 @@ from pathlib import Path
 from queue import Queue
 from threading import Lock
 from urllib.parse import urlparse
+# فوق مع الباقى
+try:
+    from integrations import jd_client
+except ImportError:
+    import jd_client
 
 import requests
 from PyQt5.QtCore import QThread, pyqtSignal
@@ -140,6 +145,11 @@ class DownloadWorker(QThread):
             "DownloadWorker initialized, max_concurrent=%d", self.max_concurrent
         )
 
+    # داخل الكلاس DownloadWorker
+    def attach_jd_post(self, jd_post):
+        """اربط نفس post() المستخدمة في الإضافة/المتابعة علشان الكانسيل يضرب نفس السيشن"""
+        self._jd_post = jd_post
+
     def _is_cancelled(self):
         return self.is_cancelled or (self.cancel_event and self.cancel_event.is_set())
     def get_download_hosts_priority(self):
@@ -192,17 +202,43 @@ class DownloadWorker(QThread):
                 h for h in extra_hosts if h not in default_priority
             ]
 
-
     def run(self):
         try:
             logging.info("DownloadWorker run() started")
             self.status_update.emit("Initializing downloads...")
             self.initialize_download_queue()
 
-            # Track overall progress internally without emitting a dedicated
-            # "Batch" row to the status table. The status table should only
-            # display actual file downloads and the subsequent file processing
-            # stage for each thread.
+            # ✅ قبل أي تحميلات: حاول توقف و تفضّي JD فعلياً (Downloads + LinkGrabber)
+            try:
+                from integrations.jd_client import hard_cancel, stop_and_clear_jdownloader
+                did_clear = False
+
+                # لو عندنا دالة POST مباشرة للـ JD (local directconnection)
+                _post = getattr(self, "_jd_post", None)
+                if _post:
+                    try:
+                        logging.info("🧹 JD pre-clean via hard_cancel(post)")
+                        hard_cancel(_post, logger=logging)  # يوقف + يشيل اللينكات + clearList + cleanup
+                        did_clear = True
+                    except Exception:
+                        logging.exception("hard_cancel(post) failed")
+
+                if not did_clear:
+                    try:
+                        cfg = getattr(self.bot, "config", None)
+                        # مهلة أطول شوية لأن أحياناً الـ API بيتأخر
+                        stop_and_clear_jdownloader(cfg, wait_timeout=12.0)
+                        did_clear = True
+                    except Exception:
+                        logging.exception("stop_and_clear_jdownloader fallback failed")
+
+                if did_clear:
+                    logging.info("✅ JD cleanup before start done.")
+                else:
+                    logging.warning("⚠️ Could not pre-clean JD; proceeding anyway.")
+
+            except Exception:
+                logging.exception("Pre-start JD cleanup block crashed")
 
             total_threads = len(self.selected_rows)
             processed_threads = 0
@@ -211,18 +247,22 @@ class DownloadWorker(QThread):
                 # 🛡️ Check if worker is still valid
                 try:
                     if not hasattr(self, "active_link_downloads"):
-                        logging.info(
-                            "DownloadWorker: Object deleted, stopping execution"
-                        )
+                        logging.info("DownloadWorker: Object deleted, stopping execution")
                         break
                 except RuntimeError:
                     logging.info("DownloadWorker: C++ object deleted, stopping execution")
                     break
-                    
+
+                # ⛔ توقف فوري لو اتعمل cancel
+                if getattr(self, "cancel_event", None) and self.cancel_event.is_set():
+                    logging.info("⛔ Cancel detected inside loop, breaking out")
+                    break
+
                 # launch new downloads
                 while (
-                    len(self.active_link_downloads) < self.max_concurrent
-                    and not self.download_queue.empty()
+                        len(self.active_link_downloads) < self.max_concurrent
+                        and not self.download_queue.empty()
+                        and not (getattr(self, "cancel_event", None) and self.cancel_event.is_set())
                 ):
                     item = self.download_queue.get()
                     self.start_link_download(item)
@@ -240,62 +280,144 @@ class DownloadWorker(QThread):
                             tid = info["thread_id"]
                             if tid in self.thread_info_map:
                                 self.thread_info_map[tid]["done_count"] += 1
-                            
+
                             # Process new files from this download
                             for f in info["new_files"]:
-                                if (
-                                    f
-                                    not in self.thread_info_map[tid]["downloaded_files"]
-                                ):
-                                    self.thread_info_map[tid][
-                                        "downloaded_files"
-                                    ].append(f)
-                            
+                                if f not in self.thread_info_map[tid]["downloaded_files"]:
+                                    self.thread_info_map[tid]["downloaded_files"].append(f)
+
                             # Check if this thread is completely done
                             if (
-                                self.thread_info_map[tid]["done_count"]
-                                == self.thread_info_map[tid]["total_links"]
+                                    self.thread_info_map[tid]["done_count"]
+                                    == self.thread_info_map[tid]["total_links"]
                             ):
                                 processed_threads += 1
                                 self.process_thread_files(tid)
-                                
+
                         except (KeyError, TypeError) as e:
-                            logging.warning(
-                                f"⚠️ Error processing finished download {lid}: {e}"
-                            )
+                            logging.warning(f"⚠️ Error processing finished download {lid}: {e}")
 
                 # update overall progress
                 if total_threads:
                     pct = int((processed_threads / total_threads) * 100)
-                    self.status_update.emit(
-                        f"Overall Progress: {pct}% ({processed_threads}/{total_threads})"
-                    )
+                    try:
+                        self.status_update.emit(
+                            f"Overall Progress: {pct}% ({processed_threads}/{total_threads})"
+                        )
+                    except Exception:
+                        pass
+
                 # done?
                 if (
-                    processed_threads == total_threads
-                    and self.download_queue.empty()
-                    and not self.active_link_downloads
+                        processed_threads == total_threads
+                        and self.download_queue.empty()
+                        and not self.active_link_downloads
                 ):
                     break
 
                 # pause
                 while self.is_paused and not self._is_cancelled():
                     time.sleep(0.1)
+
+                # ⛔ اخرج فوراً لو كانسيل اتفعّل
+                if getattr(self, "cancel_event", None) and self.cancel_event.is_set():
+                    logging.info("⛔ Cancel detected before sleep, exiting loop")
+                    break
+
                 time.sleep(0.1)
 
             # finish up
-            if self._is_cancelled():
+            if self._is_cancelled() or (getattr(self, "cancel_event", None) and self.cancel_event.is_set()):
                 self.operation_complete.emit(False, "Operation cancelled.")
             else:
-                self.operation_complete.emit(
-                    True, f"Completed {processed_threads}/{total_threads} threads"
-                )
+                self.operation_complete.emit(True, f"Completed {processed_threads}/{total_threads} threads")
         except Exception as e:
             logging.error("DownloadWorker crashed: %s", e, exc_info=True)
             self.operation_complete.emit(False, str(e))
         finally:
-            self.thread_pool.shutdown(wait=False)
+            try:
+                self.thread_pool.shutdown(wait=False)
+            except Exception:
+                pass
             logging.info("DownloadWorker: thread_pool shut down")
+
+    def cancel_downloads(self):
+        """✅ Cancel downloads in worker AND force-stop JDownloader sessions (فعلياً)"""
+        self.is_cancelled = True
+        try:
+            if getattr(self, "cancel_event", None):
+                self.cancel_event.set()
+                logging.info("🔒 cancel_event set, worker will stop ASAP")
+        except Exception:
+            pass
+
+        # UI update (non-critical)
+        try:
+            self.status_update.emit("Cancelling downloads...")
+        except Exception:
+            pass
+        logging.info("DownloadWorker: cancel_downloads invoked")
+
+        # 🛑 JD force stop + cleanup (المسارات الصحيحة + إزالة الـ IDs فعلياً)
+        did_force = False
+        try:
+            from integrations.jd_client import hard_cancel, stop_and_clear_jdownloader
+            _post = getattr(self, "_jd_post", None)
+
+            if _post:
+                try:
+                    hard_cancel(_post, logger=logging)
+                    did_force = True
+                    logging.info("✅ JD hard_cancel(post) executed")
+                except Exception:
+                    logging.exception("hard_cancel(post) failed")
+
+            if not did_force:
+                try:
+                    cfg = getattr(self.bot, "config", None)
+                    stop_and_clear_jdownloader(cfg, wait_timeout=10.0)
+                    did_force = True
+                    logging.info("✅ JD stop_and_clear fallback executed")
+                except Exception:
+                    logging.exception("stop_and_clear_jdownloader failed")
+
+        except Exception:
+            logging.exception("JD force-cancel block crashed")
+
+        # Clean up executors and queues (زي ما هي من غير تغيير منطق)
+        try:
+            if not hasattr(self, "lock") or self.lock is None:
+                from threading import Lock as _Lock
+                self.lock = _Lock()
+            with self.lock:
+                if hasattr(self, "thread_pool") and self.thread_pool:
+                    try:
+                        self.thread_pool.shutdown(wait=False, cancel_futures=True)
+                    except TypeError:
+                        self.thread_pool.shutdown(wait=False)
+                    self.thread_pool = None
+                if hasattr(self, "executor") and self.executor:
+                    try:
+                        self.executor.shutdown(wait=False)
+                    except Exception:
+                        pass
+                    self.executor = None
+                if hasattr(self, "active_link_downloads"):
+                    try:
+                        self.active_link_downloads.clear()
+                    except Exception:
+                        pass
+                if hasattr(self, "download_queue") and self.download_queue:
+                    try:
+                        while not self.download_queue.empty():
+                            try:
+                                self.download_queue.get_nowait()
+                            except Exception:
+                                break
+                    except Exception:
+                        pass
+        except Exception as e:
+            logging.warning(f"⚠️ Error during download cleanup: {e}")
 
     def pause_downloads(self):
         self.is_paused = True
@@ -305,37 +427,6 @@ class DownloadWorker(QThread):
         self.is_paused = False
         self.status_update.emit("Resuming Downloads")
 
-    def cancel_downloads(self):
-        """✅ Thread-safe cancellation with proper cleanup"""
-        self.is_cancelled = True
-        if self.cancel_event:
-            self.cancel_event.set()
-        self.status_update.emit("Cancelling downloads...")
-        logging.info("DownloadWorker: cancel_downloads invoked")
-        
-        # 🛡️ Clean up active downloads safely
-        try:
-            with self.lock:
-                # Cancel any running executors
-                if hasattr(self, "executor") and self.executor:
-                    self.executor.shutdown(wait=False)
-                
-                # Clear active downloads
-                self.active_link_downloads.clear()
-                
-                # Clear download queue
-                while not self.download_queue.empty():
-                    try:
-                        self.download_queue.get_nowait()
-                    except:
-                        break
-                        
-        except Exception as e:
-            logging.warning(f"⚠️ Error during download cleanup: {e}")
-        try:
-            stop_and_clear_jdownloader(getattr(self.bot, "config", None))
-        except Exception:
-            logging.exception("JDownloader cleanup failed during cancel")
     def initialize_download_queue(self):
         logging.debug("Selected rows: %s", self.selected_rows)
         logging.debug("Available categories: %s", list(self.gui.process_threads.keys()))

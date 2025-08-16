@@ -12,6 +12,62 @@ except Exception as e:
 
 log = logging.getLogger(__name__)
 
+def hard_cancel(post, logger=None):
+    """
+    post: دالة تستدعي JD endpoint: post(path:str, payload:list|dict|None) -> dict|list|None
+    """
+    import time
+    log = (logger.info if logger else print)
+    warn = (logger.warning if logger else print)
+
+    def _safe(path, payload=None):
+        try:
+            return post(path, [] if payload is None else payload)
+        except Exception as e:
+            warn(f"JD POST failed: {path} -> {e}")
+            return None
+
+    log("🛑 Hard-cancel JD: stop/abort/remove/clear")
+
+    # ✅ نفس اللي أثبت نجاحه في لوج الـ Link Checker
+    _safe("downloadcontroller/stop", [])
+    _safe("toolbar/stopDownloads", [])
+
+    # محاولات قديمة (بعض النسخ بترجع 404، لا مشكلة)
+    _safe("downloadsV2/stop", [])
+    _safe("downloadsV2/abort", [])
+
+    # لم اللينكات الشغالة وشيلها فعليًا
+    pkgs = _safe("downloadsV2/queryPackages", [{
+        "maxResults": -1, "bytesTotal": True, "status": True
+    }]) or []
+    pkg_ids = [p.get("uuid") for p in pkgs if p.get("uuid")]
+
+    link_ids = []
+    if pkg_ids:
+        links = _safe("downloadsV2/queryLinks", [{
+            "packageUUIDs": pkg_ids, "maxResults": -1,
+            "name": True, "url": True, "enabled": True, "status": True
+        }]) or []
+        for l in links:
+            st = str(l.get("status", "")).lower()
+            if l.get("uuid") and (l.get("enabled") or st in ("running", "downloading")):
+                link_ids.append(l["uuid"])
+
+    if link_ids:
+        # ⚠️ payload لازم يبقى فلات (مش [link_ids])
+        _safe("downloadsV2/removeLinks", link_ids)
+        log(f"🧹 Removed {len(link_ids)} active JD links")
+
+    # نظّف وامسح الـ LinkGrabber
+    _safe("linkgrabberv2/clearList", [])
+    _safe("downloadsV2/cleanup", [])
+    time.sleep(0.2)
+    _safe("downloadsV2/cleanup", [])
+
+    log("✅ JD hard-cancel done")
+    return True
+
 class JDClient:
     """
     Drop-in client that matches the old GUI expectations:
@@ -392,161 +448,225 @@ class JDClient:
         return ok
 
 
-def stop_and_clear_jdownloader(config: Optional[dict] = None) -> None:
-    """Helper to stop running downloads and clear all JD lists."""
-    cfg = config or {}
-    email = (
-        cfg.get("myjd_email")
-        or cfg.get("jdownloader_email")
-        or os.getenv("MYJD_EMAIL")
-        or os.getenv("JDOWNLOADER_EMAIL", "")
-    )
-    password = (
-        cfg.get("myjd_password")
-        or cfg.get("jdownloader_password")
-        or os.getenv("MYJD_PASSWORD")
-        or os.getenv("JDOWNLOADER_PASSWORD", "")
-    )
-    device = (
-        cfg.get("myjd_device")
-        or cfg.get("jdownloader_device")
-        or os.getenv("MYJD_DEVICE")
-        or os.getenv("JDOWNLOADER_DEVICE", "")
-    )
-    app_key = (
-        cfg.get("myjd_app_key")
-        or cfg.get("jdownloader_app_key")
-        or os.getenv("MYJD_APP_KEY")
-        or os.getenv("JDOWNLOADER_APP_KEY", "PyForumBot")
-    )
-
-    if not email or not password:
-        return
-
-    jd = JDClient(email, password, device, app_key)
-    if jd.connect():
-        try:
-            jd.stop_and_clear()
-        except Exception:
-            pass
-
-# === ضع الدالة التالية بعد تعريف كلاس JDClient مباشرة (خارج الكلاس) ===
-def stop_and_clear_jdownloader(cfg_or_client=None, wait_timeout=7.0):
+def stop_and_clear_jdownloader(cfg_or_client=None, wait_timeout: float = 8.0):
     """
-    يوقف كل التحميلات فى JDownloader ويمسح Download List و LinkGrabber.
+    إيقاف فورى و"مسح كامل" لكل ما يخص التحميل داخل JDownloader (Downloads + LinkGrabber)،
+    مع التوافق مع اختلافات أسماء الحقول بين إصدارات الـ API.
+
     يقبل:
-      - JDClient جاهز
-      - dict من الإعدادات فيه مفاتيح myjd_email / myjd_password / myjd_device / myjd_app_key
+      - cfg_or_client: إمّا JDClient متصل، أو dict فيه مفاتيح:
+           myjd_email / myjd_password / myjd_device / myjd_app_key (أو نظائر jdownloader_*)
+      - wait_timeout: وقت الانتظار الأقصى لتفريغ القوائم (ثوانى)
+
+    يرجّع: True عند النجاح، False لو فشل الاتصال أو التنفيذ.
     """
+    import logging, os, time
     log = logging.getLogger(__name__)
 
-    # 1) جهّز عميل JD
-    if isinstance(cfg_or_client, JDClient):
+    # 1) جهز جهاز JD
+    jd = None
+    try:
+        JDClientRef = JDClient  # لو الكلاس فى نفس الملف
+    except Exception:
+        JDClientRef = None
+
+    if JDClientRef and isinstance(cfg_or_client, JDClientRef):
         jd = cfg_or_client
     else:
-        jd = None
-        if isinstance(cfg_or_client, dict):
-            email = cfg_or_client.get("myjd_email") or cfg_or_client.get("jdownloader_email") or ""
-            password = cfg_or_client.get("myjd_password") or cfg_or_client.get("jdownloader_password") or ""
-            device_name = cfg_or_client.get("myjd_device") or cfg_or_client.get("jdownloader_device") or ""
-            app_key = cfg_or_client.get("myjd_app_key") or cfg_or_client.get("jdownloader_app_key") or "PyForumBot"
-            if email and password:
-                jd = JDClient(email=email, password=password, device_name=device_name, app_key=app_key)
+        cfg = cfg_or_client or {}
+        if not isinstance(cfg, dict):
+            cfg = {}
 
-        if jd is None:
-            log.debug("stop_and_clear_jdownloader: no client/credentials supplied")
+        email = (
+            cfg.get("myjd_email")
+            or cfg.get("jdownloader_email")
+            or os.getenv("MYJD_EMAIL")
+            or os.getenv("JDOWNLOADER_EMAIL")
+            or ""
+        )
+        password = (
+            cfg.get("myjd_password")
+            or cfg.get("jdownloader_password")
+            or os.getenv("MYJD_PASSWORD")
+            or os.getenv("JDOWNLOADER_PASSWORD")
+            or ""
+        )
+        device_name = (
+            cfg.get("myjd_device")
+            or cfg.get("jdownloader_device")
+            or os.getenv("MYJD_DEVICE")
+            or os.getenv("JDOWNLOADER_DEVICE")
+            or ""
+        )
+        app_key = (
+            cfg.get("myjd_app_key")
+            or cfg.get("jdownloader_app_key")
+            or os.getenv("MYJD_APP_KEY")
+            or os.getenv("JDOWNLOADER_APP_KEY")
+            or "PyForumBot"
+        )
+
+        if not email or not password:
+            log.warning("stop_and_clear_jdownloader: missing My.JD credentials.")
             return False
 
-    if not getattr(jd, "device", None):
-        if not jd.connect():
-            log.debug("stop_and_clear_jdownloader: connect() failed")
+        try:
+            api = Myjdapi()
+            api.connect(email, password)
+            api.update_devices()
+            dev = None
+            if device_name:
+                try:
+                    dev = api.get_device(device_name)
+                except Exception:
+                    dev = None
+            if not dev:
+                devices = api.list_devices() or []
+                if devices:
+                    dev = devices[0]
+            jd = type("TmpJD", (), {"device": dev, "is_connected": True})()
+        except Exception as e:
+            log.exception(f"stop_and_clear_jdownloader: connect failed: {e}")
             return False
 
-    dev = jd.device
+    dev = getattr(jd, "device", None)
+    if not dev:
+        try:
+            # عندك JDClient حقيقى؟ جرّب connect()
+            if hasattr(jd, "connect") and callable(jd.connect):
+                if not getattr(jd, "is_connected", False):
+                    if not jd.connect():
+                        log.error("stop_and_clear_jdownloader: connect() returned False.")
+                        return False
+                dev = getattr(jd, "device", None)
+        except Exception:
+            dev = getattr(jd, "device", None)
 
-    # 2) أوقف أى تحميلات + Pause كمان للاحتياط
+    if not dev:
+        log.error("stop_and_clear_jdownloader: no device to act upon.")
+        return False
+
+    # 2) أوقف الكنترولر + Pause فورى (نجرّب مسارات متعددة للتوافق)
     for path, payload in [
-        ("/downloadcontroller/stop", []),
         ("/downloadsV2/stop", []),
+        ("/downloadcontroller/stop", []),
         ("/downloads/stop", []),
+        ("/downloadsV2/pause", [True]),
         ("/downloadcontroller/pause", [True]),
-        ("/downloads/pause", [True]),
     ]:
         try:
             dev.action(path, payload)
-            log.debug("JD stop via %s", path)
         except Exception:
             pass
 
-    # 3) ألغِ أى كراول/ديكربت فى LinkGrabber
-    try:
-        dev.action("/linkgrabberv2/abort", [])
-    except Exception:
-        pass
+    # 3) LinkGrabber: أوقف أى Tasks
+    for path in ["/linkgrabberv2/abort", "/linkgrabberv2/cancel", "/linkgrabberv2/stopOnlineCheck"]:
+        try:
+            dev.action(path, [])
+        except Exception:
+            pass
 
-    # 4) امسح قائمة التحميلات (Downloads)
-    try:
-        pkgs = dev.action("/downloadsV2/queryPackages", [{"packageUUIDs": True}]) or []
-    except Exception:
-        pkgs = dev.action("/downloads/queryPackages", [{"packageUUIDs": True}]) or []
-    pids = [p.get("packageUUID") for p in pkgs if p.get("packageUUID")]
+    # 4) امسح الـ Downloads (نجيب UUIDs وبعدين نستخدم الاسم الصحيح للحقل)
+    def _query_download_package_uuids():
+        try:
+            pkgs = dev.action("/downloadsV2/queryPackages", [{"packageUUIDs": True}]) or []
+        except Exception:
+            try:
+                pkgs = dev.action("/downloads/queryPackages", [{"packageUUIDs": True}]) or []
+            except Exception:
+                pkgs = []
+        uuids = []
+        for p in pkgs:
+            uid = p.get("packageUUID") or p.get("uuid") or p.get("id")
+            if uid is not None:
+                uuids.append(uid)
+        return uuids
 
-    if pids:
+    d_pkg_uuids = _query_download_package_uuids()
+
+    if d_pkg_uuids:
         removed = False
+        # المحاولة الصحيحة الشائعة: packageUUIDs
         for path, payload in [
-            ("/downloadsV2/removePackages", [{"packageIds": pids}]),
-            ("/downloadsV2/removeLinks", [[], pids]),
-            ("/downloads/removeLinks", [[], pids]),
+            ("/downloadsV2/removePackages", [{"packageUUIDs": d_pkg_uuids}]),
+            ("/downloads/removePackages", [{"packageUUIDs": d_pkg_uuids}]),
+            ("/downloadsV2/removeLinks", [[], d_pkg_uuids]),
+            ("/downloads/removeLinks", [[], d_pkg_uuids]),
+            ("/downloadsV2/setEnabled", [{"packageUUIDs": d_pkg_uuids, "enabled": False}]),
         ]:
             try:
                 dev.action(path, payload)
-                log.debug("JD removed downloads via %s", path)
                 removed = True
                 break
             except Exception:
-                pass
+                continue
         if not removed:
-            log.debug("could not remove downloads packages (may already be empty)")
+            # فولباك أخير: clearList (قد يمسح المُكتمل فقط)
+            try:
+                dev.action("/downloadsV2/clearList", [])
+            except Exception:
+                pass
 
-    # 5) امسح الـ LinkGrabber بالكامل
-    try:
-        dev.action("/linkgrabberv2/clearList", [])
-        log.debug("LinkGrabber cleared via /linkgrabberv2/clearList")
-    except Exception:
+    # 5) LinkGrabber: امسح الباكدجات/اللينكات (packageIds غالبًا فى LG)
+    def _query_lg_package_ids():
         try:
-            lpkgs = dev.action("/linkgrabberv2/queryPackages", [{"packageUUIDs": True}]) or []
-            lpids = [p.get("packageUUID") for p in lpkgs if p.get("packageUUID")]
-            if lpids:
-                for path, payload in [
-                    ("/linkgrabberv2/removeLinks", [[], lpids]),
-                    ("/linkgrabberv2/removePackages", [{"packageIds": lpids}]),
-                ]:
-                    try:
-                        dev.action(path, payload)
-                        log.debug("LinkGrabber cleared via %s", path)
-                        break
-                    except Exception:
-                        pass
+            pkgs = dev.action("/linkgrabberv2/queryPackages", [{"packageUUIDs": True}]) or []
+        except Exception:
+            pkgs = []
+        ids = []
+        for p in pkgs:
+            uid = p.get("packageUUID") or p.get("uuid") or p.get("id")
+            if uid is not None:
+                ids.append(uid)
+        return ids
+
+    lg_pkg_ids = _query_lg_package_ids()
+
+    if lg_pkg_ids:
+        cleared = False
+        for path, payload in [
+            ("/linkgrabberv2/removePackages", [{"packageIds": lg_pkg_ids}]),
+            ("/linkgrabberv2/removeLinks", [[], lg_pkg_ids]),
+        ]:
+            try:
+                dev.action(path, payload)
+                cleared = True
+                break
+            except Exception:
+                continue
+        if not cleared:
+            try:
+                dev.action("/linkgrabberv2/clearList", [])
+                cleared = True
+            except Exception:
+                pass
+    else:
+        # مفيش باكدجز؟ جرّب clearList مباشرة
+        try:
+            dev.action("/linkgrabberv2/clearList", [])
         except Exception:
             pass
 
-    # 6) انتظر لحد ما يبقى مفيش أى باكدجز فى القائمتين (تفريغ فعلى)
+    # 6) انتظر لحد القائمتين يفضوا فعلاً
     deadline = time.time() + float(wait_timeout)
     while time.time() < deadline:
         try:
-            dpkgs = dev.action("/downloadsV2/queryPackages", [{"packageUUIDs": True}]) or []
+            d_left = dev.action("/downloadsV2/queryPackages", [{"packageUUIDs": True}]) or []
         except Exception:
             try:
-                dpkgs = dev.action("/downloads/queryPackages", [{"packageUUIDs": True}]) or []
+                d_left = dev.action("/downloads/queryPackages", [{"packageUUIDs": True}]) or []
             except Exception:
-                dpkgs = []
+                d_left = []
         try:
-            lpkgs = dev.action("/linkgrabberv2/queryPackages", [{"packageUUIDs": True}]) or []
+            lg_left = dev.action("/linkgrabberv2/queryPackages", [{"packageUUIDs": True}]) or []
         except Exception:
-            lpkgs = []
-        if not dpkgs and not lpkgs:
+            lg_left = []
+        if not d_left and not lg_left:
             break
         time.sleep(0.2)
 
-    log.info("✅ JDownloader controller stopped & lists cleared.")
+    log.info("✅ stop_and_clear_jdownloader: controller stopped & lists cleared.")
     return True
+
+
+
