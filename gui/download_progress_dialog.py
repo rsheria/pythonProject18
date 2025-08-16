@@ -1,12 +1,13 @@
 import logging
 import time
+import threading
 
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QScrollArea,
     QWidget, QPushButton, QProgressBar, QLabel
 )
 from PyQt5.QtCore import Qt, pyqtSignal
-
+from integrations.jd_client import hard_cancel
 class DownloadProgressDialog(QDialog):
     """
     A multi-file download progress dialog that displays:
@@ -82,7 +83,15 @@ class DownloadProgressDialog(QDialog):
 
     def on_cancel_clicked(self):
         self.cancel_clicked.emit()
-        logging.info("Cancel clicked (no JDownloader action here).")
+        logging.info("Cancel clicked - triggering JDownloader cancel.")
+        try:
+            parent = self.parent()
+            worker = getattr(parent, "download_worker", None)
+            jd_post = getattr(worker, "_jd_post", None) if worker else None
+            if jd_post:
+                threading.Thread(target=hard_cancel, args=(jd_post, logging), daemon=True).start()
+        except Exception as e:
+            logging.warning(f"JD cancel failed: {e}")
 
     def create_file_widget(self, link_id: str, file_name: str):
         """

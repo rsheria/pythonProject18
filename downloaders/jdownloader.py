@@ -320,11 +320,11 @@ class JDownloaderDownloader(BaseDownloader):
                 "priority": "HIGHEST",
                 "packageName": f"{thread_title}_{thread_id}"
             }]
-            
+
             if download_dir:
                 links_to_add[0]["destinationFolder"] = download_dir
-            
-            # Add links to linkgrabber
+
+                # Add links to linkgrabber
             self.device.linkgrabber.add_links(links_to_add)
 
             # reset cancel flag for new session

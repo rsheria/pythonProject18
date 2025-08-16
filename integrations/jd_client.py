@@ -24,9 +24,11 @@ def hard_cancel(post, logger=None):
             warn(f"JD POST failed: {path} -> {e}")
             return None
 
+
     attempt = 0
     while attempt < 3:
         attempt += 1
+
         log(f"🛑 Hard-cancel JD: stop/remove/clear (try {attempt})")
 
         # 1) أوقف التحميلات الجارية
@@ -40,7 +42,11 @@ def hard_cancel(post, logger=None):
         if links is None:
             return False
         link_ids = [l.get("uuid") for l in (links or []) if l.get("uuid")]
+        if _call("downloadsV2/removeLinks", [link_ids, None]) is None:
+            return False
+        log(f"🧹 Removed {len(link_ids)} active JD links")
 
+        link_ids = [l.get("uuid") for l in (links or []) if l.get("uuid")]
         if link_ids:
             if _call("downloadsV2/removeLinks", [link_ids, None]) is None:
                 return False
