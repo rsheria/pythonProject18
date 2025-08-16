@@ -3,7 +3,6 @@
 import hashlib
 import logging
 from pathlib import Path
-from integrations import jd_client
 from integrations.jd_client import JDClient, hard_cancel
 from PyQt5.QtWidgets import QAction, QApplication, QPlainTextEdit
 
@@ -4313,16 +4312,6 @@ class ForumBotGUI(QMainWindow):
             )
             self.register_worker(self.download_worker)
 
-            # ✅ Attach JDClient session for hard cancel support
-            try:
-                jd = jd_client.JDClient(self.config)
-                if hasattr(self.download_worker, "attach_jd_post"):
-                    self.download_worker.attach_jd_post(jd.post)
-                    logging.debug("JDClient attached to DownloadWorker for hard cancel support")
-                else:
-                    logging.warning("DownloadWorker does not support attach_jd_post")
-            except Exception as e:
-                logging.error(f"Failed to attach JDClient to worker: {e}")
 
             # Connect status and completion signals
             self.download_worker.status_update.connect(self.update_download_status)
