@@ -2,7 +2,7 @@
 import threading
 import time
 import logging
-
+import os
 from PyQt5.QtCore import QObject, Qt
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
@@ -127,21 +127,72 @@ class StatusWidget(QWidget):
 
     # ===== Helper: JD full cleanup =====
     def _jd_full_cancel_cleanup(self, config_obj):
-        # جرّب الهارد-كانسيل المحلي أولاً باستخدام جلسة الووركر الحالية
+        """Perform full JDownloader cancel/cleanup.
+
+        Tries to reuse the current worker session first. If unavailable,
+        establishes a temporary connection using credentials from ``config_obj``
+        or environment variables (MYJD_*) and runs ``hard_cancel``.
+        """
+        # 1) جرّب الهارد-كانسيل المحلي أولاً باستخدام جلسة الووركر الحالية
         try:
             parent = self.parent()
             worker = getattr(parent, "download_worker", None)
             if worker and hasattr(worker, "_jd_post") and callable(worker._jd_post):
-                from integrations.jd_client import hard_cancel
                 ok = hard_cancel(worker._jd_post, logger=log)
                 if ok:
-                    log.info("✅ Local JD hard-cancel done (downloads + linkgrabber cleared).")
+                    log.info(
+                        "✅ Local JD hard-cancel done (downloads + linkgrabber cleared.)"
+                    )
                     return  # ما تكملش على السحابة لو المحلي نجح
                 else:
                     log.warning("❌ JD hard-cancel failed to clean device")
         except Exception as e:
             log.debug("Local hard_cancel failed, will try helper/fallback: %s", e)
 
-        # لا نحاول اتصال جديد – فقط نسجل الفشل
+        # 2) لو مفيش جلسة موجودة، افتح واحدة مؤقتة باستخدام بيانات الإعدادات/البيئة
+        try:
+            cfg = config_obj or {}
+            email = (
+                cfg.get("myjd_email")
+                or os.getenv("MYJD_EMAIL")
+                or ""
+            ).strip()
+            password = (
+                cfg.get("myjd_password")
+                or os.getenv("MYJD_PASSWORD")
+                or ""
+            ).strip()
+            device_name = (
+                cfg.get("myjd_device")
+                or os.getenv("MYJD_DEVICE")
+                or ""
+            ).strip()
+            app_key = (
+                cfg.get("myjd_app_key")
+                or os.getenv("MYJD_APP_KEY")
+                or "PyForumBot"
+            ).strip()
+            if email and password:
+                from integrations.jd_client import JDClient
+
+                jd = JDClient(email, password, device_name, app_key)
+                if jd.connect():
+                    def _jd_post(path, payload=None):
+                        return jd.device.action(
+                            "/" + path if not path.startswith("/") else path,
+                            [] if payload is None else payload,
+                        )
+
+                    if hard_cancel(_jd_post, logger=log):
+                        log.info("✅ JD cancel cleanup via new session done")
+                        return
+                    else:
+                        log.warning("❌ JD cancel cleanup via new session failed")
+            else:
+                log.warning("⚠️ Missing JD credentials for cancel cleanup")
+        except Exception as e:
+            log.warning(f"⚠️ JD fallback cleanup failed: {e}")
+
+        # 3) لو كل المحاولات فشلت
         log.warning("⚠️ No JD session available for cancel cleanup")
 
