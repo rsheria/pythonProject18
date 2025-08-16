@@ -80,7 +80,6 @@ from utils.host_priority import (
 from utils.link_cache import persist_link_replacement
 from utils.link_summary import LinkCheckSummary
 from workers.login_thread import LoginThread
-from integrations.jd_client import JDClient, stop_and_clear_jdownloader
 from workers.link_check_worker import LinkCheckWorker, CONTAINER_HOSTS, is_container_host
 RG_RE = re.compile(r"^/file/([A-Za-z0-9]+)(?:/.*)?$")
 NF_RE = re.compile(r"^/view/([A-Za-z0-9]+)(?:/.*)?$")
@@ -3550,7 +3549,9 @@ class ForumBotGUI(QMainWindow):
             )
             self.statusBar().showMessage("تم طلب إلغاء فحص الروابط…")
             try:
-                stop_and_clear_jdownloader(self.config)
+                jd_post = getattr(getattr(self, "download_worker", None), "_jd_post", None)
+                if jd_post:
+                    hard_cancel(jd_post, logger=self.log)
             except Exception:
                 pass
     def _on_link_progress(self, payload: dict):
@@ -4344,6 +4345,7 @@ class ForumBotGUI(QMainWindow):
 
     def cancel_downloads(self):
         """🔒 Cancel downloads and release session lock"""
+        jd_post = getattr(self.download_worker, "_jd_post", None) if self.download_worker else None
         if self.download_worker:
             try:
                 # أبلغ الـ worker يتوقف
@@ -4351,15 +4353,14 @@ class ForumBotGUI(QMainWindow):
                 # إجبار إيقاف الـ thread
                 self.download_worker.terminate()
                 self.download_worker.wait()
-                self.download_worker = None
                 logging.info("✅ DownloadWorker forcibly terminated")
             except Exception as e:
                 logging.error(f"⚠️ Error terminating DownloadWorker: {e}")
-
+            finally:
+                self.download_worker = None
         try:
-            # 🛑 كمان نظف JD من أي تحميلات
-            stop_and_clear_jdownloader(self.config)
-            logging.info("✅ JDownloader stop_and_clear executed")
+            if jd_post:
+                hard_cancel(jd_post, logger=logging)
         except Exception as e:
             logging.error(f"⚠️ Error stopping JD: {e}")
 
@@ -4957,7 +4958,9 @@ class ForumBotGUI(QMainWindow):
 
             self.statusBar().showMessage("Auto process cancelled.")
             try:
-                stop_and_clear_jdownloader(self.config)
+                jd_post = getattr(getattr(self, "download_worker", None), "_jd_post", None)
+                if jd_post:
+                    hard_cancel(jd_post, logger=logging)
             except Exception:
                 pass
 

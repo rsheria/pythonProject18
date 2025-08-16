@@ -13,57 +13,48 @@ except Exception as e:
 log = logging.getLogger(__name__)
 
 def hard_cancel(post, logger=None):
-    """
-    post: دالة تستدعي JD endpoint: post(path:str, payload:list|dict|None) -> dict|list|None
-    """
-    import time
+    """إيقاف وتنظيف كامل لقوائم التحميل و الـLinkGrabber باستخدام جلسة JD الحالية."""
     log = (logger.info if logger else print)
     warn = (logger.warning if logger else print)
 
-    def _safe(path, payload=None):
+    def _call(path, payload=None):
         try:
             return post(path, [] if payload is None else payload)
         except Exception as e:
             warn(f"JD POST failed: {path} -> {e}")
             return None
 
-    log("🛑 Hard-cancel JD: stop/abort/remove/clear")
+    log("🛑 Hard-cancel JD: stop/remove/clear")
 
-    # ✅ نفس اللي أثبت نجاحه في لوج الـ Link Checker
-    _safe("downloadcontroller/stop", [])
-    _safe("toolbar/stopDownloads", [])
+    # 1) أوقف التحميلات الجارية
+    if _call("downloadcontroller/stop", []) is None:
+        return False
+    if _call("toolbar/stopDownloads", []) is None:
+        return False
 
-    # محاولات قديمة (بعض النسخ بترجع 404، لا مشكلة)
-    _safe("downloadsV2/stop", [])
-    _safe("downloadsV2/abort", [])
-
-    # لم اللينكات الشغالة وشيلها فعليًا
-    pkgs = _safe("downloadsV2/queryPackages", [{
-        "maxResults": -1, "bytesTotal": True, "status": True
-    }]) or []
-    pkg_ids = [p.get("uuid") for p in pkgs if p.get("uuid")]
-
-    link_ids = []
-    if pkg_ids:
-        links = _safe("downloadsV2/queryLinks", [{
-            "packageUUIDs": pkg_ids, "maxResults": -1,
-            "name": True, "url": True, "enabled": True, "status": True
-        }]) or []
-        for l in links:
-            st = str(l.get("status", "")).lower()
-            if l.get("uuid") and (l.get("enabled") or st in ("running", "downloading")):
-                link_ids.append(l["uuid"])
+    # 2) استرجع كل الـ link IDs الحالية ثم احذفها
+    links = _call("downloadsV2/queryLinks", [{"maxResults": -1, "uuid": True, "status": True}])
+    if links is None:
+        return False
+    link_ids = [l.get("uuid") for l in (links or []) if l.get("uuid")]
 
     if link_ids:
-        # ⚠️ payload لازم يبقى فلات (مش [link_ids])
-        _safe("downloadsV2/removeLinks", link_ids)
+        if _call("downloadsV2/removeLinks", [link_ids, None]) is None:
+            return False
         log(f"🧹 Removed {len(link_ids)} active JD links")
 
-    # نظّف وامسح الـ LinkGrabber
-    _safe("linkgrabberv2/clearList", [])
-    _safe("downloadsV2/cleanup", [])
-    time.sleep(0.2)
-    _safe("downloadsV2/cleanup", [])
+    # 3) امسح الـ LinkGrabber
+    if _call("linkgrabberv2/abort", []) is None:
+        return False
+    if _call("linkgrabberv2/clearList", []) is None:
+        return False
+
+    # 4) تحقق من أن القوائم أصبحت فارغة قبل المتابعة
+    left_links = _call("downloadsV2/queryLinks", [{"maxResults": 1, "uuid": True}]) or []
+    left_pkgs = _call("linkgrabberv2/queryPackages", [{"packageUUIDs": True}]) or []
+    if left_links or left_pkgs:
+        warn("JD not clean after hard cancel")
+        return False
 
     log("✅ JD hard-cancel done")
     return True
@@ -324,8 +315,6 @@ class JDClient:
             return False
         ok = False
         for ep, body in [
-            ("/downloadsV2/stop", []),
-            ("/downloadsV2/abort", []),
             ("/downloadcontroller/stop", []),
             ("/downloadcontroller/abort", []),
             ("/toolbar/stopDownloads", []),
@@ -548,7 +537,6 @@ def stop_and_clear_jdownloader(cfg_or_client=None, wait_timeout: float = 8.0):
 
     # 2) أوقف الكنترولر + Pause فورى (نجرّب مسارات متعددة للتوافق)
     for path, payload in [
-        ("/downloadsV2/stop", []),
         ("/downloadcontroller/stop", []),
         ("/downloads/stop", []),
         ("/downloadsV2/pause", [True]),

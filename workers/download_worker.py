@@ -26,7 +26,8 @@ from downloaders.rapidgator import RapidgatorDownloader
 from models.operation_status import OperationStatus, OpStage, OpType
 
 from .worker_thread import WorkerThread
-from integrations.jd_client import stop_and_clear_jdownloader
+from integrations.jd_client import hard_cancel
+
 
 def get_downloader_for(url: str, bot):
     """
@@ -64,9 +65,18 @@ def get_downloader_for(url: str, bot):
         logging.info(f"💡 Supported hosts: {', '.join(supported_hosts)}")
         return None
     
-    # Always use JDownloader for ALL supported hosts
-    jd_downloader = JDownloaderDownloader(bot)
-    jd_available = jd_downloader.is_available()
+    # Always use a single shared JDownloader instance for ALL supported hosts
+    jd_downloader = None
+    if bot is not None:
+        jd_downloader = getattr(bot, "_shared_jd_downloader", None)
+        if jd_downloader is None or not jd_downloader.is_available():
+            jd_downloader = JDownloaderDownloader(bot)
+            try:
+                bot._shared_jd_downloader = jd_downloader
+            except Exception:
+                pass
+
+    jd_available = jd_downloader.is_available() if jd_downloader else False
     if jd_available:
         # Identify host name for logging
         host_name = next((host for host in supported_hosts if host in u), "Unknown")
@@ -211,29 +221,25 @@ class DownloadWorker(QThread):
             # ===== JD pre-start cleanup (hard-cancel إن وُجد، وإلا helper مع فحص نتيجة) =====
             try:
                 jd_post = getattr(self, "_jd_post", None)
-                cfg = getattr(self.bot, "config", None)
+                if not jd_post and getattr(self.bot, "_shared_jd_downloader", None):
+                    dl = self.bot._shared_jd_downloader
+                    if dl and dl.is_available():
+                        jd_post = dl.post
 
                 if jd_post:
-                    logging.info("🛑 Hard-cancel (pre-start): stop/abort/remove/clear")
-                    from integrations.jd_client import hard_cancel  # يستعمل post(path, payload)
+                    logging.info("🛑 Hard-cancel (pre-start): stop/remove/clear")
                     hard_cancel(jd_post, logger=logging)
 
-                    # انتظر فعليًا لحد ما القوائم تفضى
                     t0 = time.time()
                     while time.time() - t0 < 6.0:
-                        dpk = jd_post("downloadsV2/queryPackages", [{"packageUUIDs": True}]) or []
+                        dlnk = jd_post("downloadsV2/queryLinks", [{"maxResults": 1, "uuid": True}]) or []
                         lgk = jd_post("linkgrabberv2/queryPackages", [{"packageUUIDs": True}]) or []
-                        if not dpk and not lgk:
+                        if not dlnk and not lgk:
                             break
                         time.sleep(0.2)
                     logging.info("✅ JD cleanup before start done.")
                 else:
-                    from integrations.jd_client import stop_and_clear_jdownloader
-                    ok = stop_and_clear_jdownloader(cfg, wait_timeout=8.0)
-                    if ok:
-                        logging.info("✅ JD cleanup before start done.")
-                    else:
-                        logging.warning("⚠️ JD cleanup helper returned False (will continue anyway)")
+                    logging.warning("⚠️ No JD session available for cleanup")
 
             except Exception as e:
                 logging.warning("⚠️ pre-start cleanup failed: %s", e)
@@ -336,27 +342,24 @@ class DownloadWorker(QThread):
         did_force = False
         try:
             jd_post = getattr(self, "_jd_post", None)
+            if not jd_post and getattr(self.bot, "_shared_jd_downloader", None):
+                dl = self.bot._shared_jd_downloader
+                if dl and dl.is_available():
+                    jd_post = dl.post
             if jd_post:
-                from integrations.jd_client import hard_cancel
-                logging.info("🛑 Hard-cancel (user): stop/abort/remove/clear")
+                logging.info("🛑 Hard-cancel (user): stop/remove/clear")
                 hard_cancel(jd_post, logger=logging)
 
-                # انتظر فعليًا لحد ما القوائم تفضى
                 t0 = time.time()
                 while time.time() - t0 < 6.0:
-                    dpk = jd_post("downloadsV2/queryPackages", [{"packageUUIDs": True}]) or []
+                    dlnk = jd_post("downloadsV2/queryLinks", [{"maxResults": 1, "uuid": True}]) or []
                     lgk = jd_post("linkgrabberv2/queryPackages", [{"packageUUIDs": True}]) or []
-                    if not dpk and not lgk:
+                    if not dlnk and not lgk:
                         break
                     time.sleep(0.2)
                 did_force = True
             else:
-                from integrations.jd_client import stop_and_clear_jdownloader
-                ok = stop_and_clear_jdownloader(getattr(self.bot, "config", None), wait_timeout=8.0)
-                did_force = bool(ok)
-                if not ok:
-                    logging.warning("⚠️ JD helper returned False during cancel")
-
+                logging.warning("⚠️ No JD session available for cancel cleanup")
         except Exception as e:
             logging.error(f"⚠️ JD force cancel failed: {e}")
 
@@ -391,12 +394,7 @@ class DownloadWorker(QThread):
 
         # 3) فولباك أخير لو مافيش direct post ولسه JD مش واقف
         if not did_force:
-            try:
-                from integrations.jd_client import stop_and_clear_jdownloader as _jd_stop
-                _jd_stop(getattr(self.bot, "config", None), wait_timeout=8.0)
-                logging.info("✅ JD stop_and_clear fallback executed")
-            except Exception:
-                logging.exception("JDownloader cleanup failed during cancel")
+            logging.warning("⚠️ JD cleanup fallback skipped (no session)")
 
     def pause_downloads(self):
         self.is_paused = True

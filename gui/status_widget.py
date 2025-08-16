@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import (
 )
 
 # مهم: الدالة دى لازم تكون اتضافت فى integrations/jd_client.py حسب ما اتفقنا
-from integrations.jd_client import stop_and_clear_jdownloader, JDClient
+from integrations.jd_client import hard_cancel
 from .status_model import StatusTableModel
 
 
@@ -139,13 +139,6 @@ class StatusWidget(QWidget):
         except Exception as e:
             log.debug("Local hard_cancel failed, will try helper/fallback: %s", e)
 
-        # الباقي زي ما هو (helper ثم fallback)...
-        try:
-            from integrations.jd_client import stop_and_clear_jdownloader
-            stop_and_clear_jdownloader(config_obj)
-            log.info("✅ JD cleanup via helper: done.")
-            return
-        except Exception as e:
-            log.debug("stop_and_clear_jdownloader failed, will fallback: %s", e)
-        # ... (الفولباك الموجود عندك يكمل زي ما هو)
+        # لا نحاول اتصال جديد – فقط نسجل الفشل
+        log.warning("⚠️ No JD session available for cancel cleanup")
 

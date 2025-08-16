@@ -8,7 +8,7 @@ from threading import Lock
 from typing import Any, List, Optional
 
 from PyQt5.QtCore import QThread, pyqtSignal, pyqtSlot
-from integrations.jd_client import stop_and_clear_jdownloader
+from integrations.jd_client import hard_cancel
 from models.operation_status import OperationStatus, OpStage, OpType
 from uploaders.ddownload_upload_handler import DDownloadUploadHandler
 from uploaders.katfile_upload_handler import KatfileUploadHandler
@@ -110,7 +110,9 @@ class UploadWorker(QThread):
             self.cancel_event.set()
         logging.info("UploadWorker: أُلغي الطلب")
         try:
-            stop_and_clear_jdownloader(self.config)
+            jd_downloader = getattr(self.bot, "_shared_jd_downloader", None)
+            if jd_downloader and jd_downloader.is_available():
+                hard_cancel(jd_downloader.post, logger=logging)
         except Exception:
             logging.exception("JDownloader cleanup failed during upload cancel")
     def _check_control(self):

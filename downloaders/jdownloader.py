@@ -192,10 +192,21 @@ class JDownloaderDownloader(BaseDownloader):
         except Exception:
             pass
         try:
+            if hasattr(self, "worker"):
+                try:
+                    self.worker.is_cancelled = True
+                    ce = getattr(self.worker, "cancel_event", None)
+                    if ce:
+                        ce.set()
+                except Exception:
+                    pass
             self._stop_and_clear_device()
         except Exception:
             pass
-
+        try:
+            self.current_session_id = None
+        except Exception:
+            pass
     def _stop_and_clear_device(self):
         """
         Force-stop JDownloader device and clear all download/linkgrabber lists.
@@ -204,17 +215,10 @@ class JDownloaderDownloader(BaseDownloader):
         """
         try:
             from integrations.jd_client import hard_cancel
-            hard_cancel(self.post, logger=logging)
+            if not hard_cancel(self.post, logger=logging):
+                logging.error("JD hard-cancel failed to clean device")
         except Exception as e:
             logging.debug(f"hard_cancel failed: {e}")
-            try:
-                from integrations.jd_client import stop_and_clear_jdownloader
-                cfg = {}
-                if hasattr(self, "worker") and getattr(self.worker, "bot", None):
-                    cfg = getattr(self.worker.bot, "config", {})
-                stop_and_clear_jdownloader(cfg)
-            except Exception as e2:
-                logging.debug(f"stop_and_clear_jdownloader fallback failed: {e2}")
 
     def download(
         self,
@@ -246,20 +250,25 @@ class JDownloaderDownloader(BaseDownloader):
             logging.info(f"🧹 Cleaning up JDownloader queues before new download...")
             try:
                 from integrations.jd_client import hard_cancel
-                # استخدام نفس الـ post() للـ hard_cancel عشان ننضّف كل القوائم
-                hard_cancel(self.post, logger=logging)
+                if not hard_cancel(self.post, logger=logging):
+                    logging.error("❌ JD cleanup failed, aborting start")
+                    return False
 
                 # انتظر لحد ما فعليًا القوائم تفضى
                 t0 = time.time()
                 while time.time() - t0 < 6.0:
-                    dpk = self.post("downloadsV2/queryPackages", [{"packageUUIDs": True}]) or []
+                    dlnk = self.post("downloadsV2/queryLinks", [{"maxResults": 1, "uuid": True}]) or []
                     lgk = self.post("linkgrabberv2/queryPackages", [{"packageUUIDs": True}]) or []
-                    if not dpk and not lgk:
+                    if not dlnk and not lgk:
                         break
                     time.sleep(0.2)
+                if dlnk or lgk:
+                    logging.error("❌ JDownloader not clean after cleanup")
+                    return False
                 logging.info("✅ JD queues cleared")
             except Exception as cleanup_error:
                 logging.warning(f"⚠️ Could not clean JDownloader queues: {cleanup_error}")
+                return False
 
             # Attach JD direct post to worker for hard cancel capability
             if hasattr(self, "worker") and hasattr(self.worker, "attach_jd_post"):
