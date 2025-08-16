@@ -198,47 +198,23 @@ class JDownloaderDownloader(BaseDownloader):
 
     def _stop_and_clear_device(self):
         """
-        يوقف ويحذف كل شيء داخل JDownloader (الجهاز المحدد فقط).
-        متوافق مع واجهات مختلفة: downloadsV2/* و linkgrabberv2/*.
+        Force-stop JDownloader device and clear all download/linkgrabber lists.
+        Uses the shared `hard_cancel` helper to remove finished and unfinished
+        downloads alike.
         """
-        dev = getattr(self, "device", None)
-        if not dev:
-            return
-
-        # 1) أوقف أى تنزيلات شغّالة
-        for path, payload in [
-            ("/downloadsV2/stopDownloads", []),
-            ("/downloadsV2/stop", []),
-            ("/downloads/stopAllDownloads", []),
-            ("/downloads/stop", []),
-        ]:
-            try:
-                dev.action(path, payload)
-                break
-            except Exception:
-                continue
-
-        # 2) نظّف قائمة الـDownloads
-        for path, payload in [
-            ("/downloadsV2/clearList", []),
-            ("/downloadsV2/removeLinks", [{"linkIds": []}]),
-            ("/downloadsV2/removePackages", [{"packageIds": []}]),
-        ]:
-            try:
-                dev.action(path, payload)
-                break
-            except Exception:
-                continue
-
-        # 3) امسح الـLinkGrabber
         try:
-            dev.action("/linkgrabberv2/clearList", [])
-        except Exception:
+            from integrations.jd_client import hard_cancel
+            hard_cancel(self.post, logger=logging)
+        except Exception as e:
+            logging.debug(f"hard_cancel failed: {e}")
             try:
-                # بعض إصدارات myjdapi
-                dev.linkgrabber.clear_list()
-            except Exception:
-                pass
+                from integrations.jd_client import stop_and_clear_jdownloader
+                cfg = {}
+                if hasattr(self, "worker") and getattr(self.worker, "bot", None):
+                    cfg = getattr(self.worker.bot, "config", {})
+                stop_and_clear_jdownloader(cfg)
+            except Exception as e2:
+                logging.debug(f"stop_and_clear_jdownloader fallback failed: {e2}")
 
     def download(
         self,
@@ -266,20 +242,22 @@ class JDownloaderDownloader(BaseDownloader):
             return False
             
         try:
-            # 🧹 CLEAR OLD DOWNLOADS: Remove completed downloads to prevent stale progress
+            # 🧹 FULL PRE-START CLEANUP: stop + remove everything before starting
             logging.info(f"🧹 Cleaning up JDownloader queues before new download...")
             try:
-                # Clear finished downloads from download list
-                self.device.downloads.cleanup("DELETE_FINISHED", "REMOVE_LINKS_AND_DELETE_FILES", "ALL")
-                logging.info("✅ Cleared finished downloads")
-                
-                # Clear linkgrabber entries
-                self.device.linkgrabber.clear_list()
-                logging.info("✅ Cleared linkgrabber queue")
-                
-                # ⏳ Wait for cleanup to complete
-                time.sleep(2)
-                logging.info("⏳ Waited for JDownloader cleanup to complete")
+                from integrations.jd_client import hard_cancel
+                # استخدام نفس الـ post() للـ hard_cancel عشان ننضّف كل القوائم
+                hard_cancel(self.post, logger=logging)
+
+                # انتظر لحد ما فعليًا القوائم تفضى
+                t0 = time.time()
+                while time.time() - t0 < 6.0:
+                    dpk = self.post("downloadsV2/queryPackages", [{"packageUUIDs": True}]) or []
+                    lgk = self.post("linkgrabberv2/queryPackages", [{"packageUUIDs": True}]) or []
+                    if not dpk and not lgk:
+                        break
+                    time.sleep(0.2)
+                logging.info("✅ JD queues cleared")
             except Exception as cleanup_error:
                 logging.warning(f"⚠️ Could not clean JDownloader queues: {cleanup_error}")
 
