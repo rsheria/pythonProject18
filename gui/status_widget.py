@@ -2,10 +2,7 @@
 import logging
 import os
 import threading
-from PyQt5.QtCore import QTimer
-from core.user_manager import get_user_manager
-from PyQt5.QtCore import QObject, Qt
-from PyQt5.QtCore import QObject
+from PyQt5.QtCore import QTimer, Qt, QSize, QEvent, QObject
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
     QAbstractScrollArea,
@@ -16,14 +13,15 @@ from PyQt5.QtWidgets import (
     QWidget,
     QPushButton,
     QProgressBar,
+    QStyledItemDelegate,
+    QStyleOptionProgressBar,
+    QStyle,
+    QApplication,
 )
+from core.user_manager import get_user_manager
 from integrations.jd_client import hard_cancel
 from models.operation_status import OperationStatus, OpStage, OpType
-from PyQt5.QtWidgets import QStyledItemDelegate, QStyleOptionProgressBar, QStyle, QApplication
-from PyQt5.QtCore import QSize
-from PyQt5.QtCore import Qt, QSize, QEvent
-from PyQt5.QtWidgets import QStyledItemDelegate, QStyleOptionProgressBar, QStyle, QApplication
-from PyQt5.QtGui import QPalette
+
 
 class ProgressBarDelegate(QStyledItemDelegate):
     """ProgressBar يحترم الـPalette الحالية ويرفع التباين تلقائيًا فى الدارك."""
@@ -193,6 +191,7 @@ class StatusWidget(QWidget):
         if event.type() == QEvent.PaletteChange:
             # لو المستخدم بدّل Light/Dark نعيد ضبط الألوان المشتقة
             self._apply_readability_palette()
+            self.table.viewport().update()
         super().changeEvent(event)
 
     # Helpers -------------------------------------------------------------
@@ -218,28 +217,41 @@ class StatusWidget(QWidget):
         return f"{m:d}:{s:02d}"
 
     def _color_row(self, row: int, stage: OpStage) -> None:
-        overlays = {
-            OpStage.RUNNING: QColor(255, 255, 0, 60),
-            OpStage.FINISHED: QColor(0, 255, 0, 60),
-            OpStage.ERROR: QColor(255, 0, 0, 60),
-        }
-        overlay = overlays.get(stage)
-        if not overlay:
-            return
         pal = self.table.palette()
         base_role = QPalette.Base if row % 2 == 0 else QPalette.AlternateBase
         base = pal.color(base_role)
+        hl = pal.color(QPalette.Highlight)
+
+        overlay = None
+        if stage == OpStage.FINISHED:
+            overlay = QColor(hl.lighter(130))
+        elif stage == OpStage.RUNNING:
+            overlay = QColor(hl.lighter(110))
+        elif stage == OpStage.ERROR:
+            overlay = QColor(hl.darker(125))
+        elif stage == getattr(OpStage, 'CANCELLED', None):
+            overlay = QColor(hl.darker(150))
+        if overlay is not None:
+            overlay.setAlpha(60)
         for col in range(self.table.columnCount()):
             item = self.table.item(row, col)
             if item is None:
                 item = QTableWidgetItem("")
                 self.table.setItem(row, col, item)
-            color = QColor(
-                (base.red() * (255 - overlay.alpha()) + overlay.red() * overlay.alpha()) // 255,
-                (base.green() * (255 - overlay.alpha()) + overlay.green() * overlay.alpha()) // 255,
-                (base.blue() * (255 - overlay.alpha()) + overlay.blue() * overlay.alpha()) // 255,
-            )
+            if overlay is not None:
+                color = QColor(
+                    (base.red() * (255 - overlay.alpha()) + overlay.red() * overlay.alpha()) // 255,
+                    (base.green() * (255 - overlay.alpha()) + overlay.green() * overlay.alpha()) // 255,
+                    (base.blue() * (255 - overlay.alpha()) + overlay.blue() * overlay.alpha()) // 255,
+                )
+            else:
+                color = base
             item.setBackground(color)
+        if overlay is None:
+            model = self.table.model()
+            top_left = model.index(row, 0)
+            bottom_right = model.index(row, self.table.columnCount() - 1)
+            model.dataChanged.emit(top_left, bottom_right, [Qt.BackgroundRole])
 
     # Status handling -----------------------------------------------------
     def _ensure_bar(self, row: int, col: int) -> QProgressBar:
@@ -250,7 +262,6 @@ class StatusWidget(QWidget):
             bar.setRange(0, 100)
             bar.setTextVisible(True)
             bar.setFormat("%p%")
-            bar.setStyleSheet("QProgressBar::chunk { background-color: #00aa00; }")
             self.table.setCellWidget(row, col, bar)
             self._bar_at[key] = bar
         return bar
@@ -481,10 +492,7 @@ class StatusWidget(QWidget):
         pal.setColor(QPalette.AlternateBase, alt)
         self.table.setPalette(pal)
         self.table.setAlternatingRowColors(True)
-        # هيدر مقروء أكتر من غير ألوان
-        self.table.horizontalHeader().setStyleSheet(
-            "QHeaderView::section{font-weight:600;padding:6px;}"
-        )
+
 
     def _ensure_item(self, row: int, col: int):
         it = self.table.item(row, col)

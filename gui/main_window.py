@@ -17,7 +17,8 @@ from workers.worker_thread import WorkerThread
 from workers.proceed_template_worker import ProceedTemplateWorker
 from ui_notifier import ui_notifier, suppress_popups
 
-from .themes import style_manager, theme_manager
+from .themes import style_manager, theme_manager, apply_theme
+
 import json
 import os
 import random
@@ -433,19 +434,13 @@ class ForumBotGUI(QMainWindow):
         """
         # 1) Toggle theme in ThemeManager
         if checked:
-            theme_manager.switch_theme("light")
+            apply_theme("light")
             self.theme_toggle_action.setText("☀️ Dark Mode")  # After clicking, can switch back to dark
         else:
-            theme_manager.switch_theme("dark")
+            apply_theme("dark")
             self.theme_toggle_action.setText("🌙 Light Mode")
 
-        # 2) Reapply QSS to the entire application
-        QApplication.instance().setStyleSheet(style_manager.get_complete_stylesheet())
-
-        # 3) Reapply Palette (for native widgets)
-        self.apply_global_theme()
-
-        # 4) Update all widgets with update_style() method (cards, sidebar, etc.)
+        # Update all widgets with update_style() method (cards, sidebar, etc.)
         for w in self.findChildren(QWidget):
             if hasattr(w, "update_style"):
                 try:
@@ -453,7 +448,7 @@ class ForumBotGUI(QMainWindow):
                 except Exception:
                     pass
 
-        # 5) Save user preference to config file
+        # Save user preference to config file
         self.config["use_dark_mode"] = not checked  # True means dark mode
         save_configuration(self.config)
 
@@ -461,7 +456,7 @@ class ForumBotGUI(QMainWindow):
         if hasattr(self, "process_threads_table"):
             self.process_threads_table.viewport().update()
             
-        # Apply responsive layout after theme change
+        # Update post section buttons and responsive layout
         ResponsiveManager.apply(self)
     def show_status_message(self, message: str, timeout: int = 5000):
         """Helper to display a message in the status bar."""
@@ -1027,30 +1022,10 @@ class ForumBotGUI(QMainWindow):
         self._fade_anim.start()
 
     def apply_global_theme(self):
-        """Apply modern theme to the entire application"""
-        # 1) Get complete stylesheet from StyleManager and apply it
-        complete_stylesheet = style_manager.get_complete_stylesheet()
-        self.setStyleSheet(complete_stylesheet)
-
-        # 2) Apply responsive behavior using the ResponsiveManager
+        """Apply theme palette and stylesheet globally."""
+        apply_theme(theme_manager.theme_mode)
         ResponsiveManager.apply(self)
 
-        # 3) Dynamic palette based on current theme
-        theme = theme_manager.get_current_theme()
-        from PyQt5.QtGui import QColor, QPalette
-        palette = self.palette()
-        palette.setColor(QPalette.Window, QColor(theme.BACKGROUND))
-        palette.setColor(QPalette.WindowText, QColor(theme.TEXT_PRIMARY))
-        palette.setColor(QPalette.Base, QColor(theme.SURFACE))
-        palette.setColor(QPalette.AlternateBase, QColor(theme.SURFACE_VARIANT))
-        palette.setColor(QPalette.Text, QColor(theme.TEXT_PRIMARY))
-        palette.setColor(QPalette.Button, QColor(theme.SURFACE))
-        palette.setColor(QPalette.ButtonText, QColor(theme.TEXT_PRIMARY))
-        palette.setColor(QPalette.Highlight, QColor(theme.PRIMARY))
-        palette.setColor(QPalette.HighlightedText, QColor(theme.TEXT_ON_PRIMARY))
-        self.setPalette(palette)
-
-        # Update posts section button styling when theme changes
         self.apply_post_buttons_style()
 
     def apply_post_buttons_style(self):

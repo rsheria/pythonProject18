@@ -1,6 +1,7 @@
 # gui/themes/style_manager.py
 from .modern_theme import theme_manager
-
+from PyQt5.QtWidgets import QApplication
+from PyQt5.QtGui import QPalette, QColor
 class StyleManager:
     def get_complete_stylesheet(self) -> str:
         t = theme_manager.get_current_theme()
@@ -214,3 +215,23 @@ QProgressBar::chunk {{
 
 
 style_manager = StyleManager()
+
+def apply_theme(mode: str) -> None:
+    """Switch theme mode and apply palette & stylesheet to the app."""
+    theme_manager.switch_theme(mode)
+    app = QApplication.instance()
+    if app is None:
+        return
+    t = theme_manager.get_current_theme()
+    palette = QPalette()
+    palette.setColor(QPalette.Window, QColor(t.BACKGROUND))
+    palette.setColor(QPalette.WindowText, QColor(t.TEXT_PRIMARY))
+    palette.setColor(QPalette.Base, QColor(t.SURFACE))
+    palette.setColor(QPalette.AlternateBase, QColor(t.SURFACE_VARIANT))
+    palette.setColor(QPalette.Text, QColor(t.TEXT_PRIMARY))
+    palette.setColor(QPalette.Button, QColor(t.SURFACE))
+    palette.setColor(QPalette.ButtonText, QColor(t.TEXT_PRIMARY))
+    palette.setColor(QPalette.Highlight, QColor(t.PRIMARY))
+    palette.setColor(QPalette.HighlightedText, QColor(t.TEXT_ON_PRIMARY))
+    app.setPalette(palette)
+    app.setStyleSheet(style_manager.get_complete_stylesheet())
