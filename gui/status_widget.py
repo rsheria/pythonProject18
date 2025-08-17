@@ -3,7 +3,7 @@ import logging
 import os
 import threading
 from PyQt5.QtCore import QTimer, Qt, QSize, QEvent, QObject
-from PyQt5.QtGui import QColor, QPalette
+from PyQt5.QtGui import QColor, QPalette, QBrush
 from PyQt5.QtWidgets import (
     QAbstractScrollArea,
     QHeaderView,
@@ -177,6 +177,7 @@ class StatusWidget(QWidget):
         self._bar_at = {}
 
         self._apply_readability_palette()
+        self._row_brushes = self._status_brushes(self.table.palette())
 
     def reload_from_disk(self, *_):
         """Reload the status snapshot from disk for the current user."""
@@ -191,6 +192,17 @@ class StatusWidget(QWidget):
         if event.type() == QEvent.PaletteChange:
             # لو المستخدم بدّل Light/Dark نعيد ضبط الألوان المشتقة
             self._apply_readability_palette()
+            self._row_brushes = self._status_brushes(self.table.palette())
+            model = self.table.model()
+            stage_col = self._col_map.get("Stage")
+            for row in range(self.table.rowCount()):
+                txt = self.table.item(row, stage_col).text() if stage_col is not None and self.table.item(row, stage_col) else ""
+                stage = self._stage_from_text(txt)
+                self._color_row(row, stage)
+            if self.table.rowCount():
+                tl = model.index(0, 0)
+                br = model.index(self.table.rowCount() - 1, self.table.columnCount() - 1)
+                model.dataChanged.emit(tl, br, [Qt.BackgroundRole])
             self.table.viewport().update()
         super().changeEvent(event)
 
@@ -216,43 +228,54 @@ class StatusWidget(QWidget):
             return f"{h:d}:{m:02d}:{s:02d}"
         return f"{m:d}:{s:02d}"
 
-    def _color_row(self, row: int, stage: OpStage) -> None:
+    def _status_brushes(self, pal: QPalette) -> dict:
+        """توليد فرش ملوّنة مشتقة من الـPalette الحالى."""
+        brushes = {}
+        hl = pal.color(QPalette.Highlight)
+        alt = pal.color(QPalette.AlternateBase)
+        base = pal.color(QPalette.Base)
+
+        c = QColor(hl)
+        c.setAlpha(160)
+        brushes[OpStage.FINISHED] = QBrush(c)
+
+        c = QColor(alt)
+        c.setAlpha(120)
+        brushes[OpStage.RUNNING] = QBrush(c)
+
+        c = QColor(hl.darker(140))
+        c.setAlpha(160)
+        brushes[OpStage.ERROR] = QBrush(c)
+
+        cancelled = getattr(OpStage, 'CANCELLED', None)
+        if cancelled is not None:
+            c = QColor(base.darker(115))
+            c.setAlpha(140)
+            brushes[cancelled] = QBrush(c)
+        return brushes
+
+    def _color_row(self, row: int, stage: OpStage, op_type: OpType | None = None) -> None:
         pal = self.table.palette()
         base_role = QPalette.Base if row % 2 == 0 else QPalette.AlternateBase
         base = pal.color(base_role)
-        hl = pal.color(QPalette.Highlight)
-
-        overlay = None
-        if stage == OpStage.FINISHED:
-            overlay = QColor(hl.lighter(130))
-        elif stage == OpStage.RUNNING:
-            overlay = QColor(hl.lighter(110))
-        elif stage == OpStage.ERROR:
-            overlay = QColor(hl.darker(125))
-        elif stage == getattr(OpStage, 'CANCELLED', None):
-            overlay = QColor(hl.darker(150))
+        overlay = self._row_brushes.get(stage)
         if overlay is not None:
-            overlay.setAlpha(60)
+            oc = overlay.color()
+            a = oc.alpha()
+            color = QColor(
+                (base.red() * (255 - a) + oc.red() * a) // 255,
+                (base.green() * (255 - a) + oc.green() * a) // 255,
+                (base.blue() * (255 - a) + oc.blue() * a) // 255,
+            )
+        else:
+            color = base
+        brush = QBrush(color)
         for col in range(self.table.columnCount()):
             item = self.table.item(row, col)
             if item is None:
                 item = QTableWidgetItem("")
                 self.table.setItem(row, col, item)
-            if overlay is not None:
-                color = QColor(
-                    (base.red() * (255 - overlay.alpha()) + overlay.red() * overlay.alpha()) // 255,
-                    (base.green() * (255 - overlay.alpha()) + overlay.green() * overlay.alpha()) // 255,
-                    (base.blue() * (255 - overlay.alpha()) + overlay.blue() * overlay.alpha()) // 255,
-                )
-            else:
-                color = base
-            item.setBackground(color)
-        if overlay is None:
-            model = self.table.model()
-            top_left = model.index(row, 0)
-            bottom_right = model.index(row, self.table.columnCount() - 1)
-            model.dataChanged.emit(top_left, bottom_right, [Qt.BackgroundRole])
-
+            item.setBackground(brush)
     # Status handling -----------------------------------------------------
     def _ensure_bar(self, row: int, col: int) -> QProgressBar:
         key = (row, col)
@@ -419,9 +442,6 @@ class StatusWidget(QWidget):
                 self.table.item(row, H["Speed"]).setText(row_data.get("speed", "-"))
                 self.table.item(row, H["ETA"]).setText(row_data.get("eta", "-"))
 
-                # لون الصف من الـStage
-                self._color_row(row, self._stage_from_text(stage_text))
-
                 # البروجريس العام: اعرض فقط لو > 0
                 g = int(row_data.get("progress") or 0)
                 if g > 0:
@@ -440,6 +460,14 @@ class StatusWidget(QWidget):
                         self._set_progress_visual(row, col, v)
                     else:
                         self._clear_progress_cell(row, col)
+
+                # لون الصف من الـStage
+                stage = self._stage_from_text(stage_text)
+                self._color_row(row, stage)
+                model = self.table.model()
+                tl = model.index(row, 0)
+                br = model.index(row, self.table.columnCount() - 1)
+                model.dataChanged.emit(tl, br, [Qt.BackgroundRole])
 
             self.table.resizeColumnsToContents()
             self.table.viewport().update()
@@ -596,7 +624,12 @@ class StatusWidget(QWidget):
                         self._set_progress_cell(row, host_col, 0)
 
         # تلوين الصف حسب المرحلة
-        self._color_row(row, getattr(st, "stage", None))
+        stage = getattr(st, "stage", None)
+        self._color_row(row, stage, st.op_type)
+        model = self.table.model()
+        tl = model.index(row, 0)
+        br = model.index(row, self.table.columnCount() - 1)
+        model.dataChanged.emit(tl, br, [Qt.BackgroundRole])
 
         self._schedule_status_save()
 
