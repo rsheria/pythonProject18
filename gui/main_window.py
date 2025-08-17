@@ -504,10 +504,29 @@ class ForumBotGUI(QMainWindow):
 
     def register_worker(self, worker):
         if hasattr(worker, 'progress_update'):
-            worker.progress_update.connect(self.status_widget.handle_status)
+            worker.progress_update.connect(
+                self.status_widget.handle_status, Qt.QueuedConnection
+            )
             self.status_widget.connect_worker(worker)
-        # Automatically show status panel when any worker starts
-        if hasattr(self, 'sidebar'):
+        elif hasattr(worker, 'file_progress_update'):
+            def _adapter(link_id, pct, stage, cur, tot, name, speed, eta):
+                status = OperationStatus(
+                    section="Downloads",
+                    item=name,
+                    op_type=OpType.DOWNLOAD,
+                    stage=OpStage.RUNNING if pct < 100 else OpStage.FINISHED,
+                    message=stage,
+                    progress=pct,
+                    speed=speed,
+                    eta=eta,
+                    host="",
+                )
+                self.status_widget.handle_status(status)
+
+            worker.file_progress_update.connect(_adapter, Qt.QueuedConnection)
+            self.status_widget.connect_worker(worker)
+        self.status_widget.connect_worker(worker)
+        if hasattr(self, "sidebar"):
             self.sidebar.set_active_item_by_text("STATUS")
         else:
             self.content_area.setCurrentWidget(self.status_widget)

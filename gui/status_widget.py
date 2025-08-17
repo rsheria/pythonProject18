@@ -2,6 +2,8 @@
 import logging
 import os
 import threading
+
+from PyQt5.QtCore import QObject, Qt
 from PyQt5.QtCore import QObject
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
@@ -131,6 +133,7 @@ class StatusWidget(QWidget):
             bar.setRange(0, 100)
             bar.setTextVisible(True)
             bar.setFormat("%p%")
+            bar.setStyleSheet("QProgressBar::chunk { background-color: #00aa00; }")
             self.table.setCellWidget(row, col, bar)
             self._bar_at[key] = bar
         return bar
@@ -145,6 +148,7 @@ class StatusWidget(QWidget):
                 self.table.setItem(row, col, QTableWidgetItem(""))
             self._row_by_key[key] = row
 
+        # نصوص الأعمدة الأساسية
         data = [
             st.section,
             st.item,
@@ -154,26 +158,56 @@ class StatusWidget(QWidget):
             self._fmt_eta(st.eta),
         ]
         for col, value in enumerate(data):
-            item = self.table.item(row, col)
-            if item is None:
-                item = QTableWidgetItem("")
-                self.table.setItem(row, col, item)
-            item.setText(str(value))
+            it = self.table.item(row, col)
+            if it is None:
+                it = QTableWidgetItem("")
+                self.table.setItem(row, col, it)
+            it.setText(str(value))
 
+        # ✅ حدِّث البار العام دايمًا (للداونلود والابلود)
+        gbar = self._ensure_bar(row, 6)
+        try:
+            gbar.setValue(max(0, min(100, int(st.progress))))
+        except Exception:
+            gbar.setValue(0)
+
+        # ✅ لو Upload حدِّث كمان بار المضيف بعد تطبيع الاسم
         if st.op_type == OpType.UPLOAD:
-            host = (st.host or "").lower()
-            col = self._host_col_index.get(host)
+            host_key = (st.host or "").lower()
+            for base in ("rapidgator", "ddownload", "nitroflare", "katfile", "mega"):
+                if host_key.startswith(base):
+                    host_key = base
+                    break
+            col = self._host_col_index.get(host_key)
             if col is not None:
-                bar = self._ensure_bar(row, col)
-                bar.setValue(max(0, min(100, int(st.progress))))
-        else:
-            bar = self._ensure_bar(row, 6)
-            bar.setValue(max(0, min(100, int(st.progress))))
+                hbar = self._ensure_bar(row, col)
+                try:
+                    hbar.setValue(max(0, min(100, int(st.progress))))
+                except Exception:
+                    hbar.setValue(0)
 
         self._color_row(row, st.stage)
+
     def connect_worker(self, worker: QObject) -> None:
         # لو الووركر بيدعم cancel_event، خلّيه ياخده (اختيارى)
         try:
+            if hasattr(worker, "progress_update"):
+                worker.progress_update.connect(self.handle_status, Qt.QueuedConnection)
+            elif hasattr(worker, "file_progress_update"):
+                def _adapter(link_id, pct, stage, cur, tot, name, speed, eta):
+                    status = OperationStatus(
+                        section="Downloads",
+                        item=name,
+                        op_type=OpType.DOWNLOAD,
+                        stage=OpStage.RUNNING if pct < 100 else OpStage.FINISHED,
+                        message=stage,
+                        progress=pct,
+                        speed=speed,
+                        eta=eta,
+                        host="",
+                    )
+                    self.handle_status(status)
+                worker.file_progress_update.connect(_adapter, Qt.QueuedConnection)
             if hasattr(worker, "set_cancel_event"):
                 worker.set_cancel_event(self.cancel_event)
             elif hasattr(worker, "cancel_event"):
