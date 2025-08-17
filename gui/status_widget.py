@@ -2,7 +2,8 @@
 import logging
 import os
 import threading
-
+from PyQt5.QtCore import QTimer
+from core.user_manager import get_user_manager
 from PyQt5.QtCore import QObject, Qt
 from PyQt5.QtCore import QObject
 from PyQt5.QtGui import QColor, QPalette
@@ -18,13 +19,86 @@ from PyQt5.QtWidgets import (
 )
 from integrations.jd_client import hard_cancel
 from models.operation_status import OperationStatus, OpStage, OpType
+from PyQt5.QtWidgets import QStyledItemDelegate, QStyleOptionProgressBar, QStyle, QApplication
+from PyQt5.QtCore import QSize
+from PyQt5.QtCore import Qt, QSize, QEvent
+from PyQt5.QtWidgets import QStyledItemDelegate, QStyleOptionProgressBar, QStyle, QApplication
+from PyQt5.QtGui import QPalette
+
+class ProgressBarDelegate(QStyledItemDelegate):
+    """ProgressBar يحترم الـPalette الحالية ويرفع التباين تلقائيًا فى الدارك."""
+    @staticmethod
+    def _is_dark(pal: QPalette) -> bool:
+        c = pal.color(QPalette.Window)
+        # تقدير إضاءة اللون (0=داكن)
+        lum = 0.2126 * c.redF() + 0.7152 * c.greenF() + 0.0722 * c.blueF()
+        return lum < 0.5
+
+    def paint(self, painter, option, index):
+        # نرسم البار فقط لو فيه قيمة فى UserRole
+        val = index.data(Qt.UserRole)
+        if val is None:
+            return QStyledItemDelegate.paint(self, painter, option, index)
+
+        try:
+            value = int(val)
+        except Exception:
+            value = 0
+        value = max(0, min(100, value))
+
+        # ارسم الخلفية الافتراضية (سيليكشن/رو باكجراوند)
+        QStyledItemDelegate.paint(self, painter, option, index)
+
+        pal = QPalette(option.palette)
+        dark = self._is_dark(pal)
+
+        # خلفية البروجريس (مشتقة من Base بلا ألوان ثابتة)
+        base_bg = pal.color(QPalette.Base)
+        btn_bg = base_bg.lighter(115) if dark else base_bg.darker(102)
+
+        # لون الشريط (Highlight) مُحسّن للتباين
+        chunk = pal.color(QPalette.Highlight)
+        chunk = chunk.lighter(130) if dark else chunk.darker(100)
+
+        # لون النص على الشريط
+        text_col = pal.color(QPalette.HighlightedText)
+        if dark and text_col.lightnessF() > 0.85:
+            text_col = pal.color(QPalette.BrightText)
+        if (not dark) and text_col.lightnessF() < 0.15:
+            text_col = pal.color(QPalette.WindowText)
+
+        pal.setColor(QPalette.Button, btn_bg)
+        pal.setColor(QPalette.Window, btn_bg)
+        pal.setColor(QPalette.Highlight, chunk)
+        pal.setColor(QPalette.HighlightedText, text_col)
+
+        opt = QStyleOptionProgressBar()
+        opt.rect = option.rect.adjusted(2, 6, -2, -6)  # padding بسيط
+        opt.minimum = 0
+        opt.maximum = 100
+        opt.progress = value
+        opt.text = f"{value}%"
+        opt.textVisible = True
+        opt.textAlignment = Qt.AlignCenter
+        opt.state = option.state
+        opt.palette = pal
+
+        QApplication.style().drawControl(QStyle.CE_ProgressBar, opt, painter)
+
+    def sizeHint(self, option, index):
+        sz = super().sizeHint(option, index)
+        return QSize(sz.width(), max(sz.height(), 22))
+
+
+
+
 
 HOST_COLS = {
     "rapidgator": "RG",
+    "rapidgator_bak": "RG_BAK",
     "ddownload": "DDL",
     "katfile": "KF",
     "nitroflare": "NF",
-    "mega": "MEGA",
 }
 
 log = logging.getLogger(__name__)
@@ -42,22 +116,37 @@ class StatusWidget(QWidget):
         layout = QVBoxLayout(self)
         self.table = QTableWidget(self)
         headers = [
-            "Section",
-            "Item",
-            "Stage",
-            "Message",
-            "Speed",
-            "ETA",
-            "Progress",
-            "RG",
-            "DDL",
-            "KF",
-            "NF",
-            "MEGA",
+            "Section", "Item", "Stage", "Message", "Speed", "ETA",
+            "Progress", "RG", "DDL", "KF", "NF", "RG_BAK",
         ]
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
+        # أعمدة البروجريس
+        try:
+            self._progress_col = [self.table.horizontalHeaderItem(i).text() for i in
+                                  range(self.table.columnCount())].index("Progress")
+        except ValueError:
+            self._progress_col = None
+
+        # أعمدة الهوستات بالترتيب الثابت
+        host_header_names = ["RG", "DDL", "KF", "NF", "RG_BAK"]  # ثابتة زى ما انت محدد
+        self._host_cols = []
+        for name in host_header_names:
+            try:
+                idx = [self.table.horizontalHeaderItem(i).text() for i in range(self.table.columnCount())].index(name)
+                self._host_cols.append(idx)
+            except ValueError:
+                pass
+
+        # ثبت الـDelegate
+        self._progress_delegate = ProgressBarDelegate(self.table)
+        if self._progress_col is not None:
+            self.table.setItemDelegateForColumn(self._progress_col, self._progress_delegate)
+        for c in self._host_cols:
+            self.table.setItemDelegateForColumn(c, self._progress_delegate)
+
         self._host_col_index = {host: headers.index(label) for host, label in HOST_COLS.items()}
+
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setAlternatingRowColors(True)
 
@@ -65,6 +154,22 @@ class StatusWidget(QWidget):
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setStretchLastSection(True)
         header.setSectionResizeMode(3, QHeaderView.Stretch)
+
+        # خرائط الأعمدة بالاسم (لازم تكون نفس رؤوس الجدول)
+        self._col_map = {self.table.horizontalHeaderItem(i).text(): i for i in range(self.table.columnCount())}
+
+        # إعداد الحفظ المؤجل (debounce) عشان مانكتبش الملف مع كل tick
+        self._persist_filename = "status_snapshot.json"
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(800)  # ms
+        self._save_timer.timeout.connect(self._save_status_snapshot, Qt.QueuedConnection)
+
+        # جرّب تحميل آخر Snapshot لليوزر الحالى
+        try:
+            self._load_status_snapshot()
+        except Exception as e:
+            logging.warning(f"STATUS restore failed: {e}")
 
         self.table.verticalHeader().setVisible(False)
         self.table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
@@ -76,7 +181,16 @@ class StatusWidget(QWidget):
         layout.addWidget(self.btn_cancel)
 
         self._row_by_key = {}
+        self._thread_steps = {}  # 🆕 تجميع خطوات كل Thread => {(section,item): {(op,host)->state}}
         self._bar_at = {}
+
+        self._apply_readability_palette()
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.PaletteChange:
+            # لو المستخدم بدّل Light/Dark نعيد ضبط الألوان المشتقة
+            self._apply_readability_palette()
+        super().changeEvent(event)
 
     # Helpers -------------------------------------------------------------
     @staticmethod
@@ -138,55 +252,325 @@ class StatusWidget(QWidget):
             self._bar_at[key] = bar
         return bar
 
+    # 🆕 Thread aggregation helpers --------------------------------------
+    # ---------- Persistence Helpers (per-user) ----------
+    def _user_mgr(self):
+        try:
+            return get_user_manager()
+        except Exception:
+            return None
+
+    def _schedule_status_save(self):
+        """ابدأ/جدّد المؤقت لحفظ Snapshot قريبًا."""
+        if hasattr(self, "_save_timer") and self._save_timer:
+            self._save_timer.start()
+
+    def _get_progress_value(self, row: int, col: int) -> int:
+        """يقرأ قيمة البروجريس من الخلية سواء Delegate(UserRole) أو QProgressBar."""
+        # 1) Delegate/UserRole
+        it = self.table.item(row, col)
+        if it is not None:
+            val = it.data(Qt.UserRole)
+            if val is not None:
+                try:
+                    return int(val)
+                except Exception:
+                    pass
+        # 2) Widget-based progress bar (إن وُجد)
+        try:
+            from PyQt5.QtWidgets import QProgressBar
+            w = self.table.cellWidget(row, col)
+            if isinstance(w, QProgressBar):
+                return int(w.value())
+        except Exception:
+            pass
+        # 3) نص محتمل
+        try:
+            return int(self.table.item(row, col).text().strip().strip('%'))
+        except Exception:
+            return 0
+
+    def _set_progress_visual(self, row: int, col: int, value: int):
+        """يضبط البروجريس فى الخلية بأى آلية متوفرة (Delegate أو Bar)."""
+        value = max(0, min(100, int(value or 0)))
+        # لو عندك دالة _set_progress_cell (Delegate)، استخدمها
+        if hasattr(self, "_set_progress_cell"):
+            self._set_progress_cell(row, col, value)
+            return
+        # وإلا استخدم الـQProgressBar القديم
+        if hasattr(self, "_ensure_bar"):
+            bar = self._ensure_bar(row, col)
+            bar.setValue(value)
+        else:
+            it = self.table.item(row, col)
+            if it is None:
+                it = QTableWidgetItem("")
+                self.table.setItem(row, col, it)
+            it.setData(Qt.UserRole, value)
+            model = self.table.model()
+            idx = model.index(row, col)
+            model.dataChanged.emit(idx, idx, [Qt.DisplayRole, Qt.UserRole])
+
+    def _row_snapshot(self, row: int, key_tuple=None) -> dict:
+        """يمثّل صف الجدول كـ dict جاهز للحفظ."""
+        H = self._col_map
+        get = lambda name: self.table.item(row, H[name]).text() if name in H and self.table.item(row, H[name]) else ""
+        prog = lambda name: self._get_progress_value(row, H[name]) if name in H else 0
+        snap = {
+            "section": get("Section"),
+            "item": get("Item"),
+            "stage": get("Stage"),
+            "message": get("Message"),
+            "speed": get("Speed"),
+            "eta": get("ETA"),
+            "progress": prog("Progress"),
+            "hosts": {
+                "rapidgator": prog("RG"),
+                "ddownload": prog("DDL"),
+                "katfile": prog("KF"),
+                "nitroflare": prog("NF"),
+                "rapidgator_bak": prog("RG_BAK"),
+            },
+            "key": list(key_tuple) if key_tuple else None,  # (section,item,op_type)
+        }
+        return snap
+
+    def _table_snapshot(self) -> dict:
+        """ياخد Snapshot لكل الصفوف الحالية keyed بنفس مفاتيحك الداخلية."""
+        rows = []
+        # لو عندك self._row_by_key: استفد منه عشان نحفظ الـop_type
+        if hasattr(self, "_row_by_key") and isinstance(self._row_by_key, dict):
+            # نقلب الماب: row -> key
+            inv = {row: key for key, row in self._row_by_key.items()}
+            for row in range(self.table.rowCount()):
+                rows.append(self._row_snapshot(row, inv.get(row)))
+        else:
+            for row in range(self.table.rowCount()):
+                rows.append(self._row_snapshot(row, None))
+        return {"version": 1, "rows": rows}
+
+    def _save_status_snapshot(self):
+        """يحفظ Snapshot للـSTATUS فى ملف اليوزر."""
+        mgr = self._user_mgr()
+        if not mgr or not mgr.get_current_user():
+            return  # مافيش يوزر مُسجّل
+        data = self._table_snapshot()
+        try:
+            ok = mgr.save_user_data(self._persist_filename, data)
+            if not ok:
+                logging.warning("STATUS snapshot not saved (save_user_data returned False)")
+        except Exception as e:
+            logging.warning(f"STATUS snapshot save failed: {e}")
+
+    def _load_status_snapshot(self):
+        """يسترجع Snapshot من ملف اليوزر ويعيد بناء الصفوف."""
+        mgr = self._user_mgr()
+        if not mgr or not mgr.get_current_user():
+            return
+        data = mgr.load_user_data(self._persist_filename, default=None)
+        if not data or "rows" not in data:
+            return
+        H = self._col_map
+        for row_data in data.get("rows", []):
+            # جهّز صف جديد
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            for c in range(self.table.columnCount()):
+                if self.table.item(row, c) is None:
+                    self.table.setItem(row, c, QTableWidgetItem(""))
+
+            # النصوص الأساسية
+            def put(name, value):
+                if name in H:
+                    self.table.item(row, H[name]).setText(value or "")
+
+            put("Section", row_data.get("section", ""))
+            put("Item", row_data.get("item", ""))
+            put("Stage", row_data.get("stage", ""))
+            put("Message", row_data.get("message", ""))
+            put("Speed", row_data.get("speed", ""))
+            put("ETA", row_data.get("eta", ""))
+
+            # البروجريس العام
+            if "Progress" in H:
+                self._set_progress_visual(row, H["Progress"], row_data.get("progress", 0))
+
+            # بروجريس الهوستات (لو موجودة)
+            hosts = row_data.get("hosts", {}) or {}
+            for name, col_name in [
+                ("rapidgator", "RG"),
+                ("ddownload", "DDL"),
+                ("katfile", "KF"),
+                ("nitroflare", "NF"),
+                ("rapidgator_bak", "RG_BAK"),
+            ]:
+                if col_name in H:
+                    self._set_progress_visual(row, H[col_name], int(hosts.get(name, 0) or 0))
+
+            # أعِد بناء مفتاح الصف لو متاح عندك
+            key = row_data.get("key")
+            if key and hasattr(self, "_row_by_key"):
+                try:
+                    self._row_by_key[tuple(key)] = row
+                except Exception:
+                    pass
+
+    def _normalize_host(self, host_raw: str) -> str:
+        h = (host_raw or "").lower()
+        if not h or h == "-":
+            return ""
+        if "rapidgator" in h and ("bak" in h or "backup" in h or "secondary" in h):
+            return "rapidgator_bak"
+        if h.startswith("rapidgator"):
+            return "rapidgator"
+        for base in ("ddownload", "katfile", "nitroflare"):
+            if h.startswith(base):
+                return base
+        return h
+
+    def _step_key(self, st: OperationStatus) -> tuple:
+        """Unique key per step inside a thread."""
+        if st.op_type == OpType.UPLOAD:
+            return (st.op_type.name, self._normalize_host(st.host))
+        return (st.op_type.name, None)
+
+    def _record_step(self, st: OperationStatus) -> None:
+        """Persist last known state for each step under the thread."""
+        th_key = (st.section, st.item)
+        steps = self._thread_steps.setdefault(th_key, {})
+        skey = self._step_key(st)
+        steps[skey] = {
+            "progress": max(0, min(100, int(getattr(st, "progress", 0) or 0))),
+            "finished": st.stage == OpStage.FINISHED,
+            "error": st.stage == OpStage.ERROR,
+            "host": self._normalize_host(st.host) if st.op_type == OpType.UPLOAD else "",
+        }
+
+    def _is_dark_palette(self, pal: QPalette) -> bool:
+        c = pal.color(QPalette.Window)
+        lum = 0.2126 * c.redF() + 0.7152 * c.greenF() + 0.0722 * c.blueF()
+        return lum < 0.5
+
+    def _apply_readability_palette(self):
+        """تحسين تباين صفوف الجدول (بدون ألوان ثابتة)."""
+        pal = QPalette(self.table.palette())
+        dark = self._is_dark_palette(pal)
+        base = pal.color(QPalette.Base)
+        # AlternateBase أوضح شوية من Base
+        alt = base.lighter(112) if dark else base.darker(104)
+        pal.setColor(QPalette.AlternateBase, alt)
+        self.table.setPalette(pal)
+        self.table.setAlternatingRowColors(True)
+        # هيدر مقروء أكتر من غير ألوان
+        self.table.horizontalHeader().setStyleSheet(
+            "QHeaderView::section{font-weight:600;padding:6px;}"
+        )
+
+    def _ensure_item(self, row: int, col: int):
+        it = self.table.item(row, col)
+        if it is None:
+            it = QTableWidgetItem("")
+            # نخلى الستايل النصى شفاف لأن الـDelegate هيرسم
+            it.setData(Qt.DisplayRole, "")
+            self.table.setItem(row, col, it)
+        return it
+
+    def _set_progress_cell(self, row: int, col: int, value: int):
+        """يحدّث خلية بروجريس (0..100) ويعمل dataChanged للـModel."""
+        if col is None or col < 0:
+            return
+        value = 0 if value is None else int(max(0, min(100, value)))
+        it = self._ensure_item(row, col)
+        it.setData(Qt.UserRole, value)
+        model = self.table.model()
+        idx = model.index(row, col)
+        # نبعث إشارة تغيير البيانات عشان الـDelegate يرسم فورًا
+        model.dataChanged.emit(idx, idx, [Qt.DisplayRole, Qt.UserRole])
+
+    def _clear_progress_cell(self, row: int, col: int):
+        """يمسح أى Progress من الخلية (فتطلع فاضية من غير 0%)."""
+        if col is None or col < 0:
+            return
+        it = self._ensure_item(row, col)
+        it.setData(Qt.UserRole, None)
+        model = self.table.model()
+        idx = model.index(row, col)
+        model.dataChanged.emit(idx, idx, [Qt.DisplayRole, Qt.UserRole])
+
     def handle_status(self, st: OperationStatus) -> None:
+        # صف العملية: (section, item, op_type)
         key = (st.section, st.item, st.op_type.name)
         row = self._row_by_key.get(key)
         if row is None:
             row = self.table.rowCount()
             self.table.insertRow(row)
             for col in range(self.table.columnCount()):
-                self.table.setItem(row, col, QTableWidgetItem(""))
+                self._ensure_item(row, col)
             self._row_by_key[key] = row
 
         # نصوص الأعمدة الأساسية
-        data = [
-            st.section,
-            st.item,
-            st.stage.name.title(),
-            st.message,
-            self._fmt_speed(st.speed),
-            self._fmt_eta(st.eta),
+        txts = [
+            st.section or "",
+            st.item or "",
+            (getattr(st.stage, "name", str(st.stage)) or "").title(),
+            st.message or "",
+            self._fmt_speed(getattr(st, "speed", None)),
+            self._fmt_eta(getattr(st, "eta", None)),
         ]
-        for col, value in enumerate(data):
-            it = self.table.item(row, col)
-            if it is None:
-                it = QTableWidgetItem("")
-                self.table.setItem(row, col, it)
-            it.setText(str(value))
+        for c, v in enumerate(txts):
+            self._ensure_item(row, c).setText(str(v))
 
-        # ✅ حدِّث البار العام دايمًا (للداونلود والابلود)
-        gbar = self._ensure_bar(row, 6)
-        try:
-            gbar.setValue(max(0, min(100, int(st.progress))))
-        except Exception:
-            gbar.setValue(0)
+        # سجّل الخطوة (نحتاجه لحساب متوسط رفع متعدد الهوستات)
+        self._record_step(st)
 
-        # ✅ لو Upload حدِّث كمان بار المضيف بعد تطبيع الاسم
-        if st.op_type == OpType.UPLOAD:
-            host_key = (st.host or "").lower()
-            for base in ("rapidgator", "ddownload", "nitroflare", "katfile", "mega"):
-                if host_key.startswith(base):
-                    host_key = base
-                    break
-            col = self._host_col_index.get(host_key)
-            if col is not None:
-                hbar = self._ensure_bar(row, col)
+        # ✅ Progress العمومى:
+        if hasattr(self, "_progress_col") and self._progress_col is not None:
+            if st.op_type == OpType.UPLOAD:
+                # متوسط كل هوستات الرفع تحت نفس الثريد
+                steps = self._thread_steps.get((st.section, st.item), {})
+                ups = [s["progress"] for (op_name, _h), s in steps.items() if op_name == "UPLOAD"]
+                avg_up = int(round(sum(ups) / len(ups))) if ups else int(getattr(st, "progress", 0) or 0)
+                self._set_progress_cell(row, self._progress_col, avg_up)
+            else:
+                # Download/Extract/Compress/... استخدم قيمة العملية نفسها
                 try:
-                    hbar.setValue(max(0, min(100, int(st.progress))))
+                    self._set_progress_cell(row, self._progress_col, int(getattr(st, "progress", 0) or 0))
                 except Exception:
-                    hbar.setValue(0)
+                    self._set_progress_cell(row, self._progress_col, 0)
 
-        self._color_row(row, st.stage)
+        # ✅ لو Upload: حدِّث عمود الهوست الخاص بيه، غير كده سيب أعمدة الهوست فاضية
+        if st.op_type == OpType.UPLOAD:
+            host_raw = (getattr(st, "host", "") or "").lower()
+            if "rapidgator" in host_raw and any(x in host_raw for x in ("bak", "backup", "secondary")):
+                host_name = "RG_BAK"
+            elif host_raw.startswith("rapidgator"):
+                host_name = "RG"
+            elif host_raw.startswith("ddownload"):
+                host_name = "DDL"
+            elif host_raw.startswith("katfile"):
+                host_name = "KF"
+            elif host_raw.startswith("nitroflare"):
+                host_name = "NF"
+            else:
+                host_name = ""
+
+            if host_name:
+                try:
+                    host_col = [self.table.horizontalHeaderItem(i).text() for i in
+                                range(self.table.columnCount())].index(host_name)
+                except ValueError:
+                    host_col = None
+
+                if host_col is not None:
+                    try:
+                        self._set_progress_cell(row, host_col, int(getattr(st, "progress", 0) or 0))
+                    except Exception:
+                        self._set_progress_cell(row, host_col, 0)
+
+        # تلوين الصف حسب المرحلة
+        self._color_row(row, getattr(st, "stage", None))
+
+        self._schedule_status_save()
 
     def connect_worker(self, worker: QObject) -> None:
         # لو الووركر بيدعم cancel_event، خلّيه ياخده (اختيارى)
