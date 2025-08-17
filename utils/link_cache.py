@@ -53,6 +53,8 @@ def persist_link_replacement(
         if thread is not None:
             links_dict = thread.setdefault("links", {})
             links_dict[host] = list(link_statuses.keys())
+            # Remove legacy container placeholder if present
+            links_dict.pop("keeplinks", None)
             save_process_threads()
     except Exception:
         # Fail silently – persistence issues are logged by the caller.

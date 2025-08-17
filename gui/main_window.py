@@ -3727,8 +3727,9 @@ class ForumBotGUI(QMainWindow):
 
         - Finds the thread backing *row_idx* using Category (col 1), Title (col 0),
           and falls back to matching Thread ID (col 2) if needed.
-        - Writes chosen_url under its hostname (e.g., 'rapidgator.net'),
-          clears 'keeplinks', and (in single-host mode) drops other hosts.
+        - Writes all direct links for the chosen host under its hostname
+          (e.g., 'rapidgator.net') as a list.
+        - Removes any 'keeplinks' placeholder entry for this thread.
         - Updates both the root-level thread_info['links'] and latest version
           (if a versions list exists), then saves via save_process_threads_data().
         """
@@ -3798,26 +3799,24 @@ class ForumBotGUI(QMainWindow):
                 log.debug("PERSIST SKIP | row=%s | reason=no_host", row_idx)
                 return
 
-            # Keep only the chosen direct URL in single-host mode
-            new_links = {
-                chosen_host_norm: [l for l in [chosen_url] if l],
-                'rapidgator-backup': [],  # keep shape; don’t overwrite if you don’t want to
-                'keeplinks': ''
-            }
+            # Gather all direct links for the chosen host
+            extracted_links = [chosen_url] + [
+                s.get('url') for s in (siblings or []) if s.get('url')
+            ]
 
             # 4) Write back into the model (root and latest version if present)
             # Root
             links_root = thread_info.setdefault('links', {})
-            links_root.clear()
-            links_root.update(new_links)
+            links_root[chosen_host_norm] = list(extracted_links)
+            links_root.pop('keeplinks', None)
 
             # Versions
             versions_list = thread_info.setdefault('versions', [])
             if versions_list:
                 last = versions_list[-1]
                 vlinks = last.setdefault('links', {})
-                vlinks.clear()
-                vlinks.update(new_links)
+                vlinks[chosen_host_norm] = list(extracted_links)
+                vlinks.pop('keeplinks', None)
 
             # 5) Persist to disk and refresh indices
             if hasattr(self, 'save_process_threads_data'):
