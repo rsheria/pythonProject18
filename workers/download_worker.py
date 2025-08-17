@@ -133,17 +133,23 @@ class DownloadWorker(QThread):
         self.is_paused = False
         self.cancel_event = cancel_event
         self.base_download_dir = Path(self.bot.download_dir)
-        self.max_concurrent    = 4
 
-        self.download_queue        = Queue()
+        # الحد “المنطقي” الداخلي لو مش هنستخدم JD
+        self.max_concurrent = 4
+        # حد تغذية كبير عند توافر JDownloader (يغذي كل اللينكات)
+        self.jd_bulk_limit = 256
+
+        self.download_queue = Queue()
         self.active_link_downloads = {}
         self.thread_info_map = {}
         self.lock = Lock()
-        self.thread_pool = ThreadPoolExecutor(max_workers=self.max_concurrent)
-        
+
+        # نخلي الـ executor على الحد الكبير؛ الجدولة هتتحكم بعدد المهام حسب وجود JD
+        self.thread_pool = ThreadPoolExecutor(max_workers=self.jd_bulk_limit)
+
         # Get user manager for reading priority settings
         self.user_manager = get_user_manager()
-        
+
         # 🆔 Session tracking to prevent cross-talk between download sessions
         import time
         self.worker_session_id = f"worker_{int(time.time() * 1000)}_{id(self)}"
@@ -261,9 +267,18 @@ class DownloadWorker(QThread):
                     logging.info("⛔ Cancel detected inside loop, breaking out")
                     break
 
-                # شغّل تحميلات جديدة حسب الحد الأقصى
+                # شغّل تحميلات جديدة — لو JD متاح: غذّي كل اللينكات (حتى 256)
+                jd_available = False
+                try:
+                    dl = getattr(self.bot, "_shared_jd_downloader", None)
+                    jd_available = (dl is not None and dl.is_available())
+                except Exception:
+                    jd_available = False
+
+                limit = self.jd_bulk_limit if jd_available else self.max_concurrent
+
                 while (
-                        len(self.active_link_downloads) < self.max_concurrent
+                        len(self.active_link_downloads) < limit
                         and not self.download_queue.empty()
                         and not self.cancel_event.is_set()
                 ):
@@ -437,7 +452,7 @@ class DownloadWorker(QThread):
 
             # Smart priority system from user settings
             priority_hosts = self.get_download_hosts_priority()
-            
+
             # Organize links by priority
             organized_links = {}
             for host, lst in links_dict.items():
@@ -448,7 +463,7 @@ class DownloadWorker(QThread):
                             organized_links[priority_host] = []
                         organized_links[priority_host].extend(lst)
                         break
-            
+
             # Select primary links based on priority
             primary = []
             selected_host = None
@@ -457,16 +472,16 @@ class DownloadWorker(QThread):
                     primary = organized_links[priority_host]
                     selected_host = priority_host
                     logging.info(
-                        f"📥 Selected {priority_host} for '{thread_title}' (Priority #{priority_hosts.index(priority_host)+1})"
+                        f"📥 Selected {priority_host} for '{thread_title}' (Priority #{priority_hosts.index(priority_host) + 1})"
                     )
                     break
-            
+
             if not primary:
                 msg = f"❌ No supported hosts found for '{thread_title}'. Available: {list(links_dict.keys())}"
                 logging.warning(msg)
                 self.status_update.emit(msg)
                 continue
-            
+
             # Set fallback links (all other available hosts)
             fallback = []
             for priority_host in priority_hosts:
@@ -503,7 +518,7 @@ class DownloadWorker(QThread):
     def start_link_download(self, info):
         link_id = info["link_id"]
         self.active_link_downloads[link_id] = info
-        
+
         # ✅ Better filename extraction for display
         filename = os.path.basename(info["link"])
         if not filename or filename.startswith("?") or len(filename) < 3:
@@ -512,7 +527,7 @@ class DownloadWorker(QThread):
         elif len(filename) > 80:
             # Truncate very long filenames
             filename = filename[:77] + "..."
-            
+
         # 🆔 Session-aware signal emission to prevent cross-talk
         logging.debug(
             f"📶 Emitting file_created signal (Session: {self.worker_session_id}, File: {filename})"
@@ -530,11 +545,11 @@ class DownloadWorker(QThread):
                         return
                     while self.is_paused and not self._is_cancelled():
                         time.sleep(0.1)
-                    
+
                     # 🛡️ Validate inputs
                     if not hasattr(self, "file_progress") or cur is None or tot is None:
                         return
-                        
+
                     # Handle enhanced callback format from improved downloaders
                     if len(args) > 0 and isinstance(args[0], (int, float)):
                         # New format: progress_cb(cur, tot, display_name, progress_percent)
@@ -545,11 +560,11 @@ class DownloadWorker(QThread):
                         # Legacy format: progress_cb(cur, tot, filename)
                         display_name = fn if fn else "Unknown"
                         pct = max(0, min(100, int((cur / tot) * 100) if tot > 0 else 0))
-                    
+
                     # 🛡️ Safe signal emission
                     if hasattr(self, "file_progress") and "row" in info:
                         self.file_progress.emit(info["row"], pct)
-                    
+
                     # Calculate speed and ETA
                     elapsed = time.time() - start
                     speed = cur / elapsed if elapsed and cur else 0.0
@@ -587,7 +602,7 @@ class DownloadWorker(QThread):
                             speed,
                             eta,
                         )
-                        
+
                 except Exception as e:
                     logging.debug(f"Progress callback error (non-critical): {e}")
 
@@ -598,14 +613,14 @@ class DownloadWorker(QThread):
             if not dl:
                 err = f"No downloader for {url}"
                 logging.error(err)
-                
+
                 # 🛡️ Protected error signal
                 try:
                     if hasattr(self, "download_error"):
                         self.download_error.emit(info["row"], err)
                 except Exception as e:
                     logging.debug(f"Error signal emission failed: {e}")
-                    
+
                 info["completed"] = True
                 return
 
@@ -685,7 +700,7 @@ class DownloadWorker(QThread):
                                 progress_callback=progress_cb,
                                 download_dir=str(info["thread_dir"]),
                             )
-                        
+
                         if fallback_success:
                             success = True
                             break
@@ -693,7 +708,7 @@ class DownloadWorker(QThread):
             if not success:
                 err = f"Download failed => {url}"
                 logging.error(err)
-                
+
                 # 🛡️ Protected error signal
                 try:
                     if hasattr(self, "download_error"):
@@ -735,13 +750,13 @@ class DownloadWorker(QThread):
                     self.file_progress_update.emit(
                         link_id, 100, "Complete", 0, 0, filename, 0.0, 0.0
                     )
-                    
+
                 if hasattr(self, "download_success"):
                     self.download_success.emit(info["row"])
-                    
+
             except Exception as e:
                 logging.debug(f"Completion signal error (non-critical): {e}")
-                
+
             logging.debug("Download job completed for link_id=%s", link_id)
 
         self.thread_pool.submit(download_job)

@@ -499,6 +499,9 @@ class ForumBotGUI(QMainWindow):
         self.status_widget = StatusWidget(self)
         self.content_area.addWidget(self.status_widget)
 
+    # اربط الـ StatusWidget بالـ bot عشان JDownloader يشوف cancel_event بتاع الواجهة
+        self.bot.status_widget = self.status_widget
+
     def register_worker(self, worker):
         if hasattr(worker, 'progress_update'):
             self.status_widget.connect_worker(worker)

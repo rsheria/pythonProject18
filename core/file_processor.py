@@ -498,8 +498,11 @@ class FileProcessor:
             return False
 
     def _create_rar_archive(self, source_dir: Path, output_base: Path) -> bool:
-        """Create a RAR archive with store method, volume=1GB, RAR5 format."""
+        """Create a RAR archive with store method, volume=1GB, RAR5 format, and put contents under a root folder inside the archive."""
         try:
+            # نستخدم اسم الملف النهائي كفولدر جذري داخل الأرشيف
+            folder_prefix = output_base.name
+
             cmd = [
                 str(self.winrar_path),
                 'a',
@@ -511,21 +514,22 @@ class FileProcessor:
                 '-rr3p',
                 '-ma5',
                 '-x*.ini',
+                f'-ap"{folder_prefix}"',  # <- فولدر داخلي في الأرشيف
                 str(output_base) + '.rar',
-                str(source_dir / "*")  # Fix: Include contents, not directory itself
+                str(source_dir / "*")  # Include contents, not directory itself
             ]
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
             )
             success = (result.returncode in [0, 1])
             if success:
-                # Verify archive presence
+                # Verify archive presence (single or multi-volume .part*.rar)
                 archive_exists = (
-                    (output_base.parent / f"{output_base.name}.rar").exists()
-                    or list(output_base.parent.glob(f"{output_base.name}.part*.rar"))
+                        (output_base.parent / f"{output_base.name}.rar").exists()
+                        or list(output_base.parent.glob(f"{output_base.name}.part*.rar"))
                 )
                 if not archive_exists:
                     logging.error("RAR archive not found after creation.")
@@ -541,7 +545,7 @@ class FileProcessor:
             return False
 
     def _create_zip_archive(self, source_dir: Path, output_base: Path) -> bool:
-        """Create a ZIP archive with store method, volume=1GB."""
+        """Create a ZIP archive with store method, volume=1GB, and put contents under a root folder inside the archive."""
         try:
             file_list = [
                 f for f in source_dir.rglob('*')
@@ -550,6 +554,9 @@ class FileProcessor:
             if not file_list:
                 logging.error("No files to archive after filtering for ZIP.")
                 return False
+
+            # نستخدم اسم الملف النهائي كفولدر جذري داخل الأرشيف
+            folder_prefix = output_base.name
 
             cmd = [
                 str(self.winrar_path),
@@ -561,20 +568,22 @@ class FileProcessor:
                 '-y',
                 '-afzip',
                 '-x*.ini',
+                f'-ap"{folder_prefix}"',  # <- فولدر داخلي في الأرشيف
                 str(output_base) + '.zip',
-                str(source_dir / "*"),  # Fix: Include contents, not directory itself
+                str(source_dir / "*"),  # Include contents, not directory itself
             ]
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
             )
             success = (result.returncode in [0, 1])
             if success:
+                # Verify archive presence (single or multi-volume .z01/.z02... plus .zip)
                 archive_exists = (
-                    (output_base.parent / f"{output_base.name}.zip").exists()
-                    or list(output_base.parent.glob(f"{output_base.name}.z*"))
+                        (output_base.parent / f"{output_base.name}.zip").exists()
+                        or list(output_base.parent.glob(f"{output_base.name}.z*"))
                 )
                 if not archive_exists:
                     logging.error("ZIP archive not found after creation.")
@@ -793,83 +802,187 @@ class FileProcessor:
                     break
         return final_archives
 
-    def _safely_remove_directory(self, directory: Path) -> None:
-        """Safely remove directory and contents with retries."""
+    def _win_long_path(self, p: Path) -> str:
+        """Return Windows long-path (\\?\) string if on Windows, else normal str."""
+        s = str(Path(p).absolute())
+        if os.name == 'nt':
+            s = s.replace('/', '\\')
+            if not s.startswith('\\\\?\\'):
+                s = '\\\\?\\' + s
+        return s
+
+    def _rmtree_onerror(self, func, path, exc_info):
+        """shutil.rmtree onerror: clear attributes & retry; uses WinAPI for long paths."""
+        import ctypes, stat
+        try:
+            if os.name == 'nt':
+                ctypes.windll.kernel32.SetFileAttributesW(self._win_long_path(Path(path)), 0x80)  # NORMAL
+            try:
+                os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+            except Exception:
+                pass
+            func(path)
+        except Exception:
+            if os.name == 'nt':
+                try:
+                    lp = self._win_long_path(Path(path))
+                    if func in (os.remove, os.unlink):
+                        ctypes.windll.kernel32.DeleteFileW(lp)
+                    elif func in (os.rmdir,):
+                        ctypes.windll.kernel32.RemoveDirectoryW(lp)
+                except Exception:
+                    pass
+
+    def _safely_remove_directory(self, directory: Path, retries: int = 30, delay: float = 0.25) -> None:
+        """Remove directory & contents reliably (handles long paths on Windows)."""
+        import shutil, ctypes, stat
         if not directory.exists():
             return
 
-        max_retries = 3
-        delay = 1
+        win = (os.name == 'nt')
 
-        if os.name == 'nt':
+        # 1) على ويندوز: لو المسار طويل جداً انقله مؤقتاً لمسار قصير في جذر الدرايف
+        if win:
             try:
-                for path in directory.rglob('*'):
-                    try:
-                        import win32api
-                        import win32con
-                        win32api.SetFileAttributes(str(path), win32con.FILE_ATTRIBUTE_NORMAL)
-                    except:
-                        continue
-            except:
+                dir_abs = Path(directory).absolute()
+                if len(str(dir_abs)) > 240:
+                    root_tmp = Path(dir_abs.anchor) / f"_to_delete_{int(time.time())}"
+                    src_lp = self._win_long_path(dir_abs)
+                    dst_lp = self._win_long_path(root_tmp)
+                    MOVEFILE_REPLACE_EXISTING = 0x1
+                    MOVEFILE_COPY_ALLOWED = 0x2
+                    ok = ctypes.windll.kernel32.MoveFileExW(src_lp, dst_lp,
+                                                            MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)
+                    if not ok:
+                        dir_abs.rename(root_tmp)
+                    directory = root_tmp
+            except Exception:
                 pass
 
-        for attempt in range(max_retries):
+            # امسح السمات لكل العناصر قبل الحذف
             try:
-                shutil.rmtree(directory, ignore_errors=True)
+                for p in directory.rglob('*'):
+                    try:
+                        ctypes.windll.kernel32.SetFileAttributesW(self._win_long_path(p), 0x80)  # NORMAL
+                        try:
+                            os.chmod(str(p), stat.S_IWRITE | stat.S_IREAD)
+                        except Exception:
+                            pass
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        # 2) rmtree بمحاولات + onerror قوي
+        for _ in range(retries):
+            try:
+                target = self._win_long_path(directory) if win else str(directory)
+                shutil.rmtree(target, ignore_errors=False, onerror=self._rmtree_onerror)
                 if not directory.exists():
                     logging.info(f"Successfully removed directory: {directory}")
                     return
             except PermissionError:
-                if attempt < max_retries - 1:
-                    time.sleep(delay)
-                    continue
-            except Exception as e:
-                logging.error(f"Error removing directory {directory}: {str(e)}")
-                return
+                time.sleep(delay)
+                continue
+            except Exception:
+                time.sleep(delay)
+                continue
 
-            if attempt == max_retries - 1 and directory.exists():
+        # 3) فولباك نهائي: احذف العناصر واحد واحد ثم احذف المجلد نفسه
+        try:
+            for p in sorted(directory.rglob('*'), key=lambda x: len(str(x)), reverse=True):
                 try:
-                    for path in directory.rglob('*'):
+                    if p.is_file() or p.is_symlink():
+                        if win:
+                            ctypes.windll.kernel32.SetFileAttributesW(self._win_long_path(p), 0x80)
                         try:
-                            if path.is_file():
-                                os.chmod(str(path), 0o777)
-                                path.unlink()
-                            elif path.is_dir():
-                                os.chmod(str(path), 0o777)
-                                path.rmdir()
-                        except:
-                            continue
-                    if directory.exists():
-                        os.chmod(str(directory), 0o777)
-                        directory.rmdir()
-                except:
-                    logging.warning(f"Could not completely remove directory: {directory}")
+                            os.chmod(str(p), 0o777)
+                        except Exception:
+                            pass
+                        try:
+                            p.unlink(missing_ok=True)
+                        except Exception:
+                            if win:
+                                try:
+                                    ctypes.windll.kernel32.DeleteFileW(self._win_long_path(p))
+                                except Exception:
+                                    pass
+                    elif p.is_dir():
+                        if win:
+                            ctypes.windll.kernel32.SetFileAttributesW(self._win_long_path(p), 0x80)
+                        try:
+                            os.chmod(str(p), 0o777)
+                        except Exception:
+                            pass
+                        try:
+                            p.rmdir()
+                        except Exception:
+                            if win:
+                                try:
+                                    ctypes.windll.kernel32.RemoveDirectoryW(self._win_long_path(p))
+                                except Exception:
+                                    pass
+                except Exception:
+                    continue
 
-    def _safely_remove_file(self, file_path: Path) -> bool:
-        """Safely remove a file with retries."""
-        max_retries = 3
-        delay = 1
-        for attempt in range(max_retries):
+            # أخيرًا احذف الفولدر نفسه
             try:
-                if os.name == 'nt':
+                if win:
+                    ctypes.windll.kernel32.SetFileAttributesW(self._win_long_path(directory), 0x80)
+                try:
+                    os.chmod(str(directory), 0o777)
+                except Exception:
+                    pass
+                if win:
                     try:
-                        import win32api
-                        import win32con
-                        win32api.SetFileAttributes(str(file_path), win32con.FILE_ATTRIBUTE_NORMAL)
-                    except:
+                        ctypes.windll.kernel32.RemoveDirectoryW(self._win_long_path(directory))
+                    except Exception:
                         pass
+                if directory.exists():
+                    try:
+                        directory.rmdir()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            if directory.exists():
+                logging.warning(f"Could not completely remove directory: {directory}")
+        except Exception as e:
+            logging.warning(f"Final fallback failed for {directory}: {e}")
+
+    def _safely_remove_file(self, file_path: Path, retries: int = 30, delay: float = 0.25) -> bool:
+        """Remove a single file reliably (handles long paths on Windows)."""
+        import ctypes, stat
+        win = (os.name == 'nt')
+        for _ in range(retries):
+            try:
                 if file_path.exists():
-                    os.chmod(str(file_path), 0o777)
-                    file_path.unlink()
+                    if win:
+                        try:
+                            ctypes.windll.kernel32.SetFileAttributesW(self._win_long_path(file_path), 0x80)
+                        except Exception:
+                            pass
+                    try:
+                        os.chmod(str(file_path), stat.S_IWRITE | stat.S_IREAD)
+                    except Exception:
+                        pass
+                    try:
+                        file_path.unlink(missing_ok=True)
+                    except Exception:
+                        if win:
+                            try:
+                                ctypes.windll.kernel32.DeleteFileW(self._win_long_path(file_path))
+                            except Exception:
+                                pass
                 return True
             except PermissionError:
-                if attempt < max_retries - 1:
-                    time.sleep(delay)
-                    continue
-            except Exception as e:
-                logging.error(f"Error removing file {file_path}: {str(e)}")
-                return False
-        logging.warning(f"Failed to remove file {file_path} after {max_retries} attempts")
+                time.sleep(delay)
+                continue
+            except Exception:
+                time.sleep(delay)
+                continue
+        logging.warning(f"Failed to remove file {file_path}")
         return False
 
     def _organize_downloads(self, files: List[str], target_dir: Path) -> List[Path]:

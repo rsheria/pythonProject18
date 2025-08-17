@@ -546,6 +546,9 @@ class LinkCheckWorker(QtCore.QThread):
             # أرسل حالة أول اختيار + الأشقاء
             chosen_url = ""
             chosen_status = "UNKNOWN"
+            # أرسل حالة أول اختيار + الأشقاء
+            chosen_url = ""
+            chosen_status = "UNKNOWN"
             siblings: List[dict] = []
             if selected:
                 first = selected[0]
@@ -557,6 +560,7 @@ class LinkCheckWorker(QtCore.QThread):
                         "status": self._availability(it),
                     })
 
+                # ابعت ستاتس لأول اختيار
                 self.progress.emit({
                     "type": "status",
                     "session_id": self.session_id,
@@ -569,7 +573,21 @@ class LinkCheckWorker(QtCore.QThread):
                           self.session_id, row_idx, canonical_url(chosen_url), chosen_status,
                           time.monotonic() - self._start_time)
 
-            # تحضير استبدال تلقائي (يحترم الـACK)
+                # (الجديد) ابعت ستاتس برضه لكل الأشقاء، عشان يبان في اللوج ويتحفظوا في الكاش
+                for s in siblings:
+                    su = (s.get("url") or "").strip()
+                    ss = (s.get("status") or "UNKNOWN").upper()
+                    if su:
+                        self.progress.emit({
+                            "type": "status",
+                            "session_id": self.session_id,
+                            "row": row_idx,
+                            "url": su,
+                            "status": ss,
+                            "dur": time.monotonic() - self._start_time,
+                        })
+
+            # تحضير الاستبدال التلقائي (يحترم الـACK)
             group_id = ""
             do_replace = self.auto_replace and bool(selected_ids)
             if do_replace:
@@ -580,14 +598,14 @@ class LinkCheckWorker(QtCore.QThread):
                     "row": row_idx,
                 }
 
-            # باكدج للـGUI (نوع=container) لو الـGUI محتاجه
+            # باكدج للـGUI (نوع=container)
             self.progress.emit({
                 "type": "container",
                 "container_url": container_url,
                 "final_url": chosen_url,
                 "chosen": {"url": chosen_url, "status": chosen_status, "host": picked or ""},
-                "siblings": siblings,
-                "replace": do_replace,
+                "siblings": siblings,  # ← فيه كل الأجزاء
+                "replace": do_replace,  # ← لازم تبقى True علشان يحصل الاستبدال
                 "session_id": self.session_id,
                 "group_id": group_id,
                 "idx": idx,
