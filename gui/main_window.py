@@ -260,6 +260,7 @@ class LinkStatusDelegate(QStyledItemDelegate):
 class ForumBotGUI(QMainWindow):
     # Define Qt signals for thread-safe UI updates
     thread_status_updated = pyqtSignal()
+    user_logged_in = pyqtSignal(str)
     
     # Define supported file extensions
     ARCHIVE_EXTENSIONS = ('.rar', '.zip')
@@ -498,6 +499,10 @@ class ForumBotGUI(QMainWindow):
     def init_status_view(self):
         self.status_widget = StatusWidget(self)
         self.content_area.addWidget(self.status_widget)
+
+        self.user_logged_in.connect(
+            self.status_widget.reload_from_disk, Qt.QueuedConnection
+        )
 
     # اربط الـ StatusWidget بالـ bot عشان JDownloader يشوف cancel_event بتاع الواجهة
         self.bot.status_widget = self.status_widget
@@ -2631,6 +2636,7 @@ class ForumBotGUI(QMainWindow):
         username = self.bot.username
         if username:
             self.user_manager.set_current_user(username)
+            self.user_logged_in.emit(username)
             logging.info(f" User '{username}' logged in successfully")
             
             # Update config with current username for backward compatibility

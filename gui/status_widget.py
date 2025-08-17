@@ -165,12 +165,6 @@ class StatusWidget(QWidget):
         self._save_timer.setInterval(800)  # ms
         self._save_timer.timeout.connect(self._save_status_snapshot, Qt.QueuedConnection)
 
-        # جرّب تحميل آخر Snapshot لليوزر الحالى
-        try:
-            self._load_status_snapshot()
-        except Exception as e:
-            logging.warning(f"STATUS restore failed: {e}")
-
         self.table.verticalHeader().setVisible(False)
         self.table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
         layout.addWidget(self.table)
@@ -186,6 +180,15 @@ class StatusWidget(QWidget):
 
         self._apply_readability_palette()
 
+    def reload_from_disk(self, *_):
+        """Reload the status snapshot from disk for the current user."""
+        self.table.setRowCount(0)
+        self._row_by_key.clear()
+        self._thread_steps.clear()
+        self._bar_at.clear()
+        self._load_status_snapshot()
+        self.table.resizeColumnsToContents()
+        self.table.viewport().update()
     def changeEvent(self, event):
         if event.type() == QEvent.PaletteChange:
             # لو المستخدم بدّل Light/Dark نعيد ضبط الألوان المشتقة
@@ -362,58 +365,76 @@ class StatusWidget(QWidget):
         except Exception as e:
             logging.warning(f"STATUS snapshot save failed: {e}")
 
+    # --- أضِف داخل class StatusWidget ---
+    def _stage_from_text(self, text: str):
+        t = (text or "").strip().lower()
+        if t in ("finished", "complete", "completed", "done"):
+            return OpStage.FINISHED
+        if t in ("cancelled", "canceled"):
+            return getattr(OpStage, "CANCELLED", OpStage.ERROR)
+        if t in ("error", "failed", "failure"):
+            return OpStage.ERROR
+        return OpStage.RUNNING
+
+    # --- عدّل الدالة بالكامل ---
     def _load_status_snapshot(self):
-        """يسترجع Snapshot من ملف اليوزر ويعيد بناء الصفوف."""
-        mgr = self._user_mgr()
-        if not mgr or not mgr.get_current_user():
-            return
-        data = mgr.load_user_data(self._persist_filename, default=None)
-        if not data or "rows" not in data:
-            return
-        H = self._col_map
-        for row_data in data.get("rows", []):
-            # جهّز صف جديد
-            row = self.table.rowCount()
-            self.table.insertRow(row)
-            for c in range(self.table.columnCount()):
-                if self.table.item(row, c) is None:
+        try:
+            from core.user_manager import get_user_manager
+            um = get_user_manager()
+            user = um.get_current_user() if um else None
+            if not user:
+                return
+            path = um.get_user_file_path(user, self._persist_filename)
+            if not os.path.exists(path):
+                return
+
+            import json
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            rows = data.get("rows", [])
+            H = self._col_map  # خريطة الأعمدة بالاسم
+            for row_data in rows:
+                row = self.table.rowCount()
+                self.table.insertRow(row)
+                for c in range(self.table.columnCount()):
                     self.table.setItem(row, c, QTableWidgetItem(""))
 
-            # النصوص الأساسية
-            def put(name, value):
-                if name in H:
-                    self.table.item(row, H[name]).setText(value or "")
+                # نصوص أساسية
+                self.table.item(row, H["Section"]).setText(row_data.get("section", ""))
+                self.table.item(row, H["Item"]).setText(row_data.get("item", ""))
+                stage_text = row_data.get("stage", "")
+                self.table.item(row, H["Stage"]).setText(stage_text)
+                self.table.item(row, H["Message"]).setText(row_data.get("message", ""))
+                self.table.item(row, H["Speed"]).setText(row_data.get("speed", "-"))
+                self.table.item(row, H["ETA"]).setText(row_data.get("eta", "-"))
 
-            put("Section", row_data.get("section", ""))
-            put("Item", row_data.get("item", ""))
-            put("Stage", row_data.get("stage", ""))
-            put("Message", row_data.get("message", ""))
-            put("Speed", row_data.get("speed", ""))
-            put("ETA", row_data.get("eta", ""))
+                # لون الصف من الـStage
+                self._color_row(row, self._stage_from_text(stage_text))
 
-            # البروجريس العام
-            if "Progress" in H:
-                self._set_progress_visual(row, H["Progress"], row_data.get("progress", 0))
+                # البروجريس العام: اعرض فقط لو > 0
+                g = int(row_data.get("progress") or 0)
+                if g > 0:
+                    self._set_progress_visual(row, H["Progress"], g)
+                else:
+                    self._clear_progress_cell(row, H["Progress"])
 
-            # بروجريس الهوستات (لو موجودة)
-            hosts = row_data.get("hosts", {}) or {}
-            for name, col_name in [
-                ("rapidgator", "RG"),
-                ("ddownload", "DDL"),
-                ("katfile", "KF"),
-                ("nitroflare", "NF"),
-                ("rapidgator_bak", "RG_BAK"),
-            ]:
-                if col_name in H:
-                    self._set_progress_visual(row, H[col_name], int(hosts.get(name, 0) or 0))
+                # بروجريس الهوستات: اعرض فقط لو > 0
+                hosts = row_data.get("hosts", {}) or {}
+                for name in ("RG", "DDL", "KF", "NF", "RG_BAK"):
+                    col = H.get(name)
+                    if col is None:
+                        continue
+                    v = int(hosts.get(name) or 0)
+                    if v > 0:
+                        self._set_progress_visual(row, col, v)
+                    else:
+                        self._clear_progress_cell(row, col)
 
-            # أعِد بناء مفتاح الصف لو متاح عندك
-            key = row_data.get("key")
-            if key and hasattr(self, "_row_by_key"):
-                try:
-                    self._row_by_key[tuple(key)] = row
-                except Exception:
-                    pass
+            self.table.resizeColumnsToContents()
+            self.table.viewport().update()
+        except Exception as e:
+            log.error("Failed to load status snapshot", exc_info=True)
 
     def _normalize_host(self, host_raw: str) -> str:
         h = (host_raw or "").lower()
