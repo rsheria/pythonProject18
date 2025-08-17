@@ -504,6 +504,7 @@ class ForumBotGUI(QMainWindow):
 
     def register_worker(self, worker):
         if hasattr(worker, 'progress_update'):
+            worker.progress_update.connect(self.status_widget.handle_status)
             self.status_widget.connect_worker(worker)
         # Automatically show status panel when any worker starts
         if hasattr(self, 'sidebar'):
@@ -1807,7 +1808,7 @@ class ForumBotGUI(QMainWindow):
                     eta=eta,
                     host="rapidgator.net",
                 )
-                self.status_widget.model.upsert(status)
+                self.status_widget.handle_status(status)
 
             result = self.bot.download_rapidgator_net(
                 rg_link,
@@ -1831,7 +1832,7 @@ class ForumBotGUI(QMainWindow):
                     message="Failed",
                     host="rapidgator.net",
                 )
-                self.status_widget.model.upsert(fail_status)
+                self.status_widget.handle_status(fail_status)
             state['current_index'] += 1
             self._download_next_rg_link()
 
@@ -1896,7 +1897,7 @@ class ForumBotGUI(QMainWindow):
             stage=OpStage.RUNNING,
             message="Processing files",
         )
-        self.status_widget.model.upsert(process_status)
+        self.status_widget.handle_status(process_status)
         processed_files = self.file_processor.process_downloads(
             Path(reupload_folder), moved_files, thread_title, password
         )
@@ -1908,7 +1909,7 @@ class ForumBotGUI(QMainWindow):
         process_status.stage = OpStage.FINISHED
         process_status.message = "Processing complete"
         process_status.progress = 100
-        self.status_widget.model.upsert(process_status)
+        self.status_widget.handle_status(process_status)
 
         # Upload to all active hosts including Rapidgator backup
         hosts = list(self.active_upload_hosts) if self.active_upload_hosts else []
@@ -8882,7 +8883,7 @@ class ForumBotGUI(QMainWindow):
             stage=OpStage.QUEUED,
             message="Waiting",
         )
-        self.status_widget.model.upsert(init_status)
+        self.status_widget.handle_status(init_status)
 
         worker = ProceedTemplateWorker(
             bot=self.bot,

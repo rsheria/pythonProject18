@@ -1,54 +1,31 @@
-# -*- coding: utf-8 -*-
-import threading
-import time
+
 import logging
 import os
-from PyQt5.QtCore import QObject, Qt
+import threading
+from PyQt5.QtCore import QObject
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
-    QApplication,
     QAbstractScrollArea,
     QHeaderView,
-    QTableView,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
-    QStyledItemDelegate,
-    QStyle,
-    QStyleOptionProgressBar,
     QPushButton,
+    QProgressBar,
 )
-
-# مهم: الدالة دى لازم تكون اتضافت فى integrations/jd_client.py حسب ما اتفقنا
 from integrations.jd_client import hard_cancel
-from .status_model import StatusTableModel
+from models.operation_status import OperationStatus, OpStage, OpType
 
+HOST_COLS = {
+    "rapidgator": "RG",
+    "ddownload": "DDL",
+    "katfile": "KF",
+    "nitroflare": "NF",
+    "mega": "MEGA",
+}
 
 log = logging.getLogger(__name__)
-
-
-class ProgressBarDelegate(QStyledItemDelegate):
-    """Display integer progress values as a green progress bar."""
-    def paint(self, painter, option, index):  # type: ignore[override]
-        value = int(index.data(Qt.DisplayRole) or 0)
-        opt = QStyleOptionProgressBar()
-        opt.rect = option.rect
-        opt.minimum = 0
-        opt.maximum = 100
-        opt.progress = value
-        opt.text = f"{value}%"
-        opt.textVisible = True
-        opt.textAlignment = Qt.AlignCenter
-        opt.state = option.state | QStyle.State_Enabled
-        # adapt progress bar colour to theme
-        palette = QApplication.palette()
-        opt.palette = palette
-        base = palette.color(QPalette.Base)
-        is_dark = base.lightness() < 128
-        bar_color = QColor("#66bb6a") if is_dark else QColor("#2e7d32")
-        opt.palette.setColor(QPalette.Highlight, bar_color)
-        opt.palette.setColor(QPalette.HighlightedText, QColor("white"))
-        QApplication.style().drawControl(QStyle.CE_ProgressBar, opt, painter)
-
 
 class StatusWidget(QWidget):
     """
@@ -60,27 +37,35 @@ class StatusWidget(QWidget):
     """
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.model = StatusTableModel()
         layout = QVBoxLayout(self)
-
-        self.table = QTableView(self)
-        self.table.setModel(self.model)
-        self.table.setSelectionBehavior(QTableView.SelectRows)
+        self.table = QTableWidget(self)
+        headers = [
+            "Section",
+            "Item",
+            "Stage",
+            "Message",
+            "Speed",
+            "ETA",
+            "Progress",
+            "RG",
+            "DDL",
+            "KF",
+            "NF",
+            "MEGA",
+        ]
+        self.table.setColumnCount(len(headers))
+        self.table.setHorizontalHeaderLabels(headers)
+        self._host_col_index = {host: headers.index(label) for host, label in HOST_COLS.items()}
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setAlternatingRowColors(True)
 
-        # Improve responsiveness and readability
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setStretchLastSection(True)
-        # allow the message column to take remaining space
-        header.setSectionResizeMode(5, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.Stretch)
 
         self.table.verticalHeader().setVisible(False)
         self.table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
-        self.table.setSortingEnabled(True)
-
-        # Use a progress bar delegate for the Progress column
-        self.table.setItemDelegateForColumn(10, ProgressBarDelegate(self.table))
         layout.addWidget(self.table)
 
         self.cancel_event = threading.Event()
@@ -88,10 +73,105 @@ class StatusWidget(QWidget):
         self.btn_cancel.clicked.connect(self.on_cancel_clicked)
         layout.addWidget(self.btn_cancel)
 
+        self._row_by_key = {}
+        self._bar_at = {}
+
+    # Helpers -------------------------------------------------------------
+    @staticmethod
+    def _fmt_speed(bps: float) -> str:
+        if bps <= 0:
+            return "-"
+        units = ["B/s", "KB/s", "MB/s", "GB/s", "TB/s"]
+        idx = 0
+        while bps >= 1024 and idx < len(units) - 1:
+            bps /= 1024.0
+            idx += 1
+        return f"{bps:.1f} {units[idx]}"
+
+    @staticmethod
+    def _fmt_eta(sec: float) -> str:
+        if sec <= 0:
+            return "-"
+        m, s = divmod(int(sec), 60)
+        h, m = divmod(m, 60)
+        if h:
+            return f"{h:d}:{m:02d}:{s:02d}"
+        return f"{m:d}:{s:02d}"
+
+    def _color_row(self, row: int, stage: OpStage) -> None:
+        overlays = {
+            OpStage.RUNNING: QColor(255, 255, 0, 60),
+            OpStage.FINISHED: QColor(0, 255, 0, 60),
+            OpStage.ERROR: QColor(255, 0, 0, 60),
+        }
+        overlay = overlays.get(stage)
+        if not overlay:
+            return
+        pal = self.table.palette()
+        base_role = QPalette.Base if row % 2 == 0 else QPalette.AlternateBase
+        base = pal.color(base_role)
+        for col in range(self.table.columnCount()):
+            item = self.table.item(row, col)
+            if item is None:
+                item = QTableWidgetItem("")
+                self.table.setItem(row, col, item)
+            color = QColor(
+                (base.red() * (255 - overlay.alpha()) + overlay.red() * overlay.alpha()) // 255,
+                (base.green() * (255 - overlay.alpha()) + overlay.green() * overlay.alpha()) // 255,
+                (base.blue() * (255 - overlay.alpha()) + overlay.blue() * overlay.alpha()) // 255,
+            )
+            item.setBackground(color)
+
+    # Status handling -----------------------------------------------------
+    def _ensure_bar(self, row: int, col: int) -> QProgressBar:
+        key = (row, col)
+        bar = self._bar_at.get(key)
+        if bar is None:
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setTextVisible(True)
+            bar.setFormat("%p%")
+            self.table.setCellWidget(row, col, bar)
+            self._bar_at[key] = bar
+        return bar
+
+    def handle_status(self, st: OperationStatus) -> None:
+        key = (st.section, st.item, st.op_type.name)
+        row = self._row_by_key.get(key)
+        if row is None:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            for col in range(self.table.columnCount()):
+                self.table.setItem(row, col, QTableWidgetItem(""))
+            self._row_by_key[key] = row
+
+        data = [
+            st.section,
+            st.item,
+            st.stage.name.title(),
+            st.message,
+            self._fmt_speed(st.speed),
+            self._fmt_eta(st.eta),
+        ]
+        for col, value in enumerate(data):
+            item = self.table.item(row, col)
+            if item is None:
+                item = QTableWidgetItem("")
+                self.table.setItem(row, col, item)
+            item.setText(str(value))
+
+        if st.op_type == OpType.UPLOAD:
+            host = (st.host or "").lower()
+            col = self._host_col_index.get(host)
+            if col is not None:
+                bar = self._ensure_bar(row, col)
+                bar.setValue(max(0, min(100, int(st.progress))))
+        else:
+            bar = self._ensure_bar(row, 6)
+            bar.setValue(max(0, min(100, int(st.progress))))
+
+        self._color_row(row, st.stage)
     def connect_worker(self, worker: QObject) -> None:
-        # توصيل تحديثات التقدّم بالجدول (منطقك الحالى)
-        if hasattr(worker, "progress_update"):
-            worker.progress_update.connect(self.model.upsert)
         # لو الووركر بيدعم cancel_event، خلّيه ياخده (اختيارى)
         try:
             if hasattr(worker, "set_cancel_event"):
