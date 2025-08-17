@@ -381,10 +381,9 @@ class StatusWidget(QWidget):
         try:
             from core.user_manager import get_user_manager
             um = get_user_manager()
-            user = um.get_current_user() if um else None
-            if not user:
+            if not um or not um.get_current_user():
                 return
-            path = um.get_user_file_path(user, self._persist_filename)
+            path = um.get_user_data_path(self._persist_filename)
             if not os.path.exists(path):
                 return
 
