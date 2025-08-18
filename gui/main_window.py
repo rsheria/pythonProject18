@@ -2698,7 +2698,11 @@ class ForumBotGUI(QMainWindow):
                 # Clear user manager session
                 if hasattr(self, 'user_manager') and self.user_manager:
                     self.user_manager.clear_session()
-                
+
+                # Clear status widget so previous user's statuses disappear
+                if hasattr(self, 'status_widget'):
+                    self.status_widget.reload_from_disk()
+
                 # Clear UI elements
                 self.statusBar().showMessage('Logged out')
                 self.login_button.setEnabled(True)

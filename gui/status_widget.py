@@ -231,27 +231,33 @@ class StatusWidget(QWidget):
     def _status_brushes(self, pal: QPalette) -> dict:
         """توليد فرش ملوّنة مشتقة من الـPalette الحالى."""
         brushes = {}
+        dark = self._is_dark_palette(pal)
+
         hl = pal.color(QPalette.Highlight)
-        alt = pal.color(QPalette.AlternateBase)
-        base = pal.color(QPalette.Base)
+        h, s, l, _ = hl.getHsl()
 
-        c = QColor(hl)
-        c.setAlpha(160)
-        brushes[OpStage.FINISHED] = QBrush(c)
+        def from_hue(hue: int, alpha: int) -> QBrush:
+            c = QColor()
+            c.setHsl(hue, s, l)
+            c = c.lighter(130) if dark else c.darker(110)
+            c.setAlpha(alpha)
+            return QBrush(c)
 
-        c = QColor(alt)
-        c.setAlpha(120)
-        brushes[OpStage.RUNNING] = QBrush(c)
+        brushes[OpStage.FINISHED] = from_hue(120, 175)  # اخضر
+        brushes[OpStage.ERROR] = from_hue(0, 165)       # احمر
 
-        c = QColor(hl.darker(140))
-        c.setAlpha(160)
-        brushes[OpStage.ERROR] = QBrush(c)
-
-        cancelled = getattr(OpStage, 'CANCELLED', None)
+        # دعم حالة الإلغاء حتى لو الـEnum ما فيهاش CANCELLED
+        cancel_brush = from_hue(50, 160)  # اصفر
+        brushes["cancelled"] = cancel_brush
+        cancelled = getattr(OpStage, "CANCELLED", None)
         if cancelled is not None:
-            c = QColor(base.darker(115))
-            c.setAlpha(140)
-            brushes[cancelled] = QBrush(c)
+            brushes[cancelled] = cancel_brush
+
+        run_col = pal.color(QPalette.AlternateBase)
+        run_col = run_col.lighter(110) if dark else run_col.darker(110)
+        run_col.setAlpha(150)
+        brushes[OpStage.RUNNING] = QBrush(run_col)
+
         return brushes
 
     def _color_row(self, row: int, stage: OpStage, op_type: OpType | None = None) -> None:
@@ -259,6 +265,8 @@ class StatusWidget(QWidget):
         base_role = QPalette.Base if row % 2 == 0 else QPalette.AlternateBase
         base = pal.color(base_role)
         overlay = self._row_brushes.get(stage)
+        if overlay is None:
+            overlay = self._row_brushes.get(getattr(stage, "name", str(stage)).lower())
         if overlay is not None:
             oc = overlay.color()
             a = oc.alpha()
@@ -405,7 +413,8 @@ class StatusWidget(QWidget):
         if t in ("finished", "complete", "completed", "done"):
             return OpStage.FINISHED
         if t in ("cancelled", "canceled"):
-            return getattr(OpStage, "CANCELLED", OpStage.ERROR)
+            cancelled = getattr(OpStage, "CANCELLED", None)
+            return cancelled if cancelled is not None else "cancelled"
         if t in ("error", "failed", "failure"):
             return OpStage.ERROR
         return OpStage.RUNNING
@@ -564,11 +573,16 @@ class StatusWidget(QWidget):
                 self._ensure_item(row, col)
             self._row_by_key[key] = row
 
+        # استنتج المرحلة مع مراعاة رسائل الأخطاء أو الإلغاء
+        stage = self._stage_from_text(getattr(st, "message", ""))
+        if stage == OpStage.RUNNING:
+            stage = getattr(st, "stage", OpStage.RUNNING)
+
         # نصوص الأعمدة الأساسية
         txts = [
             st.section or "",
             st.item or "",
-            (getattr(st.stage, "name", str(st.stage)) or "").title(),
+            (getattr(stage, "name", str(stage)) or "").title(),
             st.message or "",
             self._fmt_speed(getattr(st, "speed", None)),
             self._fmt_eta(getattr(st, "eta", None)),
@@ -624,7 +638,6 @@ class StatusWidget(QWidget):
                         self._set_progress_cell(row, host_col, 0)
 
         # تلوين الصف حسب المرحلة
-        stage = getattr(st, "stage", None)
         self._color_row(row, stage, st.op_type)
         model = self.table.model()
         tl = model.index(row, 0)
@@ -675,6 +688,23 @@ class StatusWidget(QWidget):
                 parent.cancel_downloads()
         except Exception as e:
             log.debug("cancel_downloads call failed: %s", e)
+
+        # علّم الصفوف الجارية كـ "Cancelled" فورًا فى الواجهة
+        stage_col = self._col_map.get("Stage")
+        if stage_col is not None:
+            model = self.table.model()
+            for row in range(self.table.rowCount()):
+                it = self.table.item(row, stage_col)
+                txt = it.text() if it else ""
+                if self._stage_from_text(txt) == OpStage.RUNNING:
+                    if it is None:
+                        it = self._ensure_item(row, stage_col)
+                    it.setText("Cancelled")
+                    self._color_row(row, "cancelled")
+            if self.table.rowCount():
+                tl = model.index(0, 0)
+                br = model.index(self.table.rowCount() - 1, self.table.columnCount() - 1)
+                model.dataChanged.emit(tl, br, [Qt.BackgroundRole, Qt.DisplayRole])
 
         # (2) تنظيف شامل للـ JD فى Thread منفصل
         try:
