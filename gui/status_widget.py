@@ -3,7 +3,8 @@ import logging
 import os
 import threading
 from PyQt5.QtCore import QTimer, Qt, QSize, QEvent, QObject
-from PyQt5.QtGui import QColor, QPalette, QBrush
+from PyQt5.QtGui import QColor, QPalette, QBrush, QKeySequence
+
 from PyQt5.QtWidgets import (
     QAbstractScrollArea,
     QHeaderView,
@@ -17,6 +18,10 @@ from PyQt5.QtWidgets import (
     QStyleOptionProgressBar,
     QStyle,
     QApplication,
+    QLineEdit,
+    QComboBox,
+    QHBoxLayout,
+    QShortcut,
 )
 from core.user_manager import get_user_manager
 from integrations.jd_client import hard_cancel
@@ -112,6 +117,24 @@ class StatusWidget(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
+        # Filters row -------------------------------------------------
+        filter_layout = QHBoxLayout()
+        self.search_edit = QLineEdit(self)
+        self.section_cb = QComboBox(self)
+        self.stage_cb = QComboBox(self)
+        self.host_cb = QComboBox(self)
+
+        self.search_edit.setPlaceholderText("")
+        self.section_cb.addItem("All")
+        self.stage_cb.addItems(["All", "Running", "Finished", "Cancelled", "Error"])
+        self.host_cb.addItems(["All", "RG", "DDL", "KF", "NF", "RG_BAK"])
+
+        filter_layout.addWidget(self.search_edit)
+        filter_layout.addWidget(self.section_cb)
+        filter_layout.addWidget(self.stage_cb)
+        filter_layout.addWidget(self.host_cb)
+        layout.addLayout(filter_layout)
+
         self.table = QTableWidget(self)
         headers = [
             "Section", "Item", "Stage", "Message", "Speed", "ETA",
@@ -147,6 +170,7 @@ class StatusWidget(QWidget):
 
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setAlternatingRowColors(True)
+        self.table.setSortingEnabled(True)
 
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
@@ -167,6 +191,20 @@ class StatusWidget(QWidget):
         self.table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
         layout.addWidget(self.table)
 
+        # Connect filter widgets
+        self.search_edit.textChanged.connect(self.apply_filter, Qt.QueuedConnection)
+        self.section_cb.currentIndexChanged.connect(self.apply_filter, Qt.QueuedConnection)
+        self.stage_cb.currentIndexChanged.connect(self.apply_filter, Qt.QueuedConnection)
+        self.host_cb.currentIndexChanged.connect(self.apply_filter, Qt.QueuedConnection)
+
+        # Shortcuts
+        sc_focus = QShortcut(QKeySequence("Ctrl+F"), self)
+        sc_focus.activated.connect(self.search_edit.setFocus)
+        sc_clear = QShortcut(QKeySequence(Qt.Key_Escape), self)
+        sc_clear.activated.connect(self._clear_filters)
+        self._sc_focus = sc_focus
+        self._sc_clear = sc_clear
+
         self.cancel_event = threading.Event()
         self.btn_cancel = QPushButton("Cancel", self)
         self.btn_cancel.clicked.connect(self.on_cancel_clicked)
@@ -179,6 +217,83 @@ class StatusWidget(QWidget):
         self._apply_readability_palette()
         self._row_brushes = self._status_brushes(self.table.palette())
 
+    # ------------------------------------------------------------------
+    def _clear_filters(self) -> None:
+        """Clear all filter widgets and reapply."""
+        self.search_edit.setText("")
+        self.section_cb.setCurrentIndex(0)
+        self.stage_cb.setCurrentIndex(0)
+        self.host_cb.setCurrentIndex(0)
+        self.apply_filter()
+
+    def apply_filter(self) -> None:
+        """Apply filters to table rows based on widget values."""
+        q = self.search_edit.text().strip().lower()
+        section = self.section_cb.currentText()
+        stage_txt = self.stage_cb.currentText()
+        host = self.host_cb.currentText()
+
+        section = "" if section == "All" else section
+        host = "" if host == "All" else host
+        stage_filter = None
+        if stage_txt != "All":
+            stage_filter = self._stage_from_text(stage_txt)
+
+        H = self._col_map
+        for row in range(self.table.rowCount()):
+            visible = True
+            # search text
+            if q:
+                found = False
+                for col in range(self.table.columnCount()):
+                    it = self.table.item(row, col)
+                    if it and q in it.text().lower():
+                        found = True
+                        break
+                if not found:
+                    visible = False
+
+            # section filter
+            if visible and section:
+                col = H.get("Section")
+                it = self.table.item(row, col) if col is not None else None
+                if not it or it.text() != section:
+                    visible = False
+
+            # stage filter
+            if visible and stage_filter is not None:
+                col = H.get("Stage")
+                it = self.table.item(row, col) if col is not None else None
+                st = self._stage_from_text(it.text() if it else "")
+                if st != stage_filter:
+                    visible = False
+
+            # host filter
+            if visible and host:
+                col = H.get(host)
+                if col is None or self._get_progress_value(row, col) <= 0:
+                    visible = False
+
+            self.table.setRowHidden(row, not visible)
+
+    def _populate_sections(self) -> None:
+        """Ensure section combo box contains existing sections."""
+        col = self._col_map.get("Section")
+        if col is None:
+            return
+        seen = {self.section_cb.itemText(i) for i in range(self.section_cb.count())}
+        for row in range(self.table.rowCount()):
+            it = self.table.item(row, col)
+            txt = it.text() if it else ""
+            if txt and txt not in seen:
+                self.section_cb.addItem(txt)
+                seen.add(txt)
+
+    def _ensure_section_option(self, section: str) -> None:
+        if not section:
+            return
+        if self.section_cb.findText(section) < 0:
+            self.section_cb.addItem(section)
     def reload_from_disk(self, *_):
         """Reload the status snapshot from disk for the current user."""
         self.table.setRowCount(0)
@@ -392,7 +507,13 @@ class StatusWidget(QWidget):
         else:
             for row in range(self.table.rowCount()):
                 rows.append(self._row_snapshot(row, None))
-        return {"version": 1, "rows": rows}
+        filters = {
+            "q": self.search_edit.text(),
+            "section": self.section_cb.currentText(),
+            "stage": self.stage_cb.currentText(),
+            "host": self.host_cb.currentText(),
+        }
+        return {"version": 1, "rows": rows, "filters": filters}
 
     def _save_status_snapshot(self):
         """يحفظ Snapshot للـSTATUS فى ملف اليوزر."""
@@ -435,6 +556,7 @@ class StatusWidget(QWidget):
                 data = json.load(f)
 
             rows = data.get("rows", [])
+            filters = data.get("filters", {}) or {}
             H = self._col_map  # خريطة الأعمدة بالاسم
             for row_data in rows:
                 row = self.table.rowCount()
@@ -480,6 +602,24 @@ class StatusWidget(QWidget):
 
             self.table.resizeColumnsToContents()
             self.table.viewport().update()
+
+            # Populate filter widgets
+            self._populate_sections()
+
+            def _set_cb(cb, text):
+                if not text:
+                    text = "All"
+                idx = cb.findText(text)
+                if idx < 0:
+                    cb.addItem(text)
+                    idx = cb.findText(text)
+                cb.setCurrentIndex(idx)
+
+            self.search_edit.setText(filters.get("q", ""))
+            _set_cb(self.section_cb, filters.get("section", "All"))
+            _set_cb(self.stage_cb, filters.get("stage", "All"))
+            _set_cb(self.host_cb, filters.get("host", "All"))
+            self.apply_filter()
         except Exception as e:
             log.error("Failed to load status snapshot", exc_info=True)
 
@@ -573,6 +713,9 @@ class StatusWidget(QWidget):
                 self._ensure_item(row, col)
             self._row_by_key[key] = row
 
+        # Ensure section appears in combo box
+        self._ensure_section_option(st.section)
+
         # استنتج المرحلة مع مراعاة رسائل الأخطاء أو الإلغاء
         stage = self._stage_from_text(getattr(st, "message", ""))
         if stage == OpStage.RUNNING:
@@ -646,6 +789,8 @@ class StatusWidget(QWidget):
 
         self._schedule_status_save()
 
+        # Reapply filters after update
+        self.apply_filter()
     def connect_worker(self, worker: QObject) -> None:
         # لو الووركر بيدعم cancel_event، خلّيه ياخده (اختيارى)
         try:
