@@ -508,8 +508,13 @@ class ForumBotGUI(QMainWindow):
         self.status_widget.cancelRequested.connect(
             self._on_upload_cancel, Qt.QueuedConnection
         )
-        self.status_widget.retryRequested.connect(
-            self._on_upload_retry, Qt.QueuedConnection
+        self.status_widget.retryRequested.connect(self._on_upload_retry, Qt.QueuedConnection)
+
+        self.status_widget.resumePendingRequested.connect(
+            self._on_upload_resume_pending, Qt.QueuedConnection
+        )
+        self.status_widget.reuploadAllRequested.connect(
+            self._on_upload_reupload_all, Qt.QueuedConnection
         )
         self.status_widget.openInJDRequested.connect(
             self._on_open_in_jd, Qt.QueuedConnection
@@ -4669,6 +4674,20 @@ class ForumBotGUI(QMainWindow):
                 self.upload_workers[row] = upload_worker
                 self.register_worker(upload_worker)
 
+                meta = {
+                    "row": row,
+                    "folder": thread_dir,
+                    "thread_id": thread_id,
+                    "hosts": self.active_upload_hosts,
+                    "section": upload_worker.section,
+                    "keeplinks_url": upload_worker.keeplinks_url,
+                    "upload_results": upload_worker.upload_results,
+                    "keeplinks_sent": upload_worker.keeplinks_sent,
+                }
+                for f in getattr(upload_worker, "files", []):
+                    key = (upload_worker.section, f.name, OpType.UPLOAD.name)
+                    self.status_widget.update_upload_meta(key, meta)
+
                 # ربط إشارات التقدم والإنهاء بمعالجات الـ GUI
                 upload_worker.upload_complete.connect(self.handle_upload_complete)
                 upload_worker.upload_complete.connect(lambda *_: self._on_upload_worker_complete())
@@ -4694,16 +4713,24 @@ class ForumBotGUI(QMainWindow):
                 if getattr(self, 'auto_retry_mode', False):
                     worker = getattr(self, 'upload_workers', {}).get(row)
                     if worker:
-                        QTimer.singleShot(
-                            10000,
-                            lambda w=worker, r=row: QMetaObject.invokeMethod(
-                                w,
-                                "retry_failed_uploads",
-                                Qt.QueuedConnection,
-                                Q_ARG(int, r),
-                            ),
-                        )
+                        QTimer.singleShot(10000, lambda w=worker, r=row: w.retry_failed_uploads(r))
                 return
+
+            worker = getattr(self, 'upload_workers', {}).get(row)
+            if worker:
+                meta = {
+                    "row": row,
+                    "folder": str(worker.folder_path),
+                    "thread_id": worker.thread_id,
+                    "hosts": worker.hosts,
+                    "section": worker.section,
+                    "keeplinks_url": worker.keeplinks_url,
+                    "upload_results": worker.upload_results,
+                    "keeplinks_sent": worker.keeplinks_sent,
+                }
+                for f in getattr(worker, 'files', []):
+                    key = (worker.section, f.name, OpType.UPLOAD.name)
+                    self.status_widget.update_upload_meta(key, meta)
 
             thread_title = self.process_threads_table.item(row, 0).text()
             category_name = self.process_threads_table.item(row, 1).text()
@@ -4814,6 +4841,38 @@ class ForumBotGUI(QMainWindow):
                 workers.add(worker)
         return workers
 
+    # قبل الهاندلرز، داخل class MainWindow
+    def _spawn_upload_worker_from_meta(self, meta: dict, mode: str = "retry_failed"):
+        """يبنى UploadWorker جديد ويبدأه فى ثريد منفصل (بدون استدعاء Slots تقيلة)."""
+        hosts_all = list(meta.get("hosts", []) or [])
+        hosts = hosts_all[:]
+        results = meta.get("upload_results", {}) or {}
+        if mode == "retry_failed" and results:
+            hosts = [hosts_all[int(i)] for i, s in results.items() if (s or {}).get("status") == "failed"]
+        elif mode == "resume_pending" and results:
+            hosts = [hosts_all[int(i)] for i, s in results.items() if
+                     (s or {}).get("status") in ("failed", "cancelled")]
+        elif mode == "reupload_all":
+            hosts = hosts_all
+
+        if not hosts:
+            hosts = hosts_all  # fallback: ارفع الكل لو مفيش statuses محفوظة
+
+        worker = UploadWorker(
+            bot=self.bot,
+            row=int(meta.get("row", 0)),
+            folder_path=str(meta.get("folder_path", "")),
+            thread_id=str(meta.get("thread_id", "")),
+            upload_hosts=hosts,
+            section=str(meta.get("section", "Uploads")),
+            keeplinks_url=meta.get("keeplinks_url"),
+        )
+        # نفس الربط القياسى بتاعك
+        self.register_worker(worker)  # يوصل progress_update/host_progress...
+        self.status_widget.register_upload_meta_for_worker(worker)
+        worker.start()  # ✅ التقيل يشتغل داخل run()
+        return worker
+
     def _on_upload_pause(self, keys):
         logging.info(f"Pause requested for {keys}")
         self.statusBar().showMessage("Pause requested", 3000)
@@ -4824,6 +4883,8 @@ class ForumBotGUI(QMainWindow):
                 )
             except Exception:
                 pass
+        self.status_widget._schedule_status_save()
+
 
     def _on_upload_resume(self, keys):
         logging.info(f"Resume requested for {keys}")
@@ -4835,7 +4896,7 @@ class ForumBotGUI(QMainWindow):
                 )
             except Exception:
                 pass
-
+        self.status_widget._schedule_status_save()
     def _on_upload_cancel(self, keys):
         logging.info(f"Cancel requested for {keys}")
         self.statusBar().showMessage("Cancel requested", 3000)
@@ -4846,20 +4907,39 @@ class ForumBotGUI(QMainWindow):
                 )
             except Exception:
                 pass
+        self.status_widget._schedule_status_save()
 
+    # anchor: class MainWindow, method _on_upload_retry
     def _on_upload_retry(self, keys):
         logging.info(f"Retry requested for {keys}")
-        self.statusBar().showMessage("Retry requested", 3000)
-        for worker in self._upload_workers_for_keys(keys):
-            try:
-                QMetaObject.invokeMethod(
-                    worker,
-                    "retry_failed_uploads",
-                    Qt.QueuedConnection,
-                    Q_ARG(int, worker.row),
-                )
-            except Exception:
-                pass
+        live = self._upload_workers_for_keys(keys)
+        if live:
+            # لو فيه ووركرات حية: سيبّها تكمّل منطِقها الداخلى (مش هاننده Slots تقيلة هنا)
+            self.statusBar().showMessage("Retry queued on live workers", 3000)
+            for w in live:
+                # اختيارى: لو عندك فلاغ داخلى للـworker خليه يلتقط الريتراى فى run()
+                setattr(w, "retry_on_next_cycle", True)
+            return
+        # مفيش ووركر حى → Spawn من الـmeta
+        for key in keys:
+            meta = self.status_widget.get_upload_meta(key)
+            if not meta:
+                logging.warning("No upload meta for key %s; cannot retry", key);
+                continue
+            self._spawn_upload_worker_from_meta(meta, mode="retry_failed")
+        self.status_widget._schedule_status_save()
+
+    def _on_upload_resume_pending(self, keys):
+        for key in keys:
+            meta = self.status_widget.get_upload_meta(key)
+            if meta: self._spawn_upload_worker_from_meta(meta, mode="resume_pending")
+        self.status_widget._schedule_status_save()
+
+    def _on_upload_reupload_all(self, keys):
+        for key in keys:
+            meta = self.status_widget.get_upload_meta(key)
+            if meta: self._spawn_upload_worker_from_meta(meta, mode="reupload_all")
+        self.status_widget._schedule_status_save()
 
     def _on_open_in_jd(self, keys):
         logging.info(f"Open in JD for {keys}")
@@ -4868,7 +4948,7 @@ class ForumBotGUI(QMainWindow):
             link = self.status_widget.get_jd_link(key)
             if link:
                 QDesktopServices.openUrl(QUrl(link))
-
+        self.status_widget._schedule_status_save()
     def _on_copy_jd_link(self, keys):
         logging.info(f"Copy JD link for {keys}")
         self.statusBar().showMessage("JD link copied", 3000)
@@ -4876,6 +4956,7 @@ class ForumBotGUI(QMainWindow):
         links = [l for l in links if l]
         if links:
             QGuiApplication.clipboard().setText("\n".join(links))
+        self.status_widget._schedule_status_save()
     def apply_auto_process_result(self, job):
         """Apply links from Auto‑Process job back to process_threads data."""
         try:
@@ -6187,12 +6268,6 @@ class ForumBotGUI(QMainWindow):
             for row in selected_rows:
                 if hasattr(self, 'upload_workers') and row in self.upload_workers:
                     worker = self.upload_workers[row]
-                    QMetaObject.invokeMethod(
-                        worker,
-                        "retry_failed_uploads",
-                        Qt.QueuedConnection,
-                        Q_ARG(int, row),
-                    )
                 else:
                     QMessageBox.warning(self, "No Upload Worker",
                                      "No upload worker found for the selected thread(s). "

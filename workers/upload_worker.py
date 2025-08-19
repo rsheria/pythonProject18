@@ -50,6 +50,7 @@ class UploadWorker(QThread):
         # إذا كنا نعيد الرفع لروابط موجودة مسبقاً في Keeplinks،
         # نمرّر الرابط القديم كي لا يتم إنشاء رابط جديد.
         self.keeplinks_url = keeplinks_url
+        self.keeplinks_sent = False
         # تحكم بالإيقاف والإلغاء
         self.is_cancelled = False
         self.is_paused = False
@@ -117,12 +118,15 @@ class UploadWorker(QThread):
             logging.exception("JDownloader cleanup failed during upload cancel")
 
     def _reset_control_for_retry(self):
-        """Clear cancellation/paused flags before a retry attempt."""
         with self.lock:
             self.is_cancelled = False
             self.is_paused = False
-            if self.cancel_event:
+        if self.cancel_event:
+            try:
                 self.cancel_event.clear()
+            except Exception:
+                pass
+
     def _check_control(self):
         """
         يرفع استثناء لو تم الإلغاء،
@@ -160,6 +164,8 @@ class UploadWorker(QThread):
             futures = {}
             for idx, _ in enumerate(self.hosts):
                 self._check_control()
+                if self.upload_results.get(idx, {}).get("status") != "not_attempted":
+                    continue
                 futures[self.thread_pool.submit(self._upload_host_all, idx)] = idx
 
             # جمع النتائج
@@ -358,43 +364,91 @@ class UploadWorker(QThread):
         for i, host in enumerate(self.hosts):
             urls = self.upload_results[i]["urls"]
             final[host] = urls
-            # Exclude Rapidgator-backup links from the Keeplinks list
             if host != "rapidgator-backup":
                 all_urls.extend(urls)
 
-        # Add Keeplinks if we have any URLs
-        if all_urls:
+        all_success = all(res["status"] == "success" for res in self.upload_results.values())
+        if all_urls and all_success and not self.keeplinks_sent:
             if self.keeplinks_url:
-                # استخدم الرابط القديم بدون إنشاء رابط جديد
                 final["keeplinks"] = self.keeplinks_url
             else:
+                logging.debug("Sending %d links to Keeplinks", len(all_urls))
                 keeplink = self.bot.send_to_keeplinks(all_urls)
                 if keeplink:
                     final["keeplinks"] = keeplink
+                    self.keeplinks_url = keeplink
+            self.keeplinks_sent = True
+        elif self.keeplinks_url:
+            final["keeplinks"] = self.keeplinks_url
 
+        if self.keeplinks_sent and "keeplinks" not in final and self.keeplinks_url:
+            # already sent previously, reuse the stored link
+            final["keeplinks"] = self.keeplinks_url
         return final
 
+    def _emit_final_statuses(self, row: int) -> None:
+        """Emit final OperationStatus for each host so the UI recolors."""
+        cancel_stage = getattr(OpStage, "CANCELLED", OpStage.ERROR)
+        item_name = self.files[0].name if self.files else ""
+        for i, host in enumerate(self.hosts):
+            res = self.upload_results.get(i, {}).get("status")
+            if res == "success":
+                stage = OpStage.FINISHED
+                msg = "Complete"
+                prog = 100
+            elif res == "failed":
+                stage = OpStage.ERROR
+                msg = "Failed"
+                prog = 0
+            elif res == "cancelled":
+                stage = cancel_stage
+                msg = "Cancelled"
+                prog = 0
+            else:
+                continue
+
+            status = OperationStatus(
+                section=self.section,
+                item=item_name,
+                op_type=OpType.UPLOAD,
+                stage=stage,
+                message=msg,
+                progress=prog,
+                host=host,
+            )
+            self.progress_update.emit(status)
+            self.host_progress.emit(row, i, prog, msg, 0, 0)
+
+    # anchor: class UploadWorker, method retry_failed_uploads
     @pyqtSlot(int)
     def retry_failed_uploads(self, row: int):
         """
-        Retry only the hosts that previously فشلوا.
+        Retry only the hosts that previously failed.
         """
         try:
-            self._reset_control_for_retry()
-            to_retry = [
-                i for i, res in self.upload_results.items() if res["status"] == "failed"
-            ]
+            # امسح أى حالة إيقاف/إلغاء قبل البدء (لو الميثود موجودة)
+            try:
+                self._reset_control_for_retry()
+            except Exception:
+                # متوافقة لو الميثود مش متضافة فى نسختك
+                self.is_cancelled = False
+                self.is_paused = False
+            self._check_control()
+
+            to_retry = [i for i, res in self.upload_results.items() if res["status"] == "failed"]
             if not to_retry:
                 final = self._prepare_final_urls()
+                self._emit_final_statuses(row)
                 self.upload_complete.emit(row, final)
                 return
 
+            # reset statuses
             for i in to_retry:
                 self.upload_results[i] = {"status": "not_attempted", "urls": []}
-
+                # اختياري: إشارة تشغيل لكل هوست لتحريك الألوان
                 status = OperationStatus(
                     section=self.section,
-                    item="",
+                    item=self.files[0].name if self.files else "",
                     op_type=OpType.UPLOAD,
                     stage=OpStage.RUNNING,
                     message="Retrying",
@@ -402,7 +456,7 @@ class UploadWorker(QThread):
                     host=self.hosts[i],
                 )
                 self.progress_update.emit(status)
-                self.host_progress.emit(row, i, 0, "", 0, 0)
+                self.host_progress.emit(row, i, 0, "Retrying", 0, 0)
 
             futures = {}
             for i in to_retry:
@@ -412,13 +466,89 @@ class UploadWorker(QThread):
             for fut in as_completed(futures):
                 self._check_control()
                 i = futures[fut]
+                self.upload_results[i]["status"] = "success" if fut.result() == "success" else "failed"
+
+            final = self._prepare_final_urls()
+            self._emit_final_statuses(row)
+            self.upload_complete.emit(row, final)
+        except Exception as e:
+            logging.error("retry_failed_uploads crashed: %s", e, exc_info=True)
+            self.upload_complete.emit(row, {"error": str(e)})
+
+    @pyqtSlot(int)
+    def resume_pending_uploads(self, row: int):
+        try:
+            self._reset_control_for_retry()
+            to_retry = [
+                i for i, res in self.upload_results.items() if res["status"] in ("failed", "cancelled")
+            ]
+            if not to_retry:
+                final = self._prepare_final_urls()
+                self._emit_final_statuses(row)
+                self.upload_complete.emit(row, final)
+                return
+            for i in to_retry:
+                self.upload_results[i] = {"status": "not_attempted", "urls": []}
+                status = OperationStatus(
+                    section=self.section,
+                    item=self.files[0].name if self.files else "",
+                    op_type=OpType.UPLOAD,
+                    stage=OpStage.RUNNING,
+                    message="Resuming",
+                    progress=0,
+                    host=self.hosts[i],
+                )
+                self.progress_update.emit(status)
+                self.host_progress.emit(row, i, 0, "Resuming", 0, 0)
+            futures = {}
+            for i in to_retry:
+                self._check_control()
+                futures[self.thread_pool.submit(self._upload_host_all, i)] = i
+            for fut in as_completed(futures):
+                self._check_control()
+                i = futures[fut]
                 if fut.result() == "success":
                     self.upload_results[i]["status"] = "success"
                 else:
                     self.upload_results[i]["status"] = "failed"
-
             final = self._prepare_final_urls()
+            self._emit_final_statuses(row)
             self.upload_complete.emit(row, final)
         except Exception as e:
-            logging.error("retry_failed_uploads crashed: %s", e, exc_info=True)
+            logging.error("resume_pending_uploads crashed: %s", e, exc_info=True)
+            self.upload_complete.emit(row, {"error": str(e)})
+
+    @pyqtSlot(int)
+    def reupload_all(self, row: int):
+        try:
+            self._reset_control_for_retry()
+            for i in range(len(self.hosts)):
+                self.upload_results[i] = {"status": "not_attempted", "urls": []}
+                status = OperationStatus(
+                    section=self.section,
+                    item=self.files[0].name if self.files else "",
+                    op_type=OpType.UPLOAD,
+                    stage=OpStage.RUNNING,
+                    message="Re-uploading",
+                    progress=0,
+                    host=self.hosts[i],
+                )
+                self.progress_update.emit(status)
+                self.host_progress.emit(row, i, 0, "Re-uploading", 0, 0)
+            futures = {}
+            for i in range(len(self.hosts)):
+                self._check_control()
+                futures[self.thread_pool.submit(self._upload_host_all, i)] = i
+            for fut in as_completed(futures):
+                self._check_control()
+                i = futures[fut]
+                if fut.result() == "success":
+                    self.upload_results[i]["status"] = "success"
+                else:
+                    self.upload_results[i]["status"] = "failed"
+            final = self._prepare_final_urls()
+            self._emit_final_statuses(row)
+            self.upload_complete.emit(row, final)
+        except Exception as e:
+            logging.error("reupload_all crashed: %s", e, exc_info=True)
             self.upload_complete.emit(row, {"error": str(e)})

@@ -127,7 +127,8 @@ class StatusWidget(QWidget):
     retryRequested = pyqtSignal(list)
     openInJDRequested = pyqtSignal(list)
     copyJDLinkRequested = pyqtSignal(list)
-
+    resumePendingRequested = pyqtSignal(list)
+    reuploadAllRequested = pyqtSignal(list)
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
@@ -280,6 +281,7 @@ class StatusWidget(QWidget):
 
         self._row_by_key = {}
         self._jd_links = {}
+        self._upload_meta = {}
         self._thread_steps = {}  # 🆕 تجميع خطوات كل Thread => {(section,item): {(op,host)->state}}
         self._bar_at = {}
 
@@ -452,12 +454,38 @@ class StatusWidget(QWidget):
         menu = QMenu(self)
         acts = {}
         upload_actions = []
+        running_actions = []
         if "UPLOAD" in types:
-            acts[menu.addAction("Pause")] = "pause"
-            acts[menu.addAction("Resume")] = "resume"
-            acts[menu.addAction("Cancel")] = "cancel"
-            acts[menu.addAction("Retry")] = "retry"
-            upload_actions = list(acts.keys())
+            a = menu.addAction("Pause")
+            acts[a] = "pause"
+            upload_actions.append(a)
+            a = menu.addAction("Resume")
+            acts[a] = "resume"
+            upload_actions.append(a)
+            a = menu.addAction("Cancel")
+            acts[a] = "cancel"
+            upload_actions.append(a)
+            a = menu.addAction("Retry")
+            acts[a] = "retry"
+            upload_actions.append(a)
+            a = menu.addAction("Resume Pending")
+            acts[a] = "resume_pending"
+            upload_actions.append(a)
+            running_actions.append(a)
+            a = menu.addAction("Re-upload All")
+            acts[a] = "reupload_all"
+            upload_actions.append(a)
+            running_actions.append(a)
+            # determine if any selected row is running
+        running = False
+        stage_col = self._col_map.get("Stage")
+        if stage_col is not None:
+            for idx in sel.selectedRows():
+                it = self.table.item(idx.row(), stage_col)
+                stg = self._stage_from_text(it.text() if it else "")
+                if stg == OpStage.RUNNING:
+                    running = True
+                    break
         if "DOWNLOAD" in types:
             if upload_actions:
                 menu.addSeparator()
@@ -469,6 +497,9 @@ class StatusWidget(QWidget):
             acts[a] = "copy"
         if len(types) > 1:
             for a in upload_actions:
+                a.setEnabled(False)
+        if running:
+            for a in running_actions:
                 a.setEnabled(False)
         action = menu.exec_(self.table.viewport().mapToGlobal(pos))
         if not action or action not in acts:
@@ -483,6 +514,10 @@ class StatusWidget(QWidget):
             self.cancelRequested.emit(keys)
         elif which == "retry":
             self.retryRequested.emit(keys)
+        elif which == "resume_pending":
+            self.resumePendingRequested.emit(keys)
+        elif which == "reupload_all":
+            self.reuploadAllRequested.emit(keys)
         elif which == "open":
             self.openInJDRequested.emit(keys)
         elif which == "copy":
@@ -510,6 +545,10 @@ class StatusWidget(QWidget):
             self.cancelRequested.emit(keys)
         elif which == "retry":
             self.retryRequested.emit(keys)
+        elif which == "resume_pending":
+            self.resumePendingRequested.emit(keys)
+        elif which == "reupload_all":
+            self.reuploadAllRequested.emit(keys)
         elif which == "open":
             self.openInJDRequested.emit(keys)
         elif which == "copy":
@@ -537,6 +576,16 @@ class StatusWidget(QWidget):
 
     def get_jd_link(self, key):
         return self._jd_links.get(tuple(key))
+
+    def update_upload_meta(self, key, meta: dict) -> None:
+        key = tuple(key)
+        cur = self._upload_meta.setdefault(key, {})
+        if meta:
+            cur.update(meta)
+        self._schedule_status_save()
+
+    def get_upload_meta(self, key) -> dict:
+        return dict(self._upload_meta.get(tuple(key), {}))
     def _populate_sections(self) -> None:
         """Ensure section combo box contains existing sections."""
         col = self._col_map.get("Section")
@@ -757,6 +806,9 @@ class StatusWidget(QWidget):
             "key": list(key_tuple) if key_tuple else None,  # (section,item,op_type)
             "jd_link": self._jd_links.get(tuple(key_tuple)) if key_tuple else "",
         }
+        meta = self._upload_meta.get(tuple(key_tuple)) if key_tuple else None
+        if meta:
+            snap["upload_meta"] = meta
         return snap
 
     def _table_snapshot(self) -> dict:
@@ -817,6 +869,7 @@ class StatusWidget(QWidget):
             self.table.setRowCount(0)
             self._row_by_key.clear()
             self._jd_links.clear()
+            self._upload_meta.clear()
             self._thread_steps.clear()
             self._bar_at.clear()
 
@@ -857,15 +910,16 @@ class StatusWidget(QWidget):
                     link = row_data.get("jd_link")
                     if link:
                         self._jd_links[key] = link
-
+                    meta = row_data.get("upload_meta")
+                    if meta:
+                        self._upload_meta[key] = meta
                 stage = self._stage_from_text(stage_text)
                 self._color_row(row, stage)
 
             model = self.table.model()
-            if self.table.rowCount():
-                tl = model.index(0, 0)
-                br = model.index(self.table.rowCount() - 1, self.table.columnCount() - 1)
-                model.dataChanged.emit(tl, br, [Qt.BackgroundRole, Qt.DisplayRole, Qt.UserRole])
+            tl = model.index(row, 0)
+            br = model.index(row, self.table.columnCount() - 1)
+            model.dataChanged.emit(tl, br, [Qt.BackgroundRole, Qt.DisplayRole])
 
             self.table.resizeColumnsToContents()
             self.table.viewport().update()
@@ -1015,13 +1069,20 @@ class StatusWidget(QWidget):
                 steps = self._thread_steps.get((st.section, st.item), {})
                 ups = [s["progress"] for (op_name, _h), s in steps.items() if op_name == "UPLOAD"]
                 avg_up = int(round(sum(ups) / len(ups))) if ups else int(getattr(st, "progress", 0) or 0)
-                self._set_progress_cell(row, self._progress_col, avg_up)
+                if avg_up > 0:
+                    self._set_progress_cell(row, self._progress_col, avg_up)
+                else:
+                    self._clear_progress_cell(row, self._progress_col)
             else:
                 # Download/Extract/Compress/... استخدم قيمة العملية نفسها
                 try:
-                    self._set_progress_cell(row, self._progress_col, int(getattr(st, "progress", 0) or 0))
+                    p = int(getattr(st, "progress", 0) or 0)
                 except Exception:
-                    self._set_progress_cell(row, self._progress_col, 0)
+                    p = 0
+                if p > 0:
+                    self._set_progress_cell(row, self._progress_col, p)
+                else:
+                    self._clear_progress_cell(row, self._progress_col)
 
         # ✅ لو Upload: حدِّث عمود الهوست الخاص بيه، غير كده سيب أعمدة الهوست فاضية
         if st.op_type == OpType.UPLOAD:
@@ -1048,16 +1109,20 @@ class StatusWidget(QWidget):
 
                 if host_col is not None:
                     try:
-                        self._set_progress_cell(row, host_col, int(getattr(st, "progress", 0) or 0))
+                        hp = int(getattr(st, "progress", 0) or 0)
                     except Exception:
-                        self._set_progress_cell(row, host_col, 0)
+                        hp = 0
+                    if hp > 0:
+                        self._set_progress_cell(row, host_col, hp)
+                    else:
+                        self._clear_progress_cell(row, host_col)
 
         # تلوين الصف حسب المرحلة
         self._color_row(row, stage, st.op_type)
         model = self.table.model()
         tl = model.index(row, 0)
         br = model.index(row, self.table.columnCount() - 1)
-        model.dataChanged.emit(tl, br, [Qt.BackgroundRole])
+        model.dataChanged.emit(tl, br, [Qt.BackgroundRole, Qt.DisplayRole])
 
         self._schedule_status_save()
 
