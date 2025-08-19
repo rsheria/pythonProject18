@@ -496,12 +496,27 @@ class ForumBotGUI(QMainWindow):
         self.status_widget = StatusWidget(self)
         self.content_area.addWidget(self.status_widget)
 
-        self.status_widget.pauseRequested.connect(self._on_upload_pause, Qt.QueuedConnection)
-        self.status_widget.resumeRequested.connect(self._on_upload_resume, Qt.QueuedConnection)
-        self.status_widget.cancelRequested.connect(self._on_upload_cancel, Qt.QueuedConnection)
-        self.status_widget.retryRequested.connect(self._on_upload_retry, Qt.QueuedConnection)
-        self.status_widget.openInJDRequested.connect(self._on_open_in_jd, Qt.QueuedConnection)
-        self.status_widget.copyJDLinkRequested.connect(self._on_copy_jd_link, Qt.QueuedConnection)
+        # Mapping from (section, item, op_type) -> worker for quick lookups
+        self._worker_key_map = {}
+
+        self.status_widget.pauseRequested.connect(
+            self._on_upload_pause, Qt.QueuedConnection
+        )
+        self.status_widget.resumeRequested.connect(
+            self._on_upload_resume, Qt.QueuedConnection
+        )
+        self.status_widget.cancelRequested.connect(
+            self._on_upload_cancel, Qt.QueuedConnection
+        )
+        self.status_widget.retryRequested.connect(
+            self._on_upload_retry, Qt.QueuedConnection
+        )
+        self.status_widget.openInJDRequested.connect(
+            self._on_open_in_jd, Qt.QueuedConnection
+        )
+        self.status_widget.copyJDLinkRequested.connect(
+            self._on_copy_jd_link, Qt.QueuedConnection
+        )
 
         self.user_logged_in.connect(
             self.status_widget.reload_from_disk, Qt.QueuedConnection
@@ -515,7 +530,7 @@ class ForumBotGUI(QMainWindow):
             worker.progress_update.connect(
                 self.status_widget.handle_status, Qt.QueuedConnection
             )
-            self.status_widget.connect_worker(worker)
+
         elif hasattr(worker, 'file_progress_update'):
             def _adapter(link_id, pct, stage, cur, tot, name, speed, eta):
                 status = OperationStatus(
@@ -532,8 +547,13 @@ class ForumBotGUI(QMainWindow):
                 self.status_widget.handle_status(status)
 
             worker.file_progress_update.connect(_adapter, Qt.QueuedConnection)
-            self.status_widget.connect_worker(worker)
+
         self.status_widget.connect_worker(worker)
+        # Store mapping for upload workers to allow context‑menu control
+        if isinstance(worker, UploadWorker):
+            for f in getattr(worker, "files", []):
+                key = (worker.section, f.name, OpType.UPLOAD.name)
+                self._worker_key_map[key] = worker
         if hasattr(self, "sidebar"):
             self.sidebar.set_active_item_by_text("STATUS")
         else:
@@ -4777,15 +4797,13 @@ class ForumBotGUI(QMainWindow):
     def _upload_workers_for_keys(self, keys):
         workers = set()
         for section, item, op_type in keys:
-            if op_type != OpType.UPLOAD:
+            if hasattr(op_type, 'name'):
+                op_type = op_type.name
+            if op_type != "UPLOAD":
                 continue
-            for worker in getattr(self, "upload_workers", {}).values():
-                try:
-                    if worker.section == section and any(f.name == item for f in getattr(worker, "files", [])):
-                        workers.add(worker)
-                        break
-                except Exception:
-                    continue
+            worker = self._worker_key_map.get((section, item, "UPLOAD"))
+            if worker:
+                workers.add(worker)
         return workers
 
     def _on_upload_pause(self, keys):
@@ -4793,7 +4811,9 @@ class ForumBotGUI(QMainWindow):
         self.statusBar().showMessage("Pause requested", 3000)
         for worker in self._upload_workers_for_keys(keys):
             try:
-                worker.pause_uploads()
+                QMetaObject.invokeMethod(
+                    worker, "pause_uploads", Qt.QueuedConnection
+                )
             except Exception:
                 pass
 
@@ -4802,7 +4822,9 @@ class ForumBotGUI(QMainWindow):
         self.statusBar().showMessage("Resume requested", 3000)
         for worker in self._upload_workers_for_keys(keys):
             try:
-                worker.resume_uploads()
+                QMetaObject.invokeMethod(
+                    worker, "resume_uploads", Qt.QueuedConnection
+                )
             except Exception:
                 pass
 
@@ -4811,7 +4833,9 @@ class ForumBotGUI(QMainWindow):
         self.statusBar().showMessage("Cancel requested", 3000)
         for worker in self._upload_workers_for_keys(keys):
             try:
-                worker.cancel_uploads()
+                QMetaObject.invokeMethod(
+                    worker, "cancel_uploads", Qt.QueuedConnection
+                )
             except Exception:
                 pass
 
@@ -4820,7 +4844,12 @@ class ForumBotGUI(QMainWindow):
         self.statusBar().showMessage("Retry requested", 3000)
         for worker in self._upload_workers_for_keys(keys):
             try:
-                worker.retry_failed_uploads(worker.row)
+                QMetaObject.invokeMethod(
+                    worker,
+                    "retry_failed_uploads",
+                    Qt.QueuedConnection,
+                    Q_ARG(int, worker.row),
+                )
             except Exception:
                 pass
 
