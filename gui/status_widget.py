@@ -2,7 +2,7 @@
 import logging
 import os
 import threading
-from PyQt5.QtCore import QTimer, Qt, QSize, QEvent, QObject
+from PyQt5.QtCore import QTimer, Qt, QSize, QEvent, QObject, pyqtSignal
 from PyQt5.QtGui import QColor, QPalette, QBrush, QKeySequence
 
 from PyQt5.QtWidgets import (
@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QShortcut,
+    QMenu,
 )
 from core.user_manager import get_user_manager
 from integrations.jd_client import hard_cancel
@@ -105,6 +106,12 @@ HOST_COLS = {
 }
 
 log = logging.getLogger(__name__)
+DEBUG_STATUS_CONTEXT = True
+
+
+def _dbg(msg: str):
+    if DEBUG_STATUS_CONTEXT:
+        log.debug(msg)
 
 class StatusWidget(QWidget):
     """
@@ -114,6 +121,13 @@ class StatusWidget(QWidget):
           * بيبعت إشارة إلغاء للـ workers (منطقك الحالى)
           * وبشكل موازى بيعمل Stop + Clear كامل فى JDownloader عشان ما يكمّلش تحميل
     """
+    pauseRequested = pyqtSignal(list)
+    resumeRequested = pyqtSignal(list)
+    cancelRequested = pyqtSignal(list)
+    retryRequested = pyqtSignal(list)
+    openInJDRequested = pyqtSignal(list)
+    copyJDLinkRequested = pyqtSignal(list)
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
@@ -193,6 +207,8 @@ class StatusWidget(QWidget):
         self.table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
         layout.addWidget(self.table)
 
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.on_ctx_menu, Qt.QueuedConnection)
         # Connect filter widgets
         self.search_edit.textChanged.connect(self.apply_filter, Qt.QueuedConnection)
         self.section_cb.currentIndexChanged.connect(self.apply_filter, Qt.QueuedConnection)
@@ -229,17 +245,41 @@ class StatusWidget(QWidget):
         sc_clear_selected.activated.connect(
             lambda: self.clear_selected(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier))
         )
+        sc_pause = QShortcut(QKeySequence("Ctrl+Alt+P"), self)
+        sc_pause.activated.connect(lambda: self._emit_selection("pause"))
+        sc_resume = QShortcut(QKeySequence("Ctrl+Alt+R"), self)
+        sc_resume.activated.connect(lambda: self._emit_selection("resume"))
+        sc_cancel = QShortcut(QKeySequence("Ctrl+Alt+C"), self)
+        sc_cancel.activated.connect(lambda: self._emit_selection("cancel"))
+        sc_retry = QShortcut(QKeySequence("Ctrl+Alt+Y"), self)
+        sc_retry.activated.connect(lambda: self._emit_selection("retry"))
+        sc_open = QShortcut(QKeySequence("Ctrl+Alt+O"), self)
+        sc_open.activated.connect(lambda: self._emit_selection("open"))
+        sc_copy = QShortcut(QKeySequence("Ctrl+Alt+L"), self)
+        sc_copy.activated.connect(lambda: self._emit_selection("copy"))
+        sc_diag = QShortcut(QKeySequence(Qt.Key_F12), self)
+        sc_diag.activated.connect(self.diagnose_context_wiring)
         self._sc_focus = sc_focus
         self._sc_clear = sc_clear
         self._sc_clear_finished = sc_clear_finished
         self._sc_clear_errors = sc_clear_errors
         self._sc_clear_selected = sc_clear_selected
+        self._dbg_shortcuts = [
+            sc_pause,
+            sc_resume,
+            sc_cancel,
+            sc_retry,
+            sc_open,
+            sc_copy,
+            sc_diag,
+        ]
         self.cancel_event = threading.Event()
         self.btn_cancel = QPushButton("Cancel", self)
         self.btn_cancel.clicked.connect(self.on_cancel_clicked)
         layout.addWidget(self.btn_cancel)
 
         self._row_by_key = {}
+        self._jd_links = {}
         self._thread_steps = {}  # 🆕 تجميع خطوات كل Thread => {(section,item): {(op,host)->state}}
         self._bar_at = {}
 
@@ -397,6 +437,106 @@ class StatusWidget(QWidget):
         self._schedule_status_save()
         self.apply_filter()
         self._select_row_after_removal(first)
+
+    def on_ctx_menu(self, pos):
+        sel = self.table.selectionModel()
+        if sel is None:
+            return
+        inv = {row: key for key, row in self._row_by_key.items()}
+        keys = [inv.get(idx.row()) for idx in sel.selectedRows()]
+        keys = [k for k in keys if k]
+        if not keys:
+            return
+        types = {k[2] for k in keys}
+        _dbg(f"build ctx menu keys={keys} types={types}")
+        menu = QMenu(self)
+        acts = {}
+        upload_actions = []
+        if "UPLOAD" in types:
+            acts[menu.addAction("Pause")] = "pause"
+            acts[menu.addAction("Resume")] = "resume"
+            acts[menu.addAction("Cancel")] = "cancel"
+            acts[menu.addAction("Retry")] = "retry"
+            upload_actions = list(acts.keys())
+        if "DOWNLOAD" in types:
+            if upload_actions:
+                menu.addSeparator()
+            a = menu.addAction("Open in JD")
+            a.setToolTip("Open link in JDownloader")
+            acts[a] = "open"
+            a = menu.addAction("Copy JD Link")
+            a.setToolTip("Copy JD link to clipboard")
+            acts[a] = "copy"
+        if len(types) > 1:
+            for a in upload_actions:
+                a.setEnabled(False)
+        action = menu.exec_(self.table.viewport().mapToGlobal(pos))
+        if not action or action not in acts:
+            return
+        which = acts[action]
+        _dbg(f"ctx action {which} keys={keys}")
+        if which == "pause":
+            self.pauseRequested.emit(keys)
+        elif which == "resume":
+            self.resumeRequested.emit(keys)
+        elif which == "cancel":
+            self.cancelRequested.emit(keys)
+        elif which == "retry":
+            self.retryRequested.emit(keys)
+        elif which == "open":
+            self.openInJDRequested.emit(keys)
+        elif which == "copy":
+            self.copyJDLinkRequested.emit(keys)
+        self.apply_filter()
+        self._schedule_status_save()
+
+    def _emit_selection(self, which: str):
+        sel = self.table.selectionModel()
+        if sel is None:
+            log.warning("No selection model for %s", which)
+            return
+        inv = {row: key for key, row in self._row_by_key.items()}
+        keys = [inv.get(idx.row()) for idx in sel.selectedRows()]
+        keys = [k for k in keys if k]
+        if not keys:
+            log.warning("No selection for %s", which)
+            return
+        _dbg(f"shortcut {which} keys={keys}")
+        if which == "pause":
+            self.pauseRequested.emit(keys)
+        elif which == "resume":
+            self.resumeRequested.emit(keys)
+        elif which == "cancel":
+            self.cancelRequested.emit(keys)
+        elif which == "retry":
+            self.retryRequested.emit(keys)
+        elif which == "open":
+            self.openInJDRequested.emit(keys)
+        elif which == "copy":
+            self.copyJDLinkRequested.emit(keys)
+        self.apply_filter()
+        self._schedule_status_save()
+
+    def diagnose_context_wiring(self):
+        _dbg("diagnose_context_wiring start")
+        up_key = next((k for k in self._row_by_key if k[2] == "UPLOAD"), None)
+        if up_key:
+            self.table.selectRow(self._row_by_key[up_key])
+            self._emit_selection("pause")
+            self._emit_selection("resume")
+        else:
+            log.warning("No UPLOAD row for diagnose_context_wiring")
+        down_key = next((k for k in self._row_by_key if k[2] == "DOWNLOAD"), None)
+        if down_key:
+            self.table.selectRow(self._row_by_key[down_key])
+            self._emit_selection("open")
+            self._emit_selection("copy")
+        else:
+            log.warning("No DOWNLOAD row for diagnose_context_wiring")
+        _dbg("diagnose_context_wiring done")
+
+    def get_jd_link(self, key):
+        return self._jd_links.get(tuple(key))
     def _populate_sections(self) -> None:
         """Ensure section combo box contains existing sections."""
         col = self._col_map.get("Section")
@@ -417,13 +557,15 @@ class StatusWidget(QWidget):
             self.section_cb.addItem(section)
     def reload_from_disk(self, *_):
         """Reload the status snapshot from disk for the current user."""
-        self.table.setRowCount(0)
-        self._row_by_key.clear()
-        self._thread_steps.clear()
-        self._bar_at.clear()
         self._load_status_snapshot()
         self.table.resizeColumnsToContents()
         self.table.viewport().update()
+        types = [k[2] for k in self._row_by_key]
+        up = types.count("UPLOAD")
+        down = types.count("DOWNLOAD")
+        _dbg(
+            f"reload_from_disk rows={self.table.rowCount()} map={len(self._row_by_key)} uploads={up} downloads={down}"
+        )
     def changeEvent(self, event):
         if event.type() == QEvent.PaletteChange:
             # لو المستخدم بدّل Light/Dark نعيد ضبط الألوان المشتقة
@@ -613,6 +755,7 @@ class StatusWidget(QWidget):
                 "rapidgator_bak": prog("RG_BAK"),
             },
             "key": list(key_tuple) if key_tuple else None,  # (section,item,op_type)
+            "jd_link": self._jd_links.get(tuple(key_tuple)) if key_tuple else "",
         }
         return snap
 
@@ -664,28 +807,25 @@ class StatusWidget(QWidget):
     # --- عدّل الدالة بالكامل ---
     def _load_status_snapshot(self):
         try:
-            from core.user_manager import get_user_manager
-            um = get_user_manager()
-            if not um or not um.get_current_user():
+            mgr = get_user_manager()
+            if not mgr or not mgr.get_current_user():
                 return
-            path = um.get_user_data_path(self._persist_filename)
-            if not os.path.exists(path):
-                return
-
-            import json
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            data = mgr.load_user_data(self._persist_filename) or {}
 
             rows = data.get("rows", [])
             filters = data.get("filters", {}) or {}
-            H = self._col_map  # خريطة الأعمدة بالاسم
+            self.table.setRowCount(0)
+            self._row_by_key.clear()
+            self._jd_links.clear()
+            self._thread_steps.clear()
+            self._bar_at.clear()
+
+            H = self._col_map
             for row_data in rows:
                 row = self.table.rowCount()
                 self.table.insertRow(row)
                 for c in range(self.table.columnCount()):
-                    self.table.setItem(row, c, QTableWidgetItem(""))
-
-                # نصوص أساسية
+                    self._ensure_item(row, c)
                 self.table.item(row, H["Section"]).setText(row_data.get("section", ""))
                 self.table.item(row, H["Item"]).setText(row_data.get("item", ""))
                 stage_text = row_data.get("stage", "")
@@ -694,37 +834,42 @@ class StatusWidget(QWidget):
                 self.table.item(row, H["Speed"]).setText(row_data.get("speed", "-"))
                 self.table.item(row, H["ETA"]).setText(row_data.get("eta", "-"))
 
-                # البروجريس العام: اعرض فقط لو > 0
                 g = int(row_data.get("progress") or 0)
                 if g > 0:
-                    self._set_progress_visual(row, H["Progress"], g)
+                    self._set_progress_visual(row, H.get("Progress"), g)
                 else:
-                    self._clear_progress_cell(row, H["Progress"])
+                    self._clear_progress_cell(row, H.get("Progress"))
 
-                # بروجريس الهوستات: اعرض فقط لو > 0
                 hosts = row_data.get("hosts", {}) or {}
-                for name in ("RG", "DDL", "KF", "NF", "RG_BAK"):
-                    col = H.get(name)
+                for host, header in HOST_COLS.items():
+                    col = H.get(header)
                     if col is None:
                         continue
-                    v = int(hosts.get(name) or 0)
+                    v = int(hosts.get(host) or 0)
                     if v > 0:
                         self._set_progress_visual(row, col, v)
                     else:
                         self._clear_progress_cell(row, col)
+                key_list = row_data.get("key")
+                if key_list and len(key_list) == 3:
+                    key = tuple(key_list)
+                    self._row_by_key[key] = row
+                    link = row_data.get("jd_link")
+                    if link:
+                        self._jd_links[key] = link
 
-                # لون الصف من الـStage
                 stage = self._stage_from_text(stage_text)
                 self._color_row(row, stage)
-                model = self.table.model()
-                tl = model.index(row, 0)
-                br = model.index(row, self.table.columnCount() - 1)
-                model.dataChanged.emit(tl, br, [Qt.BackgroundRole])
+
+            model = self.table.model()
+            if self.table.rowCount():
+                tl = model.index(0, 0)
+                br = model.index(self.table.rowCount() - 1, self.table.columnCount() - 1)
+                model.dataChanged.emit(tl, br, [Qt.BackgroundRole, Qt.DisplayRole, Qt.UserRole])
 
             self.table.resizeColumnsToContents()
             self.table.viewport().update()
 
-            # Populate filter widgets
             self._populate_sections()
 
             def _set_cb(cb, text):
@@ -741,7 +886,13 @@ class StatusWidget(QWidget):
             _set_cb(self.stage_cb, filters.get("stage", "All"))
             _set_cb(self.host_cb, filters.get("host", "All"))
             self.apply_filter()
-        except Exception as e:
+            types = [k[2] for k in self._row_by_key]
+            up = types.count("UPLOAD")
+            down = types.count("DOWNLOAD")
+            _dbg(
+                f"_load_status_snapshot rows={self.table.rowCount()} map={len(self._row_by_key)} uploads={up} downloads={down}"
+            )
+        except Exception:
             log.error("Failed to load status snapshot", exc_info=True)
 
     def _normalize_host(self, host_raw: str) -> str:

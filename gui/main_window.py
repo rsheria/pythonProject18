@@ -36,10 +36,11 @@ from bs4 import BeautifulSoup, NavigableString
 from PyQt5 import QtCore
 from PyQt5.QtCore import (Q_ARG, QDateTime, QMetaObject, QMutex, QMutexLocker,
                           QObject, QSize, Qt, QThread, QThreadPool, QTimer,
-                          pyqtSignal)
+                          QUrl, pyqtSignal)
 from PyQt5.QtGui import (QBrush, QColor, QFont, QGuiApplication, QIcon,
                          QKeySequence, QPalette, QPixmap, QScreen,
-                         QStandardItem, QStandardItemModel, QTextCursor)
+                         QStandardItem, QStandardItemModel, QTextCursor,
+                         QDesktopServices)
 from PyQt5.QtWidgets import (QAbstractItemView, QAction, QApplication,
                              QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                              QErrorMessage, QFileDialog, QFrame, QGroupBox,
@@ -494,6 +495,13 @@ class ForumBotGUI(QMainWindow):
     def init_status_view(self):
         self.status_widget = StatusWidget(self)
         self.content_area.addWidget(self.status_widget)
+
+        self.status_widget.pauseRequested.connect(self._on_upload_pause, Qt.QueuedConnection)
+        self.status_widget.resumeRequested.connect(self._on_upload_resume, Qt.QueuedConnection)
+        self.status_widget.cancelRequested.connect(self._on_upload_cancel, Qt.QueuedConnection)
+        self.status_widget.retryRequested.connect(self._on_upload_retry, Qt.QueuedConnection)
+        self.status_widget.openInJDRequested.connect(self._on_open_in_jd, Qt.QueuedConnection)
+        self.status_widget.copyJDLinkRequested.connect(self._on_copy_jd_link, Qt.QueuedConnection)
 
         self.user_logged_in.connect(
             self.status_widget.reload_from_disk, Qt.QueuedConnection
@@ -4765,6 +4773,72 @@ class ForumBotGUI(QMainWindow):
                 pass
         except Exception as e:
             logging.error(f"Error handling upload worker completion: {e}")
+
+    def _upload_workers_for_keys(self, keys):
+        workers = set()
+        for section, item, op_type in keys:
+            if op_type != OpType.UPLOAD:
+                continue
+            for worker in getattr(self, "upload_workers", {}).values():
+                try:
+                    if worker.section == section and any(f.name == item for f in getattr(worker, "files", [])):
+                        workers.add(worker)
+                        break
+                except Exception:
+                    continue
+        return workers
+
+    def _on_upload_pause(self, keys):
+        logging.info(f"Pause requested for {keys}")
+        self.statusBar().showMessage("Pause requested", 3000)
+        for worker in self._upload_workers_for_keys(keys):
+            try:
+                worker.pause_uploads()
+            except Exception:
+                pass
+
+    def _on_upload_resume(self, keys):
+        logging.info(f"Resume requested for {keys}")
+        self.statusBar().showMessage("Resume requested", 3000)
+        for worker in self._upload_workers_for_keys(keys):
+            try:
+                worker.resume_uploads()
+            except Exception:
+                pass
+
+    def _on_upload_cancel(self, keys):
+        logging.info(f"Cancel requested for {keys}")
+        self.statusBar().showMessage("Cancel requested", 3000)
+        for worker in self._upload_workers_for_keys(keys):
+            try:
+                worker.cancel_uploads()
+            except Exception:
+                pass
+
+    def _on_upload_retry(self, keys):
+        logging.info(f"Retry requested for {keys}")
+        self.statusBar().showMessage("Retry requested", 3000)
+        for worker in self._upload_workers_for_keys(keys):
+            try:
+                worker.retry_failed_uploads(worker.row)
+            except Exception:
+                pass
+
+    def _on_open_in_jd(self, keys):
+        logging.info(f"Open in JD for {keys}")
+        self.statusBar().showMessage("Opening in JDownloader", 3000)
+        for key in keys:
+            link = self.status_widget.get_jd_link(key)
+            if link:
+                QDesktopServices.openUrl(QUrl(link))
+
+    def _on_copy_jd_link(self, keys):
+        logging.info(f"Copy JD link for {keys}")
+        self.statusBar().showMessage("JD link copied", 3000)
+        links = [self.status_widget.get_jd_link(k) for k in keys]
+        links = [l for l in links if l]
+        if links:
+            QGuiApplication.clipboard().setText("\n".join(links))
     def apply_auto_process_result(self, job):
         """Apply links from Auto‑Process job back to process_threads data."""
         try:
