@@ -124,15 +124,17 @@ class StatusWidget(QWidget):
         self.stage_cb = QComboBox(self)
         self.host_cb = QComboBox(self)
 
-        self.search_edit.setPlaceholderText("")
-        self.section_cb.addItem("All")
-        self.stage_cb.addItems(["All", "Running", "Finished", "Cancelled", "Error"])
-        self.host_cb.addItems(["All", "RG", "DDL", "KF", "NF", "RG_BAK"])
+        self.btn_clear_finished = QPushButton("Clear Finished", self)
+        self.btn_clear_errors = QPushButton("Clear Errors", self)
+        self.btn_clear_selected = QPushButton("Clear Selected", self)
 
         filter_layout.addWidget(self.search_edit)
         filter_layout.addWidget(self.section_cb)
         filter_layout.addWidget(self.stage_cb)
         filter_layout.addWidget(self.host_cb)
+        filter_layout.addWidget(self.btn_clear_finished)
+        filter_layout.addWidget(self.btn_clear_errors)
+        filter_layout.addWidget(self.btn_clear_selected)
         layout.addLayout(filter_layout)
 
         self.table = QTableWidget(self)
@@ -197,14 +199,41 @@ class StatusWidget(QWidget):
         self.stage_cb.currentIndexChanged.connect(self.apply_filter, Qt.QueuedConnection)
         self.host_cb.currentIndexChanged.connect(self.apply_filter, Qt.QueuedConnection)
 
+        self.btn_clear_finished.clicked.connect(
+            lambda: self.clear_finished(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier)),
+            Qt.QueuedConnection,
+        )
+        self.btn_clear_errors.clicked.connect(
+            lambda: self.clear_errors(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier)),
+            Qt.QueuedConnection,
+        )
+        self.btn_clear_selected.clicked.connect(
+            lambda: self.clear_selected(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier)),
+            Qt.QueuedConnection,
+        )
+
         # Shortcuts
         sc_focus = QShortcut(QKeySequence("Ctrl+F"), self)
         sc_focus.activated.connect(self.search_edit.setFocus)
         sc_clear = QShortcut(QKeySequence(Qt.Key_Escape), self)
         sc_clear.activated.connect(self._clear_filters)
+        sc_clear_finished = QShortcut(QKeySequence("Ctrl+Shift+F"), self)
+        sc_clear_finished.activated.connect(
+            lambda: self.clear_finished(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier))
+        )
+        sc_clear_errors = QShortcut(QKeySequence("Ctrl+Shift+E"), self)
+        sc_clear_errors.activated.connect(
+            lambda: self.clear_errors(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier))
+        )
+        sc_clear_selected = QShortcut(QKeySequence(Qt.Key_Delete), self.table)
+        sc_clear_selected.activated.connect(
+            lambda: self.clear_selected(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier))
+        )
         self._sc_focus = sc_focus
         self._sc_clear = sc_clear
-
+        self._sc_clear_finished = sc_clear_finished
+        self._sc_clear_errors = sc_clear_errors
+        self._sc_clear_selected = sc_clear_selected
         self.cancel_event = threading.Event()
         self.btn_cancel = QPushButton("Cancel", self)
         self.btn_cancel.clicked.connect(self.on_cancel_clicked)
@@ -276,6 +305,98 @@ class StatusWidget(QWidget):
 
             self.table.setRowHidden(row, not visible)
 
+    # ------------------------------------------------------------------
+    def clear_finished(self, ignore_running: bool = True) -> None:
+        """Remove all rows with stage FINISHED."""
+        stage_col = self._col_map.get("Stage")
+        if stage_col is None:
+            return
+        rows = []
+        for row in range(self.table.rowCount()):
+            it = self.table.item(row, stage_col)
+            stage = self._stage_from_text(it.text() if it else "")
+            if stage == OpStage.RUNNING and ignore_running:
+                continue
+            if stage == OpStage.FINISHED:
+                rows.append(row)
+        self._remove_rows(rows)
+
+    def clear_errors(self, ignore_running: bool = True) -> None:
+        """Remove all rows with stage ERROR."""
+        stage_col = self._col_map.get("Stage")
+        if stage_col is None:
+            return
+        rows = []
+        for row in range(self.table.rowCount()):
+            it = self.table.item(row, stage_col)
+            stage = self._stage_from_text(it.text() if it else "")
+            if stage == OpStage.RUNNING and ignore_running:
+                continue
+            if stage == OpStage.ERROR:
+                rows.append(row)
+        self._remove_rows(rows)
+
+    def clear_selected(self, ignore_running: bool = True) -> None:
+        """Remove currently selected rows."""
+        sel = self.table.selectionModel()
+        if sel is None:
+            return
+        stage_col = self._col_map.get("Stage")
+        rows = []
+        for idx in sel.selectedRows():
+            row = idx.row()
+            if stage_col is not None:
+                it = self.table.item(row, stage_col)
+                stage = self._stage_from_text(it.text() if it else "")
+                if stage == OpStage.RUNNING and ignore_running:
+                    continue
+            rows.append(row)
+        self._remove_rows(rows)
+
+    def _row_section_item(self, row: int) -> tuple[str, str]:
+        """Return (section, item) text for row."""
+        H = self._col_map
+        sec_col = H.get("Section")
+        item_col = H.get("Item")
+        sec = self.table.item(row, sec_col).text() if sec_col is not None and self.table.item(row, sec_col) else ""
+        item = self.table.item(row, item_col).text() if item_col is not None and self.table.item(row, item_col) else ""
+        return sec, item
+
+    def _select_row_after_removal(self, start: int) -> None:
+        if self.table.rowCount() == 0:
+            return
+        start = min(start, self.table.rowCount() - 1)
+        for r in range(start, self.table.rowCount()):
+            if not self.table.isRowHidden(r):
+                self.table.selectRow(r)
+                self.table.setCurrentCell(r, 0)
+                return
+        for r in range(start - 1, -1, -1):
+            if not self.table.isRowHidden(r):
+                self.table.selectRow(r)
+                self.table.setCurrentCell(r, 0)
+                return
+        self.table.clearSelection()
+
+    def _remove_rows(self, rows: list[int]) -> None:
+        rows = sorted(set(rows))
+        if not rows:
+            return
+        first = rows[0]
+        for row in reversed(rows):
+            sec, item = self._row_section_item(row)
+            self.table.removeRow(row)
+            for key, r in list(self._row_by_key.items()):
+                if r == row:
+                    del self._row_by_key[key]
+                elif r > row:
+                    self._row_by_key[key] = r - 1
+            if sec or item:
+                self._thread_steps.pop((sec, item), None)
+        self.table.model().layoutChanged.emit()
+        self._schedule_status_save()
+        self.apply_filter()
+        self._select_row_after_removal(first)
     def _populate_sections(self) -> None:
         """Ensure section combo box contains existing sections."""
         col = self._col_map.get("Section")
