@@ -980,6 +980,30 @@ class StatusWidget(QWidget):
             "host": self._normalize_host(st.host) if st.op_type == OpType.UPLOAD else "",
         }
 
+        if st.op_type == OpType.UPLOAD:
+            steps[skey]["speed_bps"] = float(getattr(st, "speed", 0) or 0)
+            steps[skey]["eta_secs"] = float(getattr(st, "eta", 0) or 0)
+
+    def _aggregate_upload_metrics(self, section: str, item: str):
+        """Return average speed/ETA for active UPLOAD steps of a thread."""
+        steps = self._thread_steps.get((section, item), {})
+        speeds = []
+        etas = []
+        for (op_name, _), info in steps.items():
+            if op_name != OpType.UPLOAD.name:
+                continue
+            if info.get("finished") or info.get("error"):
+                continue
+            spd = info.get("speed_bps") or 0
+            eta = info.get("eta_secs") or 0
+            if spd > 0:
+                speeds.append(spd)
+            if eta > 0:
+                etas.append(eta)
+        avg_speed = sum(speeds) / len(speeds) if speeds else None
+        avg_eta = sum(etas) / len(etas) if etas else None
+        return avg_speed, avg_eta
+
     def _is_dark_palette(self, pal: QPalette) -> bool:
         c = pal.color(QPalette.Window)
         lum = 0.2126 * c.redF() + 0.7152 * c.greenF() + 0.0722 * c.blueF()
@@ -1028,6 +1052,15 @@ class StatusWidget(QWidget):
         idx = model.index(row, col)
         model.dataChanged.emit(idx, idx, [Qt.DisplayRole, Qt.UserRole])
 
+    def _clear_text_cell(self, row: int, col: int):
+        """يمسح نص الخلية ويبلّغ الموديل بالتغيير."""
+        if col is None or col < 0:
+            return
+        it = self._ensure_item(row, col)
+        it.setText("")
+        model = self.table.model()
+        idx = model.index(row, col)
+        model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
     def handle_status(self, st: OperationStatus) -> None:
         # صف العملية: (section, item, op_type)
         key = (st.section, st.item, st.op_type.name)
@@ -1061,6 +1094,24 @@ class StatusWidget(QWidget):
 
         # سجّل الخطوة (نحتاجه لحساب متوسط رفع متعدد الهوستات)
         self._record_step(st)
+
+        if st.op_type == OpType.UPLOAD:
+            spd, eta = self._aggregate_upload_metrics(st.section, st.item)
+            model = self.table.model()
+            sc = self._col_map.get("Speed")
+            ec = self._col_map.get("ETA")
+            if spd is not None and spd > 0:
+                self._ensure_item(row, sc).setText(self._fmt_speed(spd))
+                idx = model.index(row, sc)
+                model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
+            else:
+                self._clear_text_cell(row, sc)
+            if eta is not None and eta > 0:
+                self._ensure_item(row, ec).setText(self._fmt_eta(eta))
+                idx = model.index(row, ec)
+                model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
+            else:
+                self._clear_text_cell(row, ec)
 
         # ✅ Progress العمومى:
         if hasattr(self, "_progress_col") and self._progress_col is not None:

@@ -3070,6 +3070,9 @@ class ForumBotGUI(QMainWindow):
             ("Rapidgator Links", 3),
             ("RG Backup Link", 4),
             ("Keeplinks Link", 5),
+            ("Password", 6),
+            ("Author", 7),
+            ("Status", 8),
         ]:
             self.filter_column_combo.addItem(label, idx)
         filter_layout.addWidget(self.filter_column_combo)
@@ -3100,6 +3103,18 @@ class ForumBotGUI(QMainWindow):
                 self.status_posted_check
         ):
             cb.stateChanged.connect(self.filter_process_threads)
+
+        self._proc_filter_state = {
+            "text": "",
+            "column": 0,
+            "pending": True,
+            "downloaded": True,
+            "uploaded": True,
+            "posted": True,
+            "scroll": 0,
+            "selected_ids": [],
+        }
+
 
         # --- Action Buttons ---------------------------------------------------
         actions_bar = QWidget()
@@ -3203,7 +3218,8 @@ class ForumBotGUI(QMainWindow):
         )
         self.process_threads_table.cellClicked.connect(self.on_process_thread_selected)
         self.process_threads_table.itemDoubleClicked.connect(self.on_thread_double_click)
-
+        self.process_threads_table.itemSelectionChanged.connect(self._save_proc_filter_state)
+        self.process_threads_table.verticalScrollBar().valueChanged.connect(self._save_proc_filter_state)
         threads_management_layout.addWidget(self.process_threads_table)
         splitter.addWidget(threads_management_widget)
 
@@ -3239,6 +3255,7 @@ class ForumBotGUI(QMainWindow):
         # 1) Read filter inputs
         search_text = self.process_filter_input.text().lower().strip()
         column = self.filter_column_combo.currentData()  # -1 = search all columns
+        terms = search_text.split()
 
         # 2) Read status checkbox states
         show_pending = self.status_pending_check.isChecked()
@@ -3266,24 +3283,122 @@ class ForumBotGUI(QMainWindow):
             )
 
             # B) Text filter: match empty or appear in the chosen column(s)
-            if not search_text:
+            if not terms:
                 text_ok = True
             else:
-                text_ok = False
-                if column == -1:
-                    # Search all columns
-                    for c in range(col_count):
-                        item = table.item(row, c)
-                        if item and search_text in item.text().lower():
-                            text_ok = True
-                            break
-                else:
-                    item = table.item(row, column)
-                    text_ok = bool(item and search_text in item.text().lower())
+                text_ok = True
+                for term in terms:
+                    term_ok = False
+                    if column == -1:
+                        # Search all columns
+                        for c in range(col_count):
+                            item = table.item(row, c)
+                            if item and term in item.text().lower():
+                                term_ok = True
+                                break
+                    else:
+                        item = table.item(row, column)
+                        term_ok = bool(item and term in item.text().lower())
+                    if not term_ok:
+                        text_ok = False
+                        break
 
             # C) Show row only if both status and text match
             table.setRowHidden(row, not (status_ok and text_ok))
 
+        self._save_proc_filter_state()
+
+    def _save_proc_filter_state(self, _=None):
+        table = self.process_threads_table
+        selected_ids = []
+        if table.selectionModel():
+            for idx in table.selectionModel().selectedRows():
+                item = table.item(idx.row(), 2)
+                if item:
+                    selected_ids.append(item.text())
+
+        self._proc_filter_state = {
+            "text": self.process_filter_input.text(),
+            "column": self.filter_column_combo.currentIndex(),
+            "pending": self.status_pending_check.isChecked(),
+            "downloaded": self.status_downloaded_check.isChecked(),
+            "uploaded": self.status_uploaded_check.isChecked(),
+            "posted": self.status_posted_check.isChecked(),
+            "scroll": table.verticalScrollBar().value(),
+            "selected_ids": selected_ids,
+        }
+
+    def _restore_proc_filter_state(self):
+        state = getattr(self, "_proc_filter_state", None)
+        if not state:
+            return
+
+        table = self.process_threads_table
+
+        widgets = [
+            self.process_filter_input,
+            self.filter_column_combo,
+            self.status_pending_check,
+            self.status_downloaded_check,
+            self.status_uploaded_check,
+            self.status_posted_check,
+        ]
+
+        for w in widgets:
+            w.blockSignals(True)
+
+        self.process_filter_input.setText(state.get("text", ""))
+        self.filter_column_combo.setCurrentIndex(state.get("column", 0))
+        self.status_pending_check.setChecked(state.get("pending", True))
+        self.status_downloaded_check.setChecked(state.get("downloaded", True))
+        self.status_uploaded_check.setChecked(state.get("uploaded", True))
+        self.status_posted_check.setChecked(state.get("posted", True))
+
+        for w in widgets:
+            w.blockSignals(False)
+
+        self.filter_process_threads()
+
+        # Restore scroll position and selection
+        table.verticalScrollBar().setValue(state.get("scroll", 0))
+
+        ids_to_select = set(state.get("selected_ids", []))
+        if ids_to_select:
+            table.clearSelection()
+            for row in range(table.rowCount()):
+                item = table.item(row, 2)
+                if item and item.text() in ids_to_select:
+                    table.selectRow(row)
+
+        self._save_proc_filter_state()
+
+    def clear_process_filters(self):
+        widgets = [
+            self.process_filter_input,
+            self.filter_column_combo,
+            self.status_pending_check,
+            self.status_downloaded_check,
+            self.status_uploaded_check,
+            self.status_posted_check,
+        ]
+
+        for w in widgets:
+            w.blockSignals(True)
+
+        self.process_filter_input.setText("")
+        self.filter_column_combo.setCurrentIndex(0)
+        self.status_pending_check.setChecked(True)
+        self.status_downloaded_check.setChecked(True)
+        self.status_uploaded_check.setChecked(True)
+        self.status_posted_check.setChecked(True)
+
+        for w in widgets:
+            w.blockSignals(False)
+
+        self.process_threads_table.clearSelection()
+        self.process_threads_table.verticalScrollBar().setValue(0)
+
+        self.filter_process_threads()
     def collect_visible_scope_for_selected_threads(self):
         """Collect links from selected threads without host filtering."""
         direct_urls: list[str] = []
@@ -6998,6 +7113,7 @@ class ForumBotGUI(QMainWindow):
             except Exception as e:
                 logging.error(f"Failed to update thread stats: {e}")
 
+        self._restore_proc_filter_state()
     def migrate_old_links_format(self):
         """Migrate old links format to new dictionary format."""
         try:
@@ -8792,7 +8908,9 @@ class ForumBotGUI(QMainWindow):
         try:
             logging.info(f"🔄 Refreshing process threads table from main thread")
             self.populate_process_threads_table(self.process_threads)
-            
+
+            self._restore_proc_filter_state()
+
             # Force immediate UI update and repaint
             self.process_threads_table.update()
             self.process_threads_table.repaint()
