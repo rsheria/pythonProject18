@@ -4694,7 +4694,15 @@ class ForumBotGUI(QMainWindow):
                 if getattr(self, 'auto_retry_mode', False):
                     worker = getattr(self, 'upload_workers', {}).get(row)
                     if worker:
-                        QTimer.singleShot(10000, lambda w=worker, r=row: w.retry_failed_uploads(r))
+                        QTimer.singleShot(
+                            10000,
+                            lambda w=worker, r=row: QMetaObject.invokeMethod(
+                                w,
+                                "retry_failed_uploads",
+                                Qt.QueuedConnection,
+                                Q_ARG(int, r),
+                            ),
+                        )
                 return
 
             thread_title = self.process_threads_table.item(row, 0).text()
@@ -6179,7 +6187,12 @@ class ForumBotGUI(QMainWindow):
             for row in selected_rows:
                 if hasattr(self, 'upload_workers') and row in self.upload_workers:
                     worker = self.upload_workers[row]
-                    worker.retry_failed_uploads(row)
+                    QMetaObject.invokeMethod(
+                        worker,
+                        "retry_failed_uploads",
+                        Qt.QueuedConnection,
+                        Q_ARG(int, row),
+                    )
                 else:
                     QMessageBox.warning(self, "No Upload Worker",
                                      "No upload worker found for the selected thread(s). "

@@ -115,6 +115,14 @@ class UploadWorker(QThread):
                 hard_cancel(jd_downloader.post, logger=logging)
         except Exception:
             logging.exception("JDownloader cleanup failed during upload cancel")
+
+    def _reset_control_for_retry(self):
+        """Clear cancellation/paused flags before a retry attempt."""
+        with self.lock:
+            self.is_cancelled = False
+            self.is_paused = False
+            if self.cancel_event:
+                self.cancel_event.clear()
     def _check_control(self):
         """
         يرفع استثناء لو تم الإلغاء،
@@ -372,21 +380,30 @@ class UploadWorker(QThread):
         Retry only the hosts that previously فشلوا.
         """
         try:
-            self._check_control()
+            self._reset_control_for_retry()
             to_retry = [
                 i for i, res in self.upload_results.items() if res["status"] == "failed"
             ]
             if not to_retry:
-                # لا شيء لإعادة المحاولة → أرسل الفواصل النهائية
                 final = self._prepare_final_urls()
                 self.upload_complete.emit(row, final)
                 return
 
-            # reset statuses
             for i in to_retry:
                 self.upload_results[i] = {"status": "not_attempted", "urls": []}
 
-            # إعادة رفعهم
+                status = OperationStatus(
+                    section=self.section,
+                    item="",
+                    op_type=OpType.UPLOAD,
+                    stage=OpStage.RUNNING,
+                    message="Retrying",
+                    progress=0,
+                    host=self.hosts[i],
+                )
+                self.progress_update.emit(status)
+                self.host_progress.emit(row, i, 0, "", 0, 0)
+
             futures = {}
             for i in to_retry:
                 self._check_control()
