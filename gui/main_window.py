@@ -4716,8 +4716,16 @@ class ForumBotGUI(QMainWindow):
             "mega": ("mega", "Mega"),
         }
 
-        # 4) لفّ على المضيفات بالترتيب من settings
+        # 4) نظّف قائمة المضيفات من أى نسخة احتياطية لـ Rapidgator قبل اللوب
+        filtered_hosts = []
         for host in self.active_upload_hosts:
+            normalized = host.lower().replace("-", "").replace("_", "")
+            if "rapidgator" in normalized and "backup" in normalized:
+                continue
+            filtered_hosts.append(host)
+
+            # 5) لفّ على المضيفات بالترتيب من settings
+        for host in filtered_hosts:
             key, label = host_key_map.get(host.lower(), (host.lower(), host.capitalize()))
             direct_links = links_dict.get(key, [])
             if direct_links:
@@ -4726,7 +4734,7 @@ class ForumBotGUI(QMainWindow):
                     result_lines.append(f"[url]{url}[/url]")
                 result_lines.append("")  # blank line
 
-        # 5) ارجع النص النهائي
+        # 6) ارجع النص النهائي
         return "\n".join(line for line in result_lines).strip()
 
     def get_keeplinks_url_from_backup(self, thread_id):
