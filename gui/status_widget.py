@@ -2,7 +2,7 @@
 import logging
 import os
 import threading
-from PyQt5.QtCore import QTimer, Qt, QSize, QEvent, QObject, pyqtSignal
+from PyQt5.QtCore import QTimer, Qt, QSize, QEvent, QObject, pyqtSignal, QItemSelectionModel
 from PyQt5.QtGui import QColor, QPalette, QBrush, QKeySequence
 
 from PyQt5.QtWidgets import (
@@ -138,6 +138,10 @@ class StatusWidget(QWidget):
         self.section_cb = QComboBox(self)
         self.stage_cb = QComboBox(self)
         self.host_cb = QComboBox(self)
+        # ✅ ثبّت قيم افتراضية واضحة للفلاتر
+        self.section_cb.addItem("All")
+        self.stage_cb.addItems(["All", "Running", "Finished", "Error", "Cancelled"])
+        self.host_cb.addItems(["All", "RG", "DDL", "KF", "NF", "RG_BAK"])
 
         self.btn_clear_finished = QPushButton("Clear Finished", self)
         self.btn_clear_errors = QPushButton("Clear Errors", self)
@@ -287,6 +291,14 @@ class StatusWidget(QWidget):
 
         self._apply_readability_palette()
         self._row_brushes = self._status_brushes(self.table.palette())
+        mgr = self._user_mgr()
+        if mgr:
+            try:
+                mgr.register_login_listener(lambda *_: self._load_status_snapshot())
+                if mgr.get_current_user():
+                    self._load_status_snapshot()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     def _clear_filters(self) -> None:
@@ -298,7 +310,6 @@ class StatusWidget(QWidget):
         self.apply_filter()
 
     def apply_filter(self) -> None:
-        """Apply filters to table rows based on widget values."""
         q = self.search_edit.text().strip().lower()
         section = self.section_cb.currentText()
         stage_txt = self.stage_cb.currentText()
@@ -311,9 +322,11 @@ class StatusWidget(QWidget):
             stage_filter = self._stage_from_text(stage_txt)
 
         H = self._col_map
+        # 🆕 اعكس خريطة الصفوف -> المفاتيح لتحديد نوع العملية
+        inv = {row: key for key, row in self._row_by_key.items()}
+
         for row in range(self.table.rowCount()):
             visible = True
-            # search text
             if q:
                 found = False
                 for col in range(self.table.columnCount()):
@@ -324,14 +337,12 @@ class StatusWidget(QWidget):
                 if not found:
                     visible = False
 
-            # section filter
             if visible and section:
                 col = H.get("Section")
                 it = self.table.item(row, col) if col is not None else None
                 if not it or it.text() != section:
                     visible = False
 
-            # stage filter
             if visible and stage_filter is not None:
                 col = H.get("Stage")
                 it = self.table.item(row, col) if col is not None else None
@@ -339,11 +350,16 @@ class StatusWidget(QWidget):
                 if st != stage_filter:
                     visible = False
 
-            # host filter
+            # 🆕 فلتر الهوست يطبّق فقط على صفوف UPLOAD
             if visible and host:
-                col = H.get(host)
-                if col is None or self._get_progress_value(row, col) <= 0:
-                    visible = False
+                k = inv.get(row)
+                if k and len(k) == 3 and k[2] == "UPLOAD":
+                    col = H.get(host)
+                    if col is None or self._get_progress_value(row, col) <= 0:
+                        visible = False
+                else:
+                    # غير الرفع: تجاهل فلتر الهوست
+                    pass
 
             self.table.setRowHidden(row, not visible)
 
@@ -577,6 +593,9 @@ class StatusWidget(QWidget):
     def get_jd_link(self, key):
         return self._jd_links.get(tuple(key))
 
+    def set_jd_link(self, key, link: str) -> None:
+        self._jd_links[tuple(key)] = link or ""
+        self._schedule_status_save()
     def update_upload_meta(self, key, meta: dict) -> None:
         key = tuple(key)
         cur = self._upload_meta.setdefault(key, {})
@@ -634,6 +653,27 @@ class StatusWidget(QWidget):
         super().changeEvent(event)
 
     # Helpers -------------------------------------------------------------
+    def _visible_rows_count(self) -> int:
+        c = 0
+        for r in range(self.table.rowCount()):
+            if not self.table.isRowHidden(r):
+                c += 1
+        return c
+
+    def _reset_filters_to_all(self):
+        # ما نخبطش الإشارات
+        for cb, default in ((self.section_cb, "All"), (self.stage_cb, "All"), (self.host_cb, "All")):
+            if cb:
+                idx = cb.findText(default)
+                if idx < 0:
+                    cb.addItem(default)
+                    idx = cb.findText(default)
+                cb.setCurrentIndex(idx)
+        if hasattr(self, "search_edit") and self.search_edit:
+            self.search_edit.setText("")
+        # أعد تطبيق الفلتر
+        self.apply_filter()
+
     @staticmethod
     def _fmt_speed(bps: float) -> str:
         if bps <= 0:
@@ -808,6 +848,11 @@ class StatusWidget(QWidget):
         }
         meta = self._upload_meta.get(tuple(key_tuple)) if key_tuple else None
         if meta:
+            meta = dict(meta)
+            for k in ("folder", "folder_path"):
+                if k in meta:
+                    meta[k] = os.path.basename(meta[k])
+
             snap["upload_meta"] = meta
         return snap
 
@@ -829,20 +874,48 @@ class StatusWidget(QWidget):
             "stage": self.stage_cb.currentText(),
             "host": self.host_cb.currentText(),
         }
-        return {"version": 1, "rows": rows, "filters": filters}
+        header = self.table.horizontalHeader()
+        sort_state = {
+            "column": int(header.sortIndicatorSection()),
+            "order": int(header.sortIndicatorOrder()),
+        }
+        col_widths = [int(header.sectionSize(i)) for i in range(self.table.columnCount())]
+        scroll = {
+            "h": int(self.table.horizontalScrollBar().value()),
+            "v": int(self.table.verticalScrollBar().value()),
+        }
+        sel_keys = []
+        sel = self.table.selectionModel()
+        if sel:
+            inv = {row: key for key, row in self._row_by_key.items()}
+            for idx in sel.selectedRows():
+                key = inv.get(idx.row())
+                if key:
+                    sel_keys.append(list(key))
+        return {
+            "version": 2,
+            "rows": rows,
+            "filters": filters,
+            "sort": sort_state,
+            "columns": col_widths,
+            "scroll": scroll,
+            "selection": sel_keys,
+        }
 
     def _save_status_snapshot(self):
-        """يحفظ Snapshot للـSTATUS فى ملف اليوزر."""
+        """يحفظ Snapshot للـSTATUS فى ملف اليوزر (حفظ ذرّى UTF-8)."""
         mgr = self._user_mgr()
         if not mgr or not mgr.get_current_user():
-            return  # مافيش يوزر مُسجّل
+            return
         data = self._table_snapshot()
         try:
-            ok = mgr.save_user_data(self._persist_filename, data)
-            if not ok:
-                logging.warning("STATUS snapshot not saved (save_user_data returned False)")
-        except Exception as e:
-            logging.warning(f"STATUS snapshot save failed: {e}")
+            ok = mgr.save_user_data(self._persist_filename, data)  # ← الفعلية
+            if ok:
+                log.debug("💾 Saved status snapshot (%d rows)", len(data.get("rows", [])))
+            else:
+                log.warning("STATUS snapshot not saved (save_user_data returned False)")
+        except Exception:
+            log.error("STATUS snapshot save failed", exc_info=True)
 
     # --- أضِف داخل class StatusWidget ---
     def _stage_from_text(self, text: str):
@@ -858,14 +931,19 @@ class StatusWidget(QWidget):
 
     # --- عدّل الدالة بالكامل ---
     def _load_status_snapshot(self):
+        """يسترجع Snapshot بشكل محكم مع حجب إشارات الفلاتر وإعادة بناء الخرائط ثم إعادة الفرز والاختيار والتمرير."""
         try:
-            mgr = get_user_manager()
+            mgr = self._user_mgr()
             if not mgr or not mgr.get_current_user():
                 return
             data = mgr.load_user_data(self._persist_filename) or {}
 
-            rows = data.get("rows", [])
-            filters = data.get("filters", {}) or {}
+            widgets = [self.search_edit, self.section_cb, self.stage_cb, self.host_cb]
+            prev_blocks = [w.blockSignals(True) for w in widgets]
+            sorting = self.table.isSortingEnabled()
+            self.table.setSortingEnabled(False)
+
+            # تفريغ الجداول/الخرائط
             self.table.setRowCount(0)
             self._row_by_key.clear()
             self._jd_links.clear()
@@ -873,81 +951,151 @@ class StatusWidget(QWidget):
             self._thread_steps.clear()
             self._bar_at.clear()
 
+            rows = data.get("rows", []) or []
+            filters = data.get("filters", {}) or {}
+            sort_state = data.get("sort", {}) or {}
+            col_widths = data.get("columns", []) or []
+            scroll = data.get("scroll", {}) or {}
+            sel_keys = [tuple(k) for k in data.get("selection", []) or []]
+
             H = self._col_map
-            for row_data in rows:
-                row = self.table.rowCount()
-                self.table.insertRow(row)
+            # اضمن قيم الفلاتر الافتراضية
+            if self.section_cb.findText("All") < 0:
+                self.section_cb.addItem("All")
+            if self.stage_cb.count() == 0:
+                self.stage_cb.addItems(["All", "Running", "Finished", "Error", "Cancelled"])
+            if self.host_cb.count() == 0:
+                self.host_cb.addItems(["All", "RG", "DDL", "KF", "NF", "RG_BAK"])
+
+            # بناء الصفوف
+            for rdata in rows:
+                r = self.table.rowCount()
+                self.table.insertRow(r)
                 for c in range(self.table.columnCount()):
-                    self._ensure_item(row, c)
-                self.table.item(row, H["Section"]).setText(row_data.get("section", ""))
-                self.table.item(row, H["Item"]).setText(row_data.get("item", ""))
-                stage_text = row_data.get("stage", "")
-                self.table.item(row, H["Stage"]).setText(stage_text)
-                self.table.item(row, H["Message"]).setText(row_data.get("message", ""))
-                self.table.item(row, H["Speed"]).setText(row_data.get("speed", "-"))
-                self.table.item(row, H["ETA"]).setText(row_data.get("eta", "-"))
+                    self._ensure_item(r, c)
 
-                g = int(row_data.get("progress") or 0)
+                self.table.item(r, H["Section"]).setText(rdata.get("section", ""))
+                self.table.item(r, H["Item"]).setText(rdata.get("item", ""))
+                stage_text = rdata.get("stage", "")
+                self.table.item(r, H["Stage"]).setText(stage_text)
+                self.table.item(r, H["Message"]).setText(rdata.get("message", ""))
+                self.table.item(r, H["Speed"]).setText(rdata.get("speed", "-"))
+                self.table.item(r, H["ETA"]).setText(rdata.get("eta", "-"))
+
+                # Progress العام
+                g = int(rdata.get("progress") or 0)
                 if g > 0:
-                    self._set_progress_visual(row, H.get("Progress"), g)
+                    self._set_progress_cell(r, H.get("Progress"), g)
                 else:
-                    self._clear_progress_cell(row, H.get("Progress"))
+                    self._clear_progress_cell(r, H.get("Progress"))
 
-                hosts = row_data.get("hosts", {}) or {}
+                # Progress الهوستات
+                hosts = rdata.get("hosts", {}) or {}
                 for host, header in HOST_COLS.items():
                     col = H.get(header)
                     if col is None:
                         continue
                     v = int(hosts.get(host) or 0)
                     if v > 0:
-                        self._set_progress_visual(row, col, v)
+                        self._set_progress_cell(r, col, v)
                     else:
-                        self._clear_progress_cell(row, col)
-                key_list = row_data.get("key")
+                        self._clear_progress_cell(r, col)
+
+                # مفاتيح الخرائط/الروابط/الميتا
+                key_list = rdata.get("key")
                 if key_list and len(key_list) == 3:
                     key = tuple(key_list)
-                    self._row_by_key[key] = row
-                    link = row_data.get("jd_link")
+                    self._row_by_key[key] = r
+                    link = rdata.get("jd_link") or ""
                     if link:
                         self._jd_links[key] = link
-                    meta = row_data.get("upload_meta")
+                    meta = rdata.get("upload_meta") or {}
                     if meta:
-                        self._upload_meta[key] = meta
+                        self._upload_meta[key] = dict(meta)
+
+                # تلوين الصف
                 stage = self._stage_from_text(stage_text)
-                self._color_row(row, stage)
+                self._color_row(r, stage)
 
-            model = self.table.model()
-            tl = model.index(row, 0)
-            br = model.index(row, self.table.columnCount() - 1)
-            model.dataChanged.emit(tl, br, [Qt.BackgroundRole, Qt.DisplayRole])
+            # إشعار إعادة رسم شامل (خلفية + نصوص)
+            if self.table.rowCount():
+                model = self.table.model()
+                tl = model.index(0, 0)
+                br = model.index(self.table.rowCount() - 1, self.table.columnCount() - 1)
+                model.dataChanged.emit(tl, br, [Qt.BackgroundRole, Qt.DisplayRole])
 
-            self.table.resizeColumnsToContents()
-            self.table.viewport().update()
+            # أحجام الأعمدة
+            header = self.table.horizontalHeader()
+            for i, w in enumerate(col_widths):
+                try:
+                    header.resizeSection(i, int(w))
+                except Exception:
+                    pass
 
+            # ضمّن كل الأقسام فى الكومبو
             self._populate_sections()
 
-            def _set_cb(cb, text):
-                if not text:
-                    text = "All"
-                idx = cb.findText(text)
+            # استعادة الفلاتر
+            def _apply_cb(cb, text, fallback="All"):
+                txt = text or fallback
+                idx = cb.findText(txt)
                 if idx < 0:
-                    cb.addItem(text)
-                    idx = cb.findText(text)
+                    cb.addItem(txt)
+                    idx = cb.findText(txt)
                 cb.setCurrentIndex(idx)
 
             self.search_edit.setText(filters.get("q", ""))
-            _set_cb(self.section_cb, filters.get("section", "All"))
-            _set_cb(self.stage_cb, filters.get("stage", "All"))
-            _set_cb(self.host_cb, filters.get("host", "All"))
+            _apply_cb(self.section_cb, filters.get("section"))
+            _apply_cb(self.stage_cb, filters.get("stage"))
+            _apply_cb(self.host_cb, filters.get("host"))
             self.apply_filter()
+
+            # استعادة الفرز
+            if sort_state:
+                try:
+                    self.table.sortItems(
+                        int(sort_state.get("column", 0)),
+                        Qt.SortOrder(int(sort_state.get("order", Qt.AscendingOrder))),
+                    )
+                except Exception:
+                    pass
+
+            # استعادة التمرير والاختيار
+            try:
+                self.table.verticalScrollBar().setValue(int(scroll.get("v", 0)))
+                self.table.horizontalScrollBar().setValue(int(scroll.get("h", 0)))
+            except Exception:
+                pass
+            sel_model = self.table.selectionModel()
+            if sel_model:
+                sel_model.clearSelection()
+                for key in sel_keys:
+                    rr = self._row_by_key.get(tuple(key))
+                    if rr is not None:
+                        idx = self.table.model().index(rr, 0)
+                        sel_model.select(idx, QItemSelectionModel.Select | QItemSelectionModel.Rows)
+
             types = [k[2] for k in self._row_by_key]
             up = types.count("UPLOAD")
             down = types.count("DOWNLOAD")
             _dbg(
-                f"_load_status_snapshot rows={self.table.rowCount()} map={len(self._row_by_key)} uploads={up} downloads={down}"
-            )
+                f"_load_status_snapshot rows={self.table.rowCount()} map={len(self._row_by_key)} uploads={up} downloads={down}")
+            log.info("Loaded status snapshot (%d rows)", self.table.rowCount())
+
         except Exception:
             log.error("Failed to load status snapshot", exc_info=True)
+        finally:
+            # إعادة تفعيل الفرز وإشارات الفلاتر
+            try:
+                self.table.setSortingEnabled(sorting)
+            except Exception:
+                pass
+            for w, prev in zip(widgets, prev_blocks):
+                try:
+                    w.blockSignals(prev)
+                except Exception:
+                    pass
+            self.table.viewport().update()
 
     def _normalize_host(self, host_raw: str) -> str:
         h = (host_raw or "").lower()
@@ -1061,9 +1209,16 @@ class StatusWidget(QWidget):
         model = self.table.model()
         idx = model.index(row, col)
         model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
+
     def handle_status(self, st: OperationStatus) -> None:
-        # صف العملية: (section, item, op_type)
-        key = (st.section, st.item, st.op_type.name)
+        sorting = self.table.isSortingEnabled()
+        if sorting:
+            self.table.setSortingEnabled(False)
+
+        # اشتق section آمن (لو بعض الـworkers ما بيرسلوش)
+        sec = st.section or ("Uploads" if st.op_type == OpType.UPLOAD else "Downloads")
+        key = (sec, st.item, st.op_type.name)
+
         row = self._row_by_key.get(key)
         if row is None:
             row = self.table.rowCount()
@@ -1072,17 +1227,16 @@ class StatusWidget(QWidget):
                 self._ensure_item(row, col)
             self._row_by_key[key] = row
 
-        # Ensure section appears in combo box
-        self._ensure_section_option(st.section)
+        self._ensure_section_option(sec)
 
-        # استنتج المرحلة مع مراعاة رسائل الأخطاء أو الإلغاء
+        # استنتج المرحلة
         stage = self._stage_from_text(getattr(st, "message", ""))
         if stage == OpStage.RUNNING:
             stage = getattr(st, "stage", OpStage.RUNNING)
 
-        # نصوص الأعمدة الأساسية
+        # نصوص الأعمدة
         txts = [
-            st.section or "",
+            sec or "",
             st.item or "",
             (getattr(stage, "name", str(stage)) or "").title(),
             st.message or "",
@@ -1092,50 +1246,41 @@ class StatusWidget(QWidget):
         for c, v in enumerate(txts):
             self._ensure_item(row, c).setText(str(v))
 
-        # سجّل الخطوة (نحتاجه لحساب متوسط رفع متعدد الهوستات)
+        # سجل الخطوة
         self._record_step(st)
 
+        # تجميع السرعة/الوقت للـUPLOAD
         if st.op_type == OpType.UPLOAD:
-            spd, eta = self._aggregate_upload_metrics(st.section, st.item)
+            spd, eta = self._aggregate_upload_metrics(sec, st.item)
             model = self.table.model()
-            sc = self._col_map.get("Speed")
+            sc = self._col_map.get("Speed");
             ec = self._col_map.get("ETA")
-            if spd is not None and spd > 0:
-                self._ensure_item(row, sc).setText(self._fmt_speed(spd))
-                idx = model.index(row, sc)
+            if sc is not None:
+                (self._ensure_item(row, sc).setText(self._fmt_speed(spd)) if spd else self._clear_text_cell(row, sc))
+                idx = model.index(row, sc);
                 model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
-            else:
-                self._clear_text_cell(row, sc)
-            if eta is not None and eta > 0:
-                self._ensure_item(row, ec).setText(self._fmt_eta(eta))
-                idx = model.index(row, ec)
+            if ec is not None:
+                (self._ensure_item(row, ec).setText(self._fmt_eta(eta)) if eta else self._clear_text_cell(row, ec))
+                idx = model.index(row, ec);
                 model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
-            else:
-                self._clear_text_cell(row, ec)
 
-        # ✅ Progress العمومى:
-        if hasattr(self, "_progress_col") and self._progress_col is not None:
+        # progress العام
+        if self._progress_col is not None:
             if st.op_type == OpType.UPLOAD:
-                # متوسط كل هوستات الرفع تحت نفس الثريد
-                steps = self._thread_steps.get((st.section, st.item), {})
-                ups = [s["progress"] for (op_name, _h), s in steps.items() if op_name == "UPLOAD"]
-                avg_up = int(round(sum(ups) / len(ups))) if ups else int(getattr(st, "progress", 0) or 0)
-                if avg_up > 0:
-                    self._set_progress_cell(row, self._progress_col, avg_up)
-                else:
-                    self._clear_progress_cell(row, self._progress_col)
+                steps = self._thread_steps.get((sec, st.item), {})
+                ups = [s["progress"] for (op_name, _), s in steps.items() if op_name == "UPLOAD"]
+                p = int(round(sum(ups) / len(ups))) if ups else int(getattr(st, "progress", 0) or 0)
             else:
-                # Download/Extract/Compress/... استخدم قيمة العملية نفسها
                 try:
                     p = int(getattr(st, "progress", 0) or 0)
                 except Exception:
                     p = 0
-                if p > 0:
-                    self._set_progress_cell(row, self._progress_col, p)
-                else:
-                    self._clear_progress_cell(row, self._progress_col)
+            if p > 0:
+                self._set_progress_cell(row, self._progress_col, p)
+            else:
+                self._clear_progress_cell(row, self._progress_col)
 
-        # ✅ لو Upload: حدِّث عمود الهوست الخاص بيه، غير كده سيب أعمدة الهوست فاضية
+        # progress الهوست للـUPLOAD فقط
         if st.op_type == OpType.UPLOAD:
             host_raw = (getattr(st, "host", "") or "").lower()
             if "rapidgator" in host_raw and any(x in host_raw for x in ("bak", "backup", "secondary")):
@@ -1150,35 +1295,53 @@ class StatusWidget(QWidget):
                 host_name = "NF"
             else:
                 host_name = ""
-
             if host_name:
                 try:
                     host_col = [self.table.horizontalHeaderItem(i).text() for i in
                                 range(self.table.columnCount())].index(host_name)
                 except ValueError:
                     host_col = None
-
                 if host_col is not None:
                     try:
                         hp = int(getattr(st, "progress", 0) or 0)
                     except Exception:
                         hp = 0
-                    if hp > 0:
-                        self._set_progress_cell(row, host_col, hp)
-                    else:
-                        self._clear_progress_cell(row, host_col)
+                    (self._set_progress_cell(row, host_col, hp) if hp > 0 else self._clear_progress_cell(row, host_col))
 
-        # تلوين الصف حسب المرحلة
+        # تلوين ثم إشعار
         self._color_row(row, stage, st.op_type)
         model = self.table.model()
-        tl = model.index(row, 0)
+        tl = model.index(row, 0);
         br = model.index(row, self.table.columnCount() - 1)
         model.dataChanged.emit(tl, br, [Qt.BackgroundRole, Qt.DisplayRole])
 
+        # رجّع الفرز ثم صحّح موضع الصف فى الماب لو الفرز فعّال
+        if sorting:
+            # أعد الفرز حسب المؤشر الحالى
+            header = self.table.horizontalHeader()
+            col = header.sortIndicatorSection()
+            order = header.sortIndicatorOrder()
+            self.table.setSortingEnabled(True)
+            self.table.sortItems(col, order)
+            # أعد تعيين السطر الحقيقى للـkey بعد الفرز (scan سريع)
+            sec_col = self._col_map.get("Section");
+            item_col = self._col_map.get("Item")
+            for r in range(self.table.rowCount()):
+                s = self.table.item(r, sec_col).text() if sec_col is not None else ""
+                it = self.table.item(r, item_col).text() if item_col is not None else ""
+                if s == sec and it == st.item:
+                    self._row_by_key[key] = r
+                    break
+        else:
+            self.table.setSortingEnabled(False)
+
+        # فلترة؛ لو كله اختفى، رجّع All تلقائيًا
+        self.apply_filter()
+        if self._visible_rows_count() == 0:
+            self._reset_filters_to_all()
+
         self._schedule_status_save()
 
-        # Reapply filters after update
-        self.apply_filter()
     def connect_worker(self, worker: QObject) -> None:
         # لو الووركر بيدعم cancel_event، خلّيه ياخده (اختيارى)
         try:

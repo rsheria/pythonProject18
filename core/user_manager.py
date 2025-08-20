@@ -78,6 +78,7 @@ class UserManager:
         self.user_settings: Dict[str, Any] = {}
         self._site_sessions: Dict[str, requests.Session] = {}
         self.data_dir = get_data_folder()
+        self._login_listeners = []
         
         # Ensure data directory exists
         os.makedirs(self.data_dir, exist_ok=True)
@@ -121,7 +122,11 @@ class UserManager:
             
             logging.info(f"✅ User session initialized for: {self.current_user}")
             logging.info(f"📁 User data directory: {self.user_data_dir}")
-            
+            for cb in list(self._login_listeners):
+                try:
+                    cb(self.current_user)
+                except Exception:
+                    logging.debug("login listener failed", exc_info=True)
             return True
             
         except Exception as e:
@@ -183,7 +188,13 @@ class UserManager:
             raise ValueError("User data directory not initialized")
         
         return os.path.join(self.user_data_dir, filename)
-    
+
+    def register_login_listener(self, cb):
+        try:
+            if callable(cb):
+                self._login_listeners.append(cb)
+        except Exception:
+            logging.debug("Failed to register login listener", exc_info=True)
     def save_user_data(self, filename: str, data: Any) -> bool:
         """
         Save data to a user-specific file.
@@ -197,10 +208,10 @@ class UserManager:
         """
         try:
             filepath = self.get_user_data_path(filename)
-            
-            with open(filepath, 'w', encoding='utf-8') as f:
+            tmp_path = filepath + ".tmp"
+            with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)
-            
+            os.replace(tmp_path, filepath)
             logging.debug(f"💾 Saved user data to: {filepath}")
             return True
             
