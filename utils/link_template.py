@@ -30,10 +30,22 @@ LINK_TEMPLATE_PRESETS: List[str] = [
 # ----------------------------- helpers -------------------------------------
 
 def _as_list(v: Any) -> List[str]:
+    """يحّول أى مدخل لقائمة URLs نصّية (يدعم dict {'urls': [...]})."""
     if not v:
         return []
+    # dict: التكوين الجديد من الرفع
+    if isinstance(v, dict):
+        v = v.get("urls") or v.get("url") or v.get("link") or []
+    # list/tuple/set: فلّط أى عناصر داخلها برضه dict
     if isinstance(v, (list, tuple, set)):
-        return [str(x) for x in v if x]
+        out: List[str] = []
+        for x in v:
+            if isinstance(x, dict):
+                out.extend(_as_list(x))
+            elif x:
+                out.append(str(x))
+        return out
+    # عنصر مفرد
     return [str(v)]
 
 def _uniq_keep_order(seq: List[str]) -> List[str]:
@@ -78,43 +90,63 @@ def _guess_host_from_url(url: str) -> str:
 
 def _normalize_links_dict(links_dict: Dict[Any, Any]) -> Dict[str, List[str]]:
     """
-    يوحّد المفاتيح مهما كانت جاية إزاي:
-    - اسم المضيف كدومين (rapidgator.net)
-    - اختصار (RG / DDL / NF / KF / MEGA / KEEP)
-    - {LINK_RG} / link_rg / rg_links ..الخ
-    - أو حتى key generics مع URLs جواها
+    يوحّد المفاتيح ويستخرج الروابط مع تجاهل Rapidgator الباك-أب.
+    يقبل شكل: {'rapidgator': {'urls':[...], 'is_backup': False}, 'rapidgator_backup': {...}, ...}
+    أو أى مفاتيح/قيم قديمة.
     """
-    out: Dict[str, List[str]] = {k: [] for k in HOST_TOKENS.keys()}
+    out: Dict[str, List[str]] = {k: [] for k in HOST_TOKENS.keys()}  # ddownload/rapidgator/katfile/nitroflare/mega/keeplinks
 
     for k, vals in (links_dict or {}).items():
         key = str(k).lower()
+        # فلتر باك-أب RG من المصدر
+        is_rg_backup = ("rapidgator" in key and ("backup" in key or key.endswith("_bak") or key.endswith("_backup")))
+        # اسحب urls بصرف النظر عن الشكل
         urls = _as_list(vals)
-        matched = False
-        # 1) صنّف من الURLs نفسها
+
+        # صنّف كل URL حسب الدومين
+        classified_any = False
         for url in urls:
             host = _guess_host_from_url(url)
-            if host:
-                out[host].append(url)
+            if not host:
+                continue
+            # تجاهل RG الباك-أب
+            if host == "rapidgator":
+                # لو val dict فيه is_backup=True أو المفتاح بيدل على backup → تجاهل
+                v_is_backup = isinstance(vals, dict) and bool(vals.get("is_backup"))
+                if is_rg_backup or v_is_backup:
+                    continue
+            out[host].append(url)
+            classified_any = True
 
-        # 2) لو مفيش تحديد من الURLs، جرّب من المفتاح نفسه
-        if not matched:
-            if "rapidgator" in key or key in ("rg", "link_rg", "rapidgator"):
-                out["rapidgator"].extend(urls)
+        # لو ما قدرناش نصنّف من الURLs (نادر)؛ جرّب من اسم المفتاح
+        if not classified_any and urls:
+            def add(host_name: str):
+                if host_name == "rapidgator" and is_rg_backup:
+                    return
+                out[host_name].extend(urls)
+
+            if "rapidgator" in key or key in ("rg", "link_rg"):
+                add("rapidgator")
             elif "ddownload" in key or key in ("ddl", "link_ddl", "dd"):
-                out["ddownload"].extend(urls)
+                add("ddownload")
             elif "katfile" in key or key in ("kf", "link_kf"):
-                out["katfile"].extend(urls)
+                add("katfile")
             elif "nitroflare" in key or key in ("nf", "link_nf"):
-                out["nitroflare"].extend(urls)
+                add("nitroflare")
             elif "mega" in key:
-                out["mega"].extend(urls)
+                add("mega")
             elif "keeplink" in key or "keeplinks" in key or key in ("keep", "link_keep"):
-                out["keeplinks"].extend(urls)
+                add("keeplinks")
 
-    # اشيل التكرار مع الحفاظ على الترتيب
+    # نظّف تكرارات مع الحفاظ على الترتيب
     for h in out:
         out[h] = _uniq_keep_order(out[h])
     return out
+
+# --- (اختيارى لكن موصى به) أضِف فى آخر apply_links_template قبل الإرجاع ---
+# بعد السطر: template = re.sub(r"\{LINK_[A-Z_]+\}", "", template)
+# أضِف تنظيف أقواس URL الفارغة لو مفيش روابط
+    template = re.sub(r"\[url=\s*\]\s*(.*?)\s*\[/url\]", r"\1", template)
 
 def _strip_host_placeholder(line: str, token: str) -> str:
     """
