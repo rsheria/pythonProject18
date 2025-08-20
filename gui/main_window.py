@@ -61,7 +61,6 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.wait import WebDriverWait
 import templab_manager
-from config.config import load_configuration
 from core.category_manager import CategoryManager
 from core.file_monitor import FileMonitor
 from core.file_processor import FileProcessor
@@ -83,6 +82,10 @@ from utils.link_cache import persist_link_replacement
 from utils.link_summary import LinkCheckSummary
 from workers.login_thread import LoginThread
 from workers.link_check_worker import LinkCheckWorker, CONTAINER_HOSTS, is_container_host
+try:
+    from appdirs import user_data_dir
+except Exception:  # pragma: no cover
+    from platformdirs import user_data_dir
 RG_RE = re.compile(r"^/file/([A-Za-z0-9]+)(?:/.*)?$")
 NF_RE = re.compile(r"^/view/([A-Za-z0-9]+)(?:/.*)?$")
 DD_RE = re.compile(r"^/(?:f|file)/([A-Za-z0-9]+)(?:/.*)?$")
@@ -336,8 +339,9 @@ class ForumBotGUI(QMainWindow):
         print(f"🤖 DEBUG: Bot initialized successfully: {self.bot is not None}")
         logging.info(f"🤖 DEBUG: Bot initialized successfully: {self.bot is not None}")
 
-        # Initialize WinRAR path
-        self.winrar_exe_path = self.config.get('winrar_exe_path', 'C:/Program Files/WinRAR/WinRAR.exe')
+        self.winrar_exe_path = self.config.get(
+            'winrar_exe_path', os.environ.get('WINRAR_PATH', 'winrar')
+        )
 
         # Initialize FileProcessor with default download directory
         # Actual download directory will be set after user login based on user settings
@@ -1033,6 +1037,10 @@ class ForumBotGUI(QMainWindow):
         self.theme_toggle_action.toggled.connect(self.on_theme_toggled)
         toolbar.addAction(self.theme_toggle_action)
 
+        diag_action = QAction("Diagnostics Report", self)
+        diag_action.triggered.connect(self.open_diagnostics_report)
+        toolbar.addAction(diag_action)
+
         # Default Selection - set first item as active
         self.sidebar.set_active_item_by_text("Posts")
         self.content_area.setCurrentIndex(0)
@@ -1054,6 +1062,7 @@ class ForumBotGUI(QMainWindow):
         self._fade_anim.setEndValue(1.0)
         self._fade_anim.start()
 
+        self.check_prerequisites()
     def apply_global_theme(self):
         """Apply theme palette and stylesheet globally."""
         apply_theme(theme_manager.theme_mode)
@@ -1104,8 +1113,7 @@ class ForumBotGUI(QMainWindow):
 
             self.populate_category_tree(load_saved=True)
             winrar_exe_path = self.config.get(
-                'winrar_exe_path',
-                'C:/Program Files/WinRAR/WinRAR.exe'
+                'winrar_exe_path', os.environ.get('WINRAR_PATH', 'winrar')
             )
             if hasattr(self, 'settings_tab'):
                 self.settings_tab.winrar_exe_label.setText(
@@ -1133,6 +1141,30 @@ class ForumBotGUI(QMainWindow):
         """Show the main window and start the application"""
         self.show()
         self.raise_()
+
+    def open_diagnostics_report(self):
+        """Open the diagnostics log file using the default system application."""
+        log_file = Path(user_data_dir("ForumBot", appauthor=False)) / "logs" / "app.log"
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_file)))
+
+    def check_prerequisites(self):
+        """Check for required external dependencies and guide the user if missing."""
+        import shutil
+
+        missing = []
+        if not shutil.which("chromedriver"):
+            missing.append("ChromeDriver")
+        if not (self.config.get("jd_email") and self.config.get("jd_password")):
+            missing.append("JDownloader credentials")
+
+        if missing:
+            QMessageBox.warning(
+                self,
+                "Setup Required",
+                "Missing dependencies: " + ", ".join(missing) +
+                "\nPlease configure them in your settings and restart.",
+            )
     # === STATUS COLOR MANAGEMENT ===
     def set_thread_status_color(self, tree_item, status):
         """
@@ -2406,7 +2438,7 @@ class ForumBotGUI(QMainWindow):
         exe_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select WinRAR Executable",
-            "C:/Program Files/WinRAR/",
+            os.environ.get('WINRAR_PATH', ''),
             "Executable Files (*.exe)"
         )
         if exe_path:
@@ -2695,7 +2727,7 @@ class ForumBotGUI(QMainWindow):
             self.settings_tab.load_settings()
 
         # Update WinRAR path display
-        winrar_exe_path = self.config.get('winrar_exe_path', 'C:/Program Files/WinRAR/WinRAR.exe')
+        winrar_exe_path = self.config.get('winrar_exe_path', os.environ.get('WINRAR_PATH', 'winrar'))
         if hasattr(self, 'settings_tab'):
             self.settings_tab.winrar_exe_label.setText(
                 f"WinRAR Executable: {winrar_exe_path}"

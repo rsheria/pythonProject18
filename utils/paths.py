@@ -1,22 +1,27 @@
 # paths.py
 import os
 from pathlib import Path
-import sys
-def get_data_folder() -> str:
-    """Return the directory used to store persistent application data."""
+try:  # Prefer appdirs but fall back to platformdirs if unavailable
+    from appdirs import user_data_dir
+except Exception:  # pragma: no cover - fallback path
+    from platformdirs import user_data_dir
 
-    # Environment variable override takes highest priority
+
+APP_NAME = "ForumBot"
+def get_data_folder() -> str:
+    """Return the directory used to store persistent application data.
+
+    The location defaults to the per-user app data directory provided by
+    ``appdirs`` (e.g. ``%LOCALAPPDATA%/ForumBot`` on Windows).  An optional
+    environment variable ``FORUMBOT_DATA_DIR`` can override this location.
+    """
+
     override = os.getenv("FORUMBOT_DATA_DIR")
     if override:
         path = Path(override).expanduser()
-        path.mkdir(parents=True, exist_ok=True)
-        return str(path)
 
-    if getattr(sys, "frozen", False):
-        base = Path(sys.executable).resolve().parent
     else:
-        base = Path(__file__).resolve().parent.parent
+        path = Path(user_data_dir(APP_NAME, appauthor=False))
 
-    data_dir = base / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    return str(data_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)

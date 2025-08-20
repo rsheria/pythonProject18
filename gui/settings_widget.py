@@ -173,7 +173,7 @@ class SettingsWidget(QWidget):
         )
         winrar_layout.addWidget(self.select_winrar_exe_button)
         self.winrar_exe_label = QLabel(
-            f"WinRAR Executable: {self.config.get('winrar_exe_path', 'C:/Program Files/WinRAR/WinRAR.exe')}"
+            f"WinRAR Executable: {self.config.get('winrar_exe_path', os.environ.get('WINRAR_PATH', 'winrar'))}"
         )
         winrar_layout.addWidget(self.winrar_exe_label)
         general_layout.addWidget(winrar_group)

@@ -7,11 +7,11 @@ import sys
 import logging
 from dotenv import load_dotenv
 from PyQt5.QtWidgets import QApplication
-from config.config import DATA_DIR  # noqa: E402  (DATA_DIR path from your config)
 from common.logging_setup import setup_logging
+from diagnostics import run_diagnostics
 from downloaders.base_downloader import BaseDownloader  # noqa: E402
-from config.config import load_configuration  # noqa: E402
 from gui.main_window import ForumBotGUI  # noqa: E402
+from config.loader import load_config_with_prompts
 
 setup_logging()
 log = logging.getLogger(__name__)
@@ -40,10 +40,11 @@ def main():
     """
     log.info("Application starting…")
 
+    run_diagnostics()
     app = QApplication(sys.argv)
 
     try:
-        config = load_configuration()
+        config = load_config_with_prompts()
         log.info("Configuration loaded successfully.")
     except Exception as e:
         log.critical("Configuration Error: %s", e, exc_info=True)

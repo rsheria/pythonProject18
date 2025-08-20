@@ -874,10 +874,13 @@ class JDownloaderDownloader(BaseDownloader):
             possible_dirs = [
                 os.path.expanduser("~/Downloads"),
                 os.path.expanduser("~/Desktop"),
-                "C:/Users/Public/Downloads",
-                "C:/Downloads"
             ]
-            
+            public_dir = os.environ.get("PUBLIC")
+            if public_dir:
+                possible_dirs.append(os.path.join(public_dir, "Downloads"))
+            custom_dir = os.environ.get("JD_DOWNLOAD_DIR")
+            if custom_dir:
+                possible_dirs.append(custom_dir)
             # Add target directory to search paths
             if target_dir:
                 possible_dirs.insert(0, target_dir)
@@ -976,12 +979,14 @@ class JDownloaderDownloader(BaseDownloader):
                 # Common JDownloader paths
                 jd_paths = [
                     os.path.expanduser("~/JDownloader/Downloads"),
-                    "C:/JDownloader/Downloads", 
                     os.path.expanduser("~/Downloads/JDownloader"),
                     os.path.expanduser("~/Downloads"),
                     os.path.expanduser("~/Desktop"),
                 ]
-                
+                public_dir = os.environ.get("PUBLIC")
+                if public_dir:
+                    jd_paths.insert(1, os.path.join(public_dir, "JDownloader", "Downloads"))
+
                 # Add target directory
                 if target_dir:
                     jd_paths.insert(0, target_dir)
