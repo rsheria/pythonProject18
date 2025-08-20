@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from enum import Enum
 from pathlib import Path
@@ -361,10 +362,17 @@ class UploadWorker(QThread):
         final = {}
         all_urls = []
 
+        backup_pattern = re.compile(r"(bak|backup)$", re.IGNORECASE)
+
         for i, host in enumerate(self.hosts):
             urls = self.upload_results[i]["urls"]
-            final[host] = urls
-            if host != "rapidgator-backup":
+            norm = host.lower().replace("-", "").replace("_", "")
+            is_rg_backup = "rapidgator" in norm and bool(backup_pattern.search(norm))
+
+            key = "rapidgator_backup" if is_rg_backup else host
+            final[key] = {"urls": urls, "is_backup": is_rg_backup}
+
+            if not is_rg_backup:
                 all_urls.extend(urls)
 
         all_success = all(res["status"] == "success" for res in self.upload_results.values())

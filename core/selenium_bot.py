@@ -5824,18 +5824,24 @@ class ForumBotSelenium:
                         continue
                     for url in result.get('uploaded_urls', []):
                         host = urlparse(url).netloc
-                        uploaded.setdefault(host, []).append(url)
+                        entry = uploaded.setdefault(host, {"urls": [], "is_backup": False})
+                        entry["urls"].append(url)
                     if result.get('backup_rg_url'):
-                        uploaded.setdefault('rapidgator-backup', []).append(result['backup_rg_url'])
+                        entry = uploaded.setdefault('rapidgator_backup', {"urls": [], "is_backup": True})
+                        entry["urls"].append(result['backup_rg_url'])
                 if uploaded:
                     job.uploaded_links = uploaded
                     return True
                 return False
             elif step == "keeplinks":
                 urls = []
-                for host, links in job.uploaded_links.items():
-                    if host != 'rapidgator-backup':
-                        urls.extend(links)
+                for host, info in job.uploaded_links.items():
+                    if host == 'rapidgator_backup':
+                        continue
+                    if isinstance(info, dict):
+                        urls.extend(info.get('urls', []))
+                    else:
+                        urls.extend(info)
                 if not urls:
                     return False
                 kl = self.send_to_keeplinks(urls)

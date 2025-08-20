@@ -89,7 +89,7 @@ def _normalize_links_dict(links_dict: Dict[Any, Any]) -> Dict[str, List[str]]:
     for k, vals in (links_dict or {}).items():
         key = str(k).lower()
         urls = _as_list(vals)
-
+        matched = False
         # 1) صنّف من الURLs نفسها
         for url in urls:
             host = _guess_host_from_url(url)
@@ -97,10 +97,7 @@ def _normalize_links_dict(links_dict: Dict[Any, Any]) -> Dict[str, List[str]]:
                 out[host].append(url)
 
         # 2) لو مفيش تحديد من الURLs، جرّب من المفتاح نفسه
-        if any(out[h] for h in HOST_TOKENS.keys()):
-            # already added from urls; still try to add leftovers if key says so
-            pass
-        else:
+        if not matched:
             if "rapidgator" in key or key in ("rg", "link_rg", "rapidgator"):
                 out["rapidgator"].extend(urls)
             elif "ddownload" in key or key in ("ddl", "link_ddl", "dd"):
@@ -155,12 +152,35 @@ def apply_links_template(template: str, links_dict: dict) -> str:
     # 1) طبّع وفهرس الروابط
     jd = _normalize_links_dict(links_dict)
 
+    if "{PART}" in template:
+        lines: List[str] = []
+        tmpl_lines = template.splitlines()
+        max_parts = max((len(jd.get(h, [])) for h in jd if h != "keeplinks"), default=0)
+        for idx in range(max_parts):
+            for line in tmpl_lines:
+                skip = False
+                out_line = line
+                for host, token in HOST_TOKENS.items():
+                    placeholder = "{LINK_%s}" % token
+                    if placeholder in out_line:
+                        urls = jd.get(host, [])
+                        if idx < len(urls):
+                            out_line = out_line.replace(placeholder, urls[idx])
+                            out_line = out_line.replace("{PART}", str(idx + 1))
+                        else:
+                            skip = True
+                        break
+                if not skip:
+                    out_line = out_line.replace("{PART}", str(idx + 1))
+                    lines.append(out_line)
+        return "\n".join(lines).strip()
+
     # 2) Keeplinks: استخدم أول واحد فقط
     keep_urls = jd.get("keeplinks", [])
     if keep_urls:
         template = template.replace("{LINK_KEEP}", keep_urls[0])
     else:
-        template = _strip_host_placeholder(template, HOST_TOKENS["keeplinks"])
+        template = template.replace("{LINK_KEEP}", "")
 
     # 3) باقي المضيفين
     multi_blocks: List[str] = []
@@ -170,7 +190,7 @@ def apply_links_template(template: str, links_dict: dict) -> str:
         urls = jd.get(host, []) or []
 
         if not urls:
-            template = _strip_host_placeholder(template, token)
+            template = template.replace("{LINK_%s}" % token, "")
             continue
 
         if len(urls) == 1:
@@ -188,7 +208,6 @@ def apply_links_template(template: str, links_dict: dict) -> str:
             _append_multi_block(multi_blocks, label, urls)
 
     # 4) نظافة عامة + إضافة بلوكات متعددة بعد أول [/center] لو موجود
-    template = _cleanup_separators(template)
     template = re.sub(r"\{LINK_[A-Z_]+\}", "", template)  # أي placeholders متبقية
 
     lower_t = template.lower()
