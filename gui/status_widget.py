@@ -1390,7 +1390,6 @@ class StatusWidget(QWidget):
             changed = True
         model = self.table.model()
         tl = model.index(row, 0)
-        tl = model.index(row, 0)
         br = model.index(row, self.table.columnCount() - 1)
         model.dataChanged.emit(tl, br, [Qt.BackgroundRole, Qt.DisplayRole])
         roles = [Qt.DisplayRole]
@@ -1398,9 +1397,9 @@ class StatusWidget(QWidget):
             roles.append(Qt.BackgroundRole)
         model.dataChanged.emit(tl, br, roles)
         return key
-        def handle_status(self, st: OperationStatus):
-            key = self._update_row_from_status(st)
 
+    def handle_status(self, st: OperationStatus):
+        key = self._update_row_from_status(st)
         self._schedule_status_save()
         return key
 
