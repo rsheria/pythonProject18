@@ -5222,7 +5222,9 @@ class ForumBotGUI(QMainWindow):
 
     def start_auto_process_selected(self):
         """Start Auto‑Process pipeline for selected threads."""
-        selected_rows = sorted(set(index.row() for index in self.process_threads_table.selectedIndexes()))
+        selected_rows = sorted(
+            set(index.row() for index in self.process_threads_table.selectedIndexes())
+        )
         if not selected_rows:
             ui_notifier.warn("Warning", "Please select at least one thread.")
             return
@@ -5233,12 +5235,49 @@ class ForumBotGUI(QMainWindow):
             thread_id = self.process_threads_table.item(row, 2).text()
             url = self.process_threads_table.item(row, 0).data(Qt.UserRole + 2)
             job_id = f"{thread_id}-{int(time.time())}"
-            job = AutoProcessJob(job_id=job_id, thread_id=thread_id, category=category,
-                                title=title, url=url)
+            job = AutoProcessJob(
+                job_id=job_id,
+                thread_id=thread_id,
+                category=category,
+                title=title,
+                url=url,
+            )
             self.job_manager.add_job(job)
-            worker = AutoProcessWorker(job, self.bot, self.job_manager, self)
-            self.register_worker(worker)
-            self.auto_thread_pool.start(worker)
+
+            def download_fn(job=job):
+                job.step = "download"
+                return self.bot.auto_process_job(job)
+
+            def process_fn(job=job):
+                job.step = "modify"
+                return self.bot.auto_process_job(job)
+
+            def upload_fn(job=job):
+                job.step = "upload"
+                if not self.bot.auto_process_job(job):
+                    return False
+                job.step = "keeplinks"
+                return self.bot.auto_process_job(job)
+
+            def template_fn(job=job):
+                job.step = "template"
+                ok = self.bot.auto_process_job(job)
+                if ok:
+                    try:
+                        self.apply_auto_process_result(job)
+                    except Exception:
+                        pass
+                return ok
+
+            work_dir = self.get_sanitized_path(category, thread_id)
+            self.orch.enqueue(
+                thread_id,
+                download_fn,
+                process_fn,
+                upload_fn,
+                template_fn,
+                working_dir=work_dir,
+            )
 
     def start_auto_process(self, thread_ids):
         """Public API to start Auto‑Process by thread ids."""
