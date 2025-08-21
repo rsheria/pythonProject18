@@ -192,7 +192,8 @@ class QueueOrchestrator(QObject):
             state.host_results = info.get("host_results", {})
             self.topics[tid] = state
             for name, st in state.ops.items():
-                self._emit_status(tid, name, st)
+                if name != "process":
+                    self._emit_status(tid, name, st)
 
     # ------------------------------------------------------------------
     # Queue management
@@ -218,8 +219,8 @@ class QueueOrchestrator(QObject):
         )
         self.topics[topic_id] = state
 
-        # Emit queued status for all operations
-        for name in ["download", "process", "upload", "template"]:
+        # Emit queued status for main operations only
+        for name in ["download", "upload", "template"]:
             self._emit_status(topic_id, name, OpStage.QUEUED)
 
         fut = self.executor.submit(self._run_topic, state)
@@ -232,9 +233,7 @@ class QueueOrchestrator(QObject):
 
         # Download + Process (single worker)
         with self.dl_sem:
-            if not self._run_stage(state, "download", state.download_fn):
-                return
-            if not self._run_stage(state, "process", state.process_fn):
+            if not self._run_download_pipeline(state):
                 return
 
         # Upload (up to 3 concurrent)
@@ -248,6 +247,47 @@ class QueueOrchestrator(QObject):
                 return
 
         self._save_snapshot()
+
+        # ------------------------------------------------------------------
+
+    def _run_download_pipeline(self, state: TopicPipeline) -> bool:
+        """Run download and process sequentially under the same status."""
+        self._emit_status(state.topic_id, "download", OpStage.RUNNING)
+        try:
+            ok = state.download_fn()
+        except Exception as e:  # pragma: no cover - worker errors
+            ok = False
+            err = str(e)
+        else:
+            err = ""
+        if not ok:
+            state.ops["download"] = OpStage.ERROR
+            state.failed_op = "download"
+            self._emit_status(state.topic_id, "download", OpStage.ERROR, err)
+            self._save_snapshot()
+            return False
+
+        # Processing phase
+        try:
+            ok = state.process_fn()
+        except Exception as e:  # pragma: no cover
+            ok = False
+            err = str(e)
+        else:
+            err = ""
+        if not ok:
+            state.ops["process"] = OpStage.ERROR
+            state.ops["download"] = OpStage.ERROR
+            state.failed_op = "process"
+            self._emit_status(state.topic_id, "download", OpStage.ERROR, err)
+            self._save_snapshot()
+            return False
+
+        state.ops["download"] = OpStage.FINISHED
+        state.ops["process"] = OpStage.FINISHED
+        self._emit_status(state.topic_id, "download", OpStage.FINISHED)
+        self._save_snapshot()
+        return True
 
     # ------------------------------------------------------------------
     def _run_stage(self, state: TopicPipeline, name: str, fn: Callable[[], bool]) -> bool:

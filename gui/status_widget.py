@@ -2,6 +2,7 @@
 import logging
 import os
 import threading
+import time
 from PyQt5.QtCore import QTimer, Qt, QSize, QEvent, QObject, pyqtSignal, QItemSelectionModel
 from PyQt5.QtGui import QColor, QPalette, QBrush, QKeySequence
 
@@ -290,10 +291,11 @@ class StatusWidget(QWidget):
         self._thread_steps = {}  # 🆕 تجميع خطوات كل Thread => {(section,item): {(op,host)->state}}
         self._bar_at = {}
         self._pending_status = []
+        self._last_progress = {}
         self._flush_timer = QTimer(self)
         self._flush_timer.setSingleShot(True)
-        self._flush_timer.setInterval(120)
-        self._flush_timer.timeout.connect(self._flush_pending_status, Qt.QueuedConnection)
+        self._flush_timer.setInterval(80)
+        self._flush_timer.timeout.connect(self._flush_status, Qt.QueuedConnection)
 
         self._apply_readability_palette()
         self._row_brushes = self._status_brushes(self.table.palette())
@@ -1238,11 +1240,19 @@ class StatusWidget(QWidget):
         model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
 
     def _enqueue_status(self, st: OperationStatus) -> None:
+        key = (st.section, st.item, getattr(st.op_type, "name", st.op_type))
+        prog = getattr(st, "progress", None)
+        if prog is not None:
+            now = time.monotonic()
+            last = self._last_progress.get(key)
+            if last and last[0] == prog and (now - last[1]) < 0.15:
+                return
+            self._last_progress[key] = (prog, now)
         self._pending_status.append(st)
         if not self._flush_timer.isActive():
             self._flush_timer.start()
 
-    def _flush_pending_status(self) -> None:
+    def _flush_status(self) -> None:
         if not self._pending_status:
             return
         statuses = self._pending_status
@@ -1252,7 +1262,7 @@ class StatusWidget(QWidget):
             self.table.setSortingEnabled(False)
         updated_keys = []
         for st in statuses:
-            updated_keys.append(self._update_row_from_status(st))
+            updated_keys.append(self.handle_status(st))
         if sorting:
             header = self.table.horizontalHeader()
             col = header.sortIndicatorSection()
@@ -1261,6 +1271,7 @@ class StatusWidget(QWidget):
             self.table.sortItems(col, order)
             sec_col = self._col_map.get("Section")
             item_col = self._col_map.get("Item")
+            stage_col = self._col_map.get("Stage")
             for key in updated_keys:
                 sec, item, _ = key
                 for r in range(self.table.rowCount()):
@@ -1269,15 +1280,19 @@ class StatusWidget(QWidget):
                     if s == sec and it == item:
                         self._row_by_key[key] = r
                         break
-            stage_col = self._col_map.get("Stage")
-            self._row_last_stage = {r: self._stage_from_text(self.table.item(r, stage_col).text() if stage_col is not None and self.table.item(r, stage_col) else "") for r in range(self.table.rowCount())}
-        else:
-            self.table.setSortingEnabled(False)
+            self._row_last_stage = {
+                r: self._stage_from_text(
+                    self.table.item(r, stage_col).text()
+                    if stage_col is not None and self.table.item(r, stage_col)
+                    else ""
+                )
+                for r in range(self.table.rowCount())
+            }
         if self._filter_active():
             self.apply_filter()
             if self._visible_rows_count() == 0:
                 self._reset_filters_to_all()
-        self._schedule_status_save()
+
 
     def _update_row_from_status(self, st: OperationStatus):
         sec = st.section or ("Uploads" if st.op_type == OpType.UPLOAD else "Downloads")
@@ -1382,40 +1397,12 @@ class StatusWidget(QWidget):
         if changed:
             roles.append(Qt.BackgroundRole)
         model.dataChanged.emit(tl, br, roles)
-
         return key
-
-    def handle_status(self, st: OperationStatus) -> None:
-        sorting = self.table.isSortingEnabled()
-        if sorting:
-            self.table.setSortingEnabled(False)
-
-        key = self._update_row_from_status(st)
-
-        if sorting:
-            header = self.table.horizontalHeader()
-            col = header.sortIndicatorSection()
-            order = header.sortIndicatorOrder()
-            self.table.setSortingEnabled(True)
-            self.table.sortItems(col, order)
-            sec_col = self._col_map.get("Section")
-            item_col = self._col_map.get("Item")
-            sec, item, _ = key
-            for r in range(self.table.rowCount()):
-                s = self.table.item(r, sec_col).text() if sec_col is not None else ""
-                it = self.table.item(r, item_col).text() if item_col is not None else ""
-                if s == sec and it == item:
-                    self._row_by_key[key] = r
-                    break
-            stage_col = self._col_map.get("Stage")
-            self._row_last_stage = {r: self._stage_from_text(self.table.item(r, stage_col).text() if stage_col is not None and self.table.item(r, stage_col) else "") for r in range(self.table.rowCount())}
-        else:
-            self.table.setSortingEnabled(False)
-
-        if self._filter_active():
-            QTimer.singleShot(0, self._apply_filter_if_active)
+        def handle_status(self, st: OperationStatus):
+            key = self._update_row_from_status(st)
 
         self._schedule_status_save()
+        return key
 
     def connect_worker(self, worker: QObject) -> None:
         # لو الووركر بيدعم cancel_event، خلّيه ياخده (اختيارى)
