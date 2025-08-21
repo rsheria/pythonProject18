@@ -64,7 +64,7 @@ import templab_manager
 from core.category_manager import CategoryManager
 from core.file_monitor import FileMonitor
 from core.file_processor import FileProcessor
-from core.job_manager import JobManager
+from core.job_manager import JobManager, QueueOrchestrator
 from core.selenium_bot import ForumBotSelenium as SeleniumBot
 from core.user_manager import get_user_manager
 from dotenv import find_dotenv, set_key
@@ -319,6 +319,7 @@ class ForumBotGUI(QMainWindow):
 
         # Auto-Process infrastructure
         self.job_manager = JobManager()
+        self.orchestrator = QueueOrchestrator()
         self.auto_thread_pool = QThreadPool()
         # Flag to auto retry uploads during auto process
         self.auto_retry_mode = False
@@ -1007,6 +1008,9 @@ class ForumBotGUI(QMainWindow):
         self.init_template_lab_view()
         self.init_settings_view()  # Initialize the new Settings view
         self.init_status_view()
+        self.orchestrator.progress_update.connect(
+            self.status_widget._enqueue_status, Qt.QueuedConnection
+        )
         templab_manager.set_hooks({
             "rewrite_images": None,
             "rewrite_links": getattr(self, "_rewrite_links", None),
@@ -1882,7 +1886,7 @@ class ForumBotGUI(QMainWindow):
                     eta=eta,
                     host="rapidgator.net",
                 )
-                self.status_widget.handle_status(status)
+                self.status_widget._enqueue_status(status)
 
             result = self.bot.download_rapidgator_net(
                 rg_link,
@@ -1906,7 +1910,7 @@ class ForumBotGUI(QMainWindow):
                     message="Failed",
                     host="rapidgator.net",
                 )
-                self.status_widget.handle_status(fail_status)
+                self.status_widget._enqueue_status(fail_status)
             state['current_index'] += 1
             self._download_next_rg_link()
 
@@ -1971,7 +1975,7 @@ class ForumBotGUI(QMainWindow):
             stage=OpStage.RUNNING,
             message="Processing files",
         )
-        self.status_widget.handle_status(process_status)
+        self.status_widget._enqueue_status(process_status)
         processed_files = self.file_processor.process_downloads(
             Path(reupload_folder), moved_files, thread_title, password
         )
@@ -1983,7 +1987,7 @@ class ForumBotGUI(QMainWindow):
         process_status.stage = OpStage.FINISHED
         process_status.message = "Processing complete"
         process_status.progress = 100
-        self.status_widget.handle_status(process_status)
+        self.status_widget._enqueue_status(process_status)
 
         # Upload to all active hosts including Rapidgator backup
         hosts = list(self.active_upload_hosts) if self.active_upload_hosts else []
@@ -5233,6 +5237,7 @@ class ForumBotGUI(QMainWindow):
             title = self.process_threads_table.item(row, 0).text()
             category = self.process_threads_table.item(row, 1).text()
             thread_id = self.process_threads_table.item(row, 2).text()
+            topic_id = f"{category}|{title}"
             url = self.process_threads_table.item(row, 0).data(Qt.UserRole + 2)
             job_id = f"{thread_id}-{int(time.time())}"
             job = AutoProcessJob(
@@ -5270,8 +5275,8 @@ class ForumBotGUI(QMainWindow):
                 return ok
 
             work_dir = self.get_sanitized_path(category, thread_id)
-            self.orch.enqueue(
-                thread_id,
+            self.orchestrator.enqueue(
+                topic_id,
                 download_fn,
                 process_fn,
                 upload_fn,
@@ -9318,7 +9323,7 @@ class ForumBotGUI(QMainWindow):
             stage=OpStage.QUEUED,
             message="Waiting",
         )
-        self.status_widget.handle_status(init_status)
+        self.status_widget._enqueue_status(init_status)
 
         worker = ProceedTemplateWorker(
             bot=self.bot,
