@@ -284,10 +284,16 @@ class StatusWidget(QWidget):
         layout.addWidget(self.btn_cancel)
 
         self._row_by_key = {}
+        self._row_last_stage = {}
         self._jd_links = {}
         self._upload_meta = {}
         self._thread_steps = {}  # 🆕 تجميع خطوات كل Thread => {(section,item): {(op,host)->state}}
         self._bar_at = {}
+        self._pending_status = []
+        self._flush_timer = QTimer(self)
+        self._flush_timer.setSingleShot(True)
+        self._flush_timer.setInterval(120)
+        self._flush_timer.timeout.connect(self._flush_pending_status, Qt.QueuedConnection)
 
         self._apply_readability_palette()
         self._row_brushes = self._status_brushes(self.table.palette())
@@ -309,6 +315,22 @@ class StatusWidget(QWidget):
         self.host_cb.setCurrentIndex(0)
         self.apply_filter()
 
+    def _filter_active(self) -> bool:
+        """Return True if any filter is active."""
+        if self.search_edit.text().strip():
+            return True
+        return not (
+            self.section_cb.currentText() == "All"
+            and self.stage_cb.currentText() == "All"
+            and self.host_cb.currentText() == "All"
+        )
+
+    def _apply_filter_if_active(self) -> None:
+        if not self._filter_active():
+            return
+        self.apply_filter()
+        if self._visible_rows_count() == 0:
+            self._reset_filters_to_all()
     def apply_filter(self) -> None:
         q = self.search_edit.text().strip().lower()
         section = self.section_cb.currentText()
@@ -449,11 +471,16 @@ class StatusWidget(QWidget):
                     del self._row_by_key[key]
                 elif r > row:
                     self._row_by_key[key] = r - 1
+            for r in list(self._row_last_stage.keys()):
+                if r == row:
+                    del self._row_last_stage[r]
+                elif r > row:
+                    self._row_last_stage[r - 1] = self._row_last_stage.pop(r)
             if sec or item:
                 self._thread_steps.pop((sec, item), None)
         self.table.model().layoutChanged.emit()
         self._schedule_status_save()
-        self.apply_filter()
+        self._apply_filter_if_active()
         self._select_row_after_removal(first)
 
     def on_ctx_menu(self, pos):
@@ -1210,12 +1237,49 @@ class StatusWidget(QWidget):
         idx = model.index(row, col)
         model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
 
-    def handle_status(self, st: OperationStatus) -> None:
+    def _enqueue_status(self, st: OperationStatus) -> None:
+        self._pending_status.append(st)
+        if not self._flush_timer.isActive():
+            self._flush_timer.start()
+
+    def _flush_pending_status(self) -> None:
+        if not self._pending_status:
+            return
+        statuses = self._pending_status
+        self._pending_status = []
         sorting = self.table.isSortingEnabled()
         if sorting:
             self.table.setSortingEnabled(False)
+        updated_keys = []
+        for st in statuses:
+            updated_keys.append(self._update_row_from_status(st))
+        if sorting:
+            header = self.table.horizontalHeader()
+            col = header.sortIndicatorSection()
+            order = header.sortIndicatorOrder()
+            self.table.setSortingEnabled(True)
+            self.table.sortItems(col, order)
+            sec_col = self._col_map.get("Section")
+            item_col = self._col_map.get("Item")
+            for key in updated_keys:
+                sec, item, _ = key
+                for r in range(self.table.rowCount()):
+                    s = self.table.item(r, sec_col).text() if sec_col is not None else ""
+                    it = self.table.item(r, item_col).text() if item_col is not None else ""
+                    if s == sec and it == item:
+                        self._row_by_key[key] = r
+                        break
+            stage_col = self._col_map.get("Stage")
+            self._row_last_stage = {r: self._stage_from_text(self.table.item(r, stage_col).text() if stage_col is not None and self.table.item(r, stage_col) else "") for r in range(self.table.rowCount())}
+        else:
+            self.table.setSortingEnabled(False)
+        if self._filter_active():
+            self.apply_filter()
+            if self._visible_rows_count() == 0:
+                self._reset_filters_to_all()
+        self._schedule_status_save()
 
-        # اشتق section آمن (لو بعض الـworkers ما بيرسلوش)
+    def _update_row_from_status(self, st: OperationStatus):
         sec = st.section or ("Uploads" if st.op_type == OpType.UPLOAD else "Downloads")
         key = (sec, st.item, st.op_type.name)
 
@@ -1229,12 +1293,10 @@ class StatusWidget(QWidget):
 
         self._ensure_section_option(sec)
 
-        # استنتج المرحلة
         stage = self._stage_from_text(getattr(st, "message", ""))
         if stage == OpStage.RUNNING:
             stage = getattr(st, "stage", OpStage.RUNNING)
 
-        # نصوص الأعمدة
         txts = [
             sec or "",
             st.item or "",
@@ -1246,25 +1308,25 @@ class StatusWidget(QWidget):
         for c, v in enumerate(txts):
             self._ensure_item(row, c).setText(str(v))
 
-        # سجل الخطوة
         self._record_step(st)
 
-        # تجميع السرعة/الوقت للـUPLOAD
         if st.op_type == OpType.UPLOAD:
             spd, eta = self._aggregate_upload_metrics(sec, st.item)
             model = self.table.model()
-            sc = self._col_map.get("Speed");
+            sc = self._col_map.get("Speed")
+            sc = self._col_map.get("Speed")
             ec = self._col_map.get("ETA")
             if sc is not None:
                 (self._ensure_item(row, sc).setText(self._fmt_speed(spd)) if spd else self._clear_text_cell(row, sc))
-                idx = model.index(row, sc);
+                idx = model.index(row, sc)
+                idx = model.index(row, sc)
                 model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
             if ec is not None:
                 (self._ensure_item(row, ec).setText(self._fmt_eta(eta)) if eta else self._clear_text_cell(row, ec))
-                idx = model.index(row, ec);
+                idx = model.index(row, ec)
+                idx = model.index(row, ec)
                 model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
 
-        # progress العام
         if self._progress_col is not None:
             if st.op_type == OpType.UPLOAD:
                 steps = self._thread_steps.get((sec, st.item), {})
@@ -1280,7 +1342,6 @@ class StatusWidget(QWidget):
             else:
                 self._clear_progress_cell(row, self._progress_col)
 
-        # progress الهوست للـUPLOAD فقط
         if st.op_type == OpType.UPLOAD:
             host_raw = (getattr(st, "host", "") or "").lower()
             if "rapidgator" in host_raw and any(x in host_raw for x in ("bak", "backup", "secondary")):
@@ -1297,8 +1358,7 @@ class StatusWidget(QWidget):
                 host_name = ""
             if host_name:
                 try:
-                    host_col = [self.table.horizontalHeaderItem(i).text() for i in
-                                range(self.table.columnCount())].index(host_name)
+                    host_col = [self.table.horizontalHeaderItem(i).text() for i in range(self.table.columnCount())].index(host_name)
                 except ValueError:
                     host_col = None
                 if host_col is not None:
@@ -1308,37 +1368,52 @@ class StatusWidget(QWidget):
                         hp = 0
                     (self._set_progress_cell(row, host_col, hp) if hp > 0 else self._clear_progress_cell(row, host_col))
 
-        # تلوين ثم إشعار
-        self._color_row(row, stage, st.op_type)
+        changed = False
+        if self._row_last_stage.get(row) != stage:
+            self._color_row(row, stage, st.op_type)
+            self._row_last_stage[row] = stage
+            changed = True
         model = self.table.model()
-        tl = model.index(row, 0);
+        tl = model.index(row, 0)
+        tl = model.index(row, 0)
         br = model.index(row, self.table.columnCount() - 1)
         model.dataChanged.emit(tl, br, [Qt.BackgroundRole, Qt.DisplayRole])
+        roles = [Qt.DisplayRole]
+        if changed:
+            roles.append(Qt.BackgroundRole)
+        model.dataChanged.emit(tl, br, roles)
 
-        # رجّع الفرز ثم صحّح موضع الصف فى الماب لو الفرز فعّال
+        return key
+
+    def handle_status(self, st: OperationStatus) -> None:
+        sorting = self.table.isSortingEnabled()
         if sorting:
-            # أعد الفرز حسب المؤشر الحالى
+            self.table.setSortingEnabled(False)
+
+        key = self._update_row_from_status(st)
+
+        if sorting:
             header = self.table.horizontalHeader()
             col = header.sortIndicatorSection()
             order = header.sortIndicatorOrder()
             self.table.setSortingEnabled(True)
             self.table.sortItems(col, order)
-            # أعد تعيين السطر الحقيقى للـkey بعد الفرز (scan سريع)
-            sec_col = self._col_map.get("Section");
+            sec_col = self._col_map.get("Section")
             item_col = self._col_map.get("Item")
+            sec, item, _ = key
             for r in range(self.table.rowCount()):
                 s = self.table.item(r, sec_col).text() if sec_col is not None else ""
                 it = self.table.item(r, item_col).text() if item_col is not None else ""
-                if s == sec and it == st.item:
+                if s == sec and it == item:
                     self._row_by_key[key] = r
                     break
+            stage_col = self._col_map.get("Stage")
+            self._row_last_stage = {r: self._stage_from_text(self.table.item(r, stage_col).text() if stage_col is not None and self.table.item(r, stage_col) else "") for r in range(self.table.rowCount())}
         else:
             self.table.setSortingEnabled(False)
 
-        # فلترة؛ لو كله اختفى، رجّع All تلقائيًا
-        self.apply_filter()
-        if self._visible_rows_count() == 0:
-            self._reset_filters_to_all()
+        if self._filter_active():
+            QTimer.singleShot(0, self._apply_filter_if_active)
 
         self._schedule_status_save()
 
@@ -1346,7 +1421,7 @@ class StatusWidget(QWidget):
         # لو الووركر بيدعم cancel_event، خلّيه ياخده (اختيارى)
         try:
             if hasattr(worker, "progress_update"):
-                worker.progress_update.connect(self.handle_status, Qt.QueuedConnection)
+                worker.progress_update.connect(self._enqueue_status, Qt.QueuedConnection)
             elif hasattr(worker, "file_progress_update"):
                 def _adapter(link_id, pct, stage, cur, tot, name, speed, eta):
                     status = OperationStatus(
@@ -1360,7 +1435,7 @@ class StatusWidget(QWidget):
                         eta=eta,
                         host="",
                     )
-                    self.handle_status(status)
+                    self._enqueue_status(status)
                 worker.file_progress_update.connect(_adapter, Qt.QueuedConnection)
             if hasattr(worker, "set_cancel_event"):
                 worker.set_cancel_event(self.cancel_event)
@@ -1400,7 +1475,6 @@ class StatusWidget(QWidget):
             if self.table.rowCount():
                 tl = model.index(0, 0)
                 br = model.index(self.table.rowCount() - 1, self.table.columnCount() - 1)
-                model.dataChanged.emit(tl, br, [Qt.BackgroundRole, Qt.DisplayRole])
 
         # (2) تنظيف شامل للـ JD فى Thread منفصل
         try:

@@ -537,7 +537,7 @@ class ForumBotGUI(QMainWindow):
     def register_worker(self, worker):
         if hasattr(worker, 'progress_update'):
             worker.progress_update.connect(
-                self.status_widget.handle_status, Qt.QueuedConnection
+                self.status_widget._enqueue_status, Qt.QueuedConnection
             )
 
         elif hasattr(worker, 'file_progress_update'):
@@ -553,7 +553,7 @@ class ForumBotGUI(QMainWindow):
                     eta=eta,
                     host="",
                 )
-                self.status_widget.handle_status(status)
+                self.status_widget._enqueue_status(status)
 
             worker.file_progress_update.connect(_adapter, Qt.QueuedConnection)
 
