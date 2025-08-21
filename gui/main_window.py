@@ -538,7 +538,7 @@ class ForumBotGUI(QMainWindow):
     def register_worker(self, worker):
         if hasattr(worker, 'progress_update'):
             worker.progress_update.connect(
-                self.status_widget._enqueue_status, Qt.QueuedConnection
+                self.orchestrator.progress_update.emit, Qt.QueuedConnection
             )
 
         elif hasattr(worker, 'file_progress_update'):
@@ -554,7 +554,7 @@ class ForumBotGUI(QMainWindow):
                     eta=eta,
                     host="",
                 )
-                self.status_widget._enqueue_status(status)
+                self.orchestrator.progress_update.emit(status)
 
             worker.file_progress_update.connect(_adapter, Qt.QueuedConnection)
 
@@ -1009,7 +1009,7 @@ class ForumBotGUI(QMainWindow):
         self.init_settings_view()  # Initialize the new Settings view
         self.init_status_view()
         self.orchestrator.progress_update.connect(
-            self.status_widget._enqueue_status, Qt.QueuedConnection
+            self.status_widget.enqueue_status, Qt.QueuedConnection
         )
         templab_manager.set_hooks({
             "rewrite_images": None,
@@ -1886,7 +1886,7 @@ class ForumBotGUI(QMainWindow):
                     eta=eta,
                     host="rapidgator.net",
                 )
-                self.status_widget._enqueue_status(status)
+                self.orchestrator.progress_update.emit(status)
 
             result = self.bot.download_rapidgator_net(
                 rg_link,
@@ -1910,7 +1910,7 @@ class ForumBotGUI(QMainWindow):
                     message="Failed",
                     host="rapidgator.net",
                 )
-                self.status_widget._enqueue_status(fail_status)
+                self.orchestrator.progress_update.emit(fail_status)
             state['current_index'] += 1
             self._download_next_rg_link()
 
@@ -1975,7 +1975,7 @@ class ForumBotGUI(QMainWindow):
             stage=OpStage.RUNNING,
             message="Processing files",
         )
-        self.status_widget._enqueue_status(process_status)
+        self.orchestrator.progress_update.emit(process_status)
         processed_files = self.file_processor.process_downloads(
             Path(reupload_folder), moved_files, thread_title, password
         )
@@ -1987,7 +1987,7 @@ class ForumBotGUI(QMainWindow):
         process_status.stage = OpStage.FINISHED
         process_status.message = "Processing complete"
         process_status.progress = 100
-        self.status_widget._enqueue_status(process_status)
+        self.orchestrator.progress_update.emit(process_status)
 
         # Upload to all active hosts including Rapidgator backup
         hosts = list(self.active_upload_hosts) if self.active_upload_hosts else []
@@ -5275,6 +5275,15 @@ class ForumBotGUI(QMainWindow):
                 return ok
 
             work_dir = self.get_sanitized_path(category, thread_id)
+            for op in (OpType.DOWNLOAD, OpType.UPLOAD, OpType.POST):
+                self.orchestrator.progress_update.emit(
+                    OperationStatus(
+                        section=topic_id,
+                        item=topic_id,
+                        op_type=op,
+                        stage=OpStage.QUEUED,
+                    )
+                )
             self.orchestrator.enqueue(
                 topic_id,
                 download_fn,
@@ -9323,7 +9332,7 @@ class ForumBotGUI(QMainWindow):
             stage=OpStage.QUEUED,
             message="Waiting",
         )
-        self.status_widget._enqueue_status(init_status)
+        self.orchestrator.progress_update.emit(init_status)
 
         worker = ProceedTemplateWorker(
             bot=self.bot,

@@ -290,11 +290,11 @@ class StatusWidget(QWidget):
         self._upload_meta = {}
         self._thread_steps = {}  # 🆕 تجميع خطوات كل Thread => {(section,item): {(op,host)->state}}
         self._bar_at = {}
-        self._pending_status = []
+        self._pending_by_key = {}
         self._last_progress = {}
         self._flush_timer = QTimer(self)
         self._flush_timer.setSingleShot(True)
-        self._flush_timer.setInterval(80)
+        self._flush_timer.setInterval(150)
         self._flush_timer.timeout.connect(self._flush_status, Qt.QueuedConnection)
 
         self._apply_readability_palette()
@@ -1239,7 +1239,7 @@ class StatusWidget(QWidget):
         idx = model.index(row, col)
         model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
 
-    def _enqueue_status(self, st: OperationStatus) -> None:
+    def enqueue_status(self, st: OperationStatus) -> None:
         key = (st.section, st.item, getattr(st.op_type, "name", st.op_type))
         prog = getattr(st, "progress", None)
         if prog is not None:
@@ -1248,15 +1248,15 @@ class StatusWidget(QWidget):
             if last and last[0] == prog and (now - last[1]) < 0.15:
                 return
             self._last_progress[key] = (prog, now)
-        self._pending_status.append(st)
+        self._pending_by_key[key] = st
         if not self._flush_timer.isActive():
             self._flush_timer.start()
 
     def _flush_status(self) -> None:
-        if not self._pending_status:
+        if not self._pending_by_key:
             return
-        statuses = self._pending_status
-        self._pending_status = []
+        statuses = list(self._pending_by_key.values())
+        self._pending_by_key = {}
         sorting = self.table.isSortingEnabled()
         if sorting:
             self.table.setSortingEnabled(False)
@@ -1404,25 +1404,8 @@ class StatusWidget(QWidget):
         return key
 
     def connect_worker(self, worker: QObject) -> None:
-        # لو الووركر بيدعم cancel_event، خلّيه ياخده (اختيارى)
+        """Only propagate cancel events to workers."""
         try:
-            if hasattr(worker, "progress_update"):
-                worker.progress_update.connect(self._enqueue_status, Qt.QueuedConnection)
-            elif hasattr(worker, "file_progress_update"):
-                def _adapter(link_id, pct, stage, cur, tot, name, speed, eta):
-                    status = OperationStatus(
-                        section="Downloads",
-                        item=name,
-                        op_type=OpType.DOWNLOAD,
-                        stage=OpStage.RUNNING if pct < 100 else OpStage.FINISHED,
-                        message=stage,
-                        progress=pct,
-                        speed=speed,
-                        eta=eta,
-                        host="",
-                    )
-                    self._enqueue_status(status)
-                worker.file_progress_update.connect(_adapter, Qt.QueuedConnection)
             if hasattr(worker, "set_cancel_event"):
                 worker.set_cancel_event(self.cancel_event)
             elif hasattr(worker, "cancel_event"):
