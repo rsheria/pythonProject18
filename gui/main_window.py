@@ -5276,7 +5276,7 @@ class ForumBotGUI(QMainWindow):
 
             work_dir = self.get_sanitized_path(category, thread_id)
             for op in (OpType.DOWNLOAD, OpType.UPLOAD, OpType.POST):
-                self.orchestrator.progress_update.emit(
+                self.status_widget.enqueue_status(
                     OperationStatus(
                         section=topic_id,
                         item=topic_id,
