@@ -111,6 +111,8 @@ class TopicPipeline:
     """Runtime state for a topic's pipeline."""
 
     topic_id: str
+    section: str
+    item: str
     download_fn: Callable[[], bool]
     process_fn: Callable[[], bool]
     upload_fn: Callable[[], bool]
@@ -133,11 +135,18 @@ class QueueOrchestrator(QObject):
 
     progress_update = pyqtSignal(OperationStatus)
 
-    def __init__(self, snapshot_file: str = "queue_snapshot.json", parent=None):
+    def __init__(
+        self,
+        dl_sem: int = 1,
+        up_sem: int = 3,
+        tpl_sem: int = 1,
+        snapshot_file: str = "queue_snapshot.json",
+        parent=None,
+    ):
         super().__init__(parent)
-        self.dl_sem = Semaphore(1)
-        self.up_sem = Semaphore(3)
-        self.tpl_sem = Semaphore(1)
+        self.dl_sem = Semaphore(dl_sem)
+        self.up_sem = Semaphore(up_sem)
+        self.tpl_sem = Semaphore(tpl_sem)
         self.executor = ThreadPoolExecutor(max_workers=5)
         self._futures: List[Future] = []
         self.topics: Dict[str, TopicPipeline] = {}
@@ -156,6 +165,8 @@ class QueueOrchestrator(QObject):
         data = {}
         for tid, state in self.topics.items():
             data[tid] = {
+                "section": state.section,
+                "item": state.item,
                 "ops": {k: v.name for k, v in state.ops.items()},
                 "failed_op": state.failed_op,
                 "host_results": state.host_results,
@@ -181,6 +192,8 @@ class QueueOrchestrator(QObject):
             }
             state = TopicPipeline(
                 topic_id=tid,
+                section=info.get("section", tid),
+                item=info.get("item", tid),
                 download_fn=lambda: True,
                 process_fn=lambda: True,
                 upload_fn=lambda: True,
@@ -193,7 +206,7 @@ class QueueOrchestrator(QObject):
             self.topics[tid] = state
             for name, st in state.ops.items():
                 if name != "process":
-                    self._emit_status(tid, name, st)
+                    self._emit_status(state, name, st)
 
     # ------------------------------------------------------------------
     # Queue management
@@ -201,58 +214,41 @@ class QueueOrchestrator(QObject):
     def enqueue(
         self,
         topic_id: str,
-        download_fn: Callable[[], bool],
-        process_fn: Callable[[], bool],
-        upload_fn: Callable[[], bool],
-        template_fn: Callable[[], bool],
+        section: str,
+        item: str,
+        download_cb: Callable[[], bool],
+        process_cb: Callable[[], bool],
+        upload_cb: Callable[[], bool],
+        template_cb: Callable[[], bool],
         working_dir: str = "",
     ) -> None:
         """Add a new topic to the queue and start its pipeline."""
 
         state = TopicPipeline(
             topic_id=topic_id,
-            download_fn=download_fn,
-            process_fn=process_fn,
-            upload_fn=upload_fn,
-            template_fn=template_fn,
+            section=section,
+            item=item,
+            download_fn=download_cb,
+            process_fn=process_cb,
+            upload_fn=upload_cb,
+            template_fn=template_cb,
             working_dir=working_dir,
         )
         self.topics[topic_id] = state
 
         # Emit queued status for main operations only
         for name in ["download", "upload", "template"]:
-            self._emit_status(topic_id, name, OpStage.QUEUED)
+            self._emit_status(state, name, OpStage.QUEUED)
 
         fut = self.executor.submit(self._run_topic, state)
         self._futures.append(fut)
-        self._save_snapshot()
-
-    # ------------------------------------------------------------------
-    def _run_topic(self, state: TopicPipeline) -> None:
-        """Execute the pipeline for a single topic."""
-
-        # Download + Process (single worker)
-        with self.dl_sem:
-            if not self._run_download_pipeline(state):
-                return
-
-        # Upload (up to 3 concurrent)
-        with self.up_sem:
-            if not self._run_stage(state, "upload", state.upload_fn):
-                return
-
-        # Template generation (single worker)
-        with self.tpl_sem:
-            if not self._run_stage(state, "template", state.template_fn):
-                return
-
         self._save_snapshot()
 
         # ------------------------------------------------------------------
 
     def _run_download_pipeline(self, state: TopicPipeline) -> bool:
         """Run download and process sequentially under the same status."""
-        self._emit_status(state.topic_id, "download", OpStage.RUNNING)
+        self._emit_status(state, "download", OpStage.RUNNING)
         try:
             ok = state.download_fn()
         except Exception as e:  # pragma: no cover - worker errors
@@ -263,7 +259,7 @@ class QueueOrchestrator(QObject):
         if not ok:
             state.ops["download"] = OpStage.ERROR
             state.failed_op = "download"
-            self._emit_status(state.topic_id, "download", OpStage.ERROR, err)
+            self._emit_status(state, "download", OpStage.ERROR, err)
             self._save_snapshot()
             return False
 
@@ -285,13 +281,13 @@ class QueueOrchestrator(QObject):
 
         state.ops["download"] = OpStage.FINISHED
         state.ops["process"] = OpStage.FINISHED
-        self._emit_status(state.topic_id, "download", OpStage.FINISHED)
+        self._emit_status(state, "download", OpStage.FINISHED)
         self._save_snapshot()
         return True
 
     # ------------------------------------------------------------------
     def _run_stage(self, state: TopicPipeline, name: str, fn: Callable[[], bool]) -> bool:
-        self._emit_status(state.topic_id, name, OpStage.RUNNING)
+        self._emit_status(state, name, OpStage.RUNNING)
         try:
             ok = fn()
         except Exception as e:  # pragma: no cover - worker errors
@@ -302,18 +298,16 @@ class QueueOrchestrator(QObject):
         if not ok:
             state.ops[name] = OpStage.ERROR
             state.failed_op = name
-            self._emit_status(state.topic_id, name, OpStage.ERROR, err)
+            self._emit_status(state, name, OpStage.ERROR, err)
             self._save_snapshot()
             return False
         state.ops[name] = OpStage.FINISHED
-        self._emit_status(state.topic_id, name, OpStage.FINISHED)
+        self._emit_status(state, name, OpStage.FINISHED)
         self._save_snapshot()
         return True
 
     # ------------------------------------------------------------------
-    def _emit_status(
-        self, topic_id: str, name: str, stage: OpStage, message: str = ""
-    ) -> None:
+    def _emit_status(self, state: TopicPipeline, name: str, stage: OpStage, message: str = "") -> None:
         op_map = {
             "download": OpType.DOWNLOAD,
             "process": OpType.COMPRESS,
@@ -321,8 +315,8 @@ class QueueOrchestrator(QObject):
             "template": OpType.POST,
         }
         status = OperationStatus(
-            section=topic_id,
-            item=topic_id,
+            section=state.section,
+            item=state.item,
             op_type=op_map[name],
             stage=stage,
             message=message or ("Waiting…" if stage is OpStage.QUEUED else ""),
@@ -351,7 +345,7 @@ class QueueOrchestrator(QObject):
         state.failed_op = None
         for name, st in state.ops.items():
             if st == OpStage.QUEUED:
-                self._emit_status(topic_id, name, OpStage.QUEUED)
+                self._emit_status(state, name, OpStage.QUEUED)
 
         fut = self.executor.submit(self._run_topic, state)
         self._futures.append(fut)

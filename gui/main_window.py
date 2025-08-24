@@ -8,9 +8,7 @@ from PyQt5.QtWidgets import QAction, QApplication, QPlainTextEdit
 
 from config.config import DATA_DIR, save_configuration
 from downloaders.katfile import KatfileDownloader as KatfileDownloaderAPI
-from workers.auto_process_worker import AutoProcessWorker
 from workers.download_worker import DownloadWorker
-from workers.mega_download_worker import MegaDownloadWorker
 from workers.megathreads_worker import MegaThreadsWorkerThread
 from workers.upload_worker import UploadWorker
 from workers.worker_thread import WorkerThread
@@ -319,7 +317,6 @@ class ForumBotGUI(QMainWindow):
 
         # Auto-Process infrastructure
         self.job_manager = JobManager()
-        self.orchestrator = QueueOrchestrator()
         self.auto_thread_pool = QThreadPool()
         # Flag to auto retry uploads during auto process
         self.auto_retry_mode = False
@@ -535,10 +532,14 @@ class ForumBotGUI(QMainWindow):
     # اربط الـ StatusWidget بالـ bot عشان JDownloader يشوف cancel_event بتاع الواجهة
         self.bot.status_widget = self.status_widget
 
+        self.orch = QueueOrchestrator(dl_sem=1, up_sem=3, tpl_sem=1)
+        handler = getattr(self.status_widget, "_enqueue_status", self.status_widget.handle_status)
+        self.orch.progress_update.connect(handler, Qt.QueuedConnection)
+
     def register_worker(self, worker):
         if hasattr(worker, 'progress_update'):
             worker.progress_update.connect(
-                self.orchestrator.progress_update.emit, Qt.QueuedConnection
+                self.orch.progress_update.emit, Qt.QueuedConnection
             )
 
         elif hasattr(worker, 'file_progress_update'):
@@ -554,7 +555,7 @@ class ForumBotGUI(QMainWindow):
                     eta=eta,
                     host="",
                 )
-                self.orchestrator.progress_update.emit(status)
+                self.orch.progress_update.emit(status)
 
             worker.file_progress_update.connect(_adapter, Qt.QueuedConnection)
 
@@ -1008,9 +1009,6 @@ class ForumBotGUI(QMainWindow):
         self.init_template_lab_view()
         self.init_settings_view()  # Initialize the new Settings view
         self.init_status_view()
-        self.orchestrator.progress_update.connect(
-            self.status_widget.enqueue_status, Qt.QueuedConnection
-        )
         templab_manager.set_hooks({
             "rewrite_images": None,
             "rewrite_links": getattr(self, "_rewrite_links", None),
@@ -1886,7 +1884,7 @@ class ForumBotGUI(QMainWindow):
                     eta=eta,
                     host="rapidgator.net",
                 )
-                self.orchestrator.progress_update.emit(status)
+                self.orch.progress_update.emit(status)
 
             result = self.bot.download_rapidgator_net(
                 rg_link,
@@ -1910,7 +1908,7 @@ class ForumBotGUI(QMainWindow):
                     message="Failed",
                     host="rapidgator.net",
                 )
-                self.orchestrator.progress_update.emit(fail_status)
+                self.orch.progress_update.emit(fail_status)
             state['current_index'] += 1
             self._download_next_rg_link()
 
@@ -1975,7 +1973,7 @@ class ForumBotGUI(QMainWindow):
             stage=OpStage.RUNNING,
             message="Processing files",
         )
-        self.orchestrator.progress_update.emit(process_status)
+        self.orch.progress_update.emit(process_status)
         processed_files = self.file_processor.process_downloads(
             Path(reupload_folder), moved_files, thread_title, password
         )
@@ -1987,7 +1985,7 @@ class ForumBotGUI(QMainWindow):
         process_status.stage = OpStage.FINISHED
         process_status.message = "Processing complete"
         process_status.progress = 100
-        self.orchestrator.progress_update.emit(process_status)
+        self.orch.progress_update.emit(process_status)
 
         # Upload to all active hosts including Rapidgator backup
         hosts = list(self.active_upload_hosts) if self.active_upload_hosts else []
@@ -5237,7 +5235,6 @@ class ForumBotGUI(QMainWindow):
             title = self.process_threads_table.item(row, 0).text()
             category = self.process_threads_table.item(row, 1).text()
             thread_id = self.process_threads_table.item(row, 2).text()
-            topic_id = f"{category}|{title}"
             url = self.process_threads_table.item(row, 0).data(Qt.UserRole + 2)
             job_id = f"{thread_id}-{int(time.time())}"
             job = AutoProcessJob(
@@ -5249,22 +5246,24 @@ class ForumBotGUI(QMainWindow):
             )
             self.job_manager.add_job(job)
 
-            def download_fn(job=job):
+            def download_cb(job=job):
                 job.step = "download"
-                return self.bot.auto_process_job(job)
-
-            def process_fn(job=job):
+                if not self.bot.auto_process_job(job):
+                    return False
                 job.step = "modify"
                 return self.bot.auto_process_job(job)
 
-            def upload_fn(job=job):
+            def process_cb():
+                return True
+
+            def upload_cb(job=job):
                 job.step = "upload"
                 if not self.bot.auto_process_job(job):
                     return False
                 job.step = "keeplinks"
                 return self.bot.auto_process_job(job)
 
-            def template_fn(job=job):
+            def template_cb(job=job):
                 job.step = "template"
                 ok = self.bot.auto_process_job(job)
                 if ok:
@@ -5276,20 +5275,22 @@ class ForumBotGUI(QMainWindow):
 
             work_dir = self.get_sanitized_path(category, thread_id)
             for op in (OpType.DOWNLOAD, OpType.UPLOAD, OpType.POST):
-                self.status_widget.enqueue_status(
+                self.orch.progress_update.emit(
                     OperationStatus(
-                        section=topic_id,
-                        item=topic_id,
+                        section=category,
+                        item=title,
                         op_type=op,
                         stage=OpStage.QUEUED,
                     )
                 )
-            self.orchestrator.enqueue(
-                topic_id,
-                download_fn,
-                process_fn,
-                upload_fn,
-                template_fn,
+            self.orch.enqueue(
+                topic_id=thread_id,
+                section=category,
+                item=title,
+                download_cb=download_cb,
+                process_cb=process_cb,
+                upload_cb=upload_cb,
+                template_cb=template_cb,
                 working_dir=work_dir,
             )
 
@@ -9332,7 +9333,7 @@ class ForumBotGUI(QMainWindow):
             stage=OpStage.QUEUED,
             message="Waiting",
         )
-        self.orchestrator.progress_update.emit(init_status)
+        self.orch.progress_update.emit(init_status)
 
         worker = ProceedTemplateWorker(
             bot=self.bot,
