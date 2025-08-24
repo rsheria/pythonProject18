@@ -3,16 +3,7 @@ import logging
 import os
 import threading
 import time
-from PyQt5.QtCore import (
-    QTimer,
-    Qt,
-    QSize,
-    QEvent,
-    QObject,
-    pyqtSignal,
-    QItemSelectionModel,
-    pyqtSlot,
-)
+from PyQt5.QtCore import QTimer, Qt, QSize, QEvent, QObject, pyqtSignal, QItemSelectionModel, pyqtSlot
 from PyQt5.QtGui import QColor, QPalette, QBrush, QKeySequence
 
 from PyQt5.QtWidgets import (
@@ -37,7 +28,8 @@ from PyQt5.QtWidgets import (
 from core.user_manager import get_user_manager
 from integrations.jd_client import hard_cancel
 from models.operation_status import OperationStatus, OpStage, OpType
-from .status_model import StatusTableModel
+
+
 class ProgressBarDelegate(QStyledItemDelegate):
     """ProgressBar يحترم الـPalette الحالية ويرفع التباين تلقائيًا فى الدارك."""
     @staticmethod
@@ -166,7 +158,6 @@ class StatusWidget(QWidget):
         layout.addLayout(filter_layout)
 
         self.table = QTableWidget(self)
-        self.model = StatusTableModel()
         headers = [
             "Section", "Item", "Stage", "Message", "Speed", "ETA",
             "Progress", "RG", "DDL", "KF", "NF", "RG_BAK",
@@ -216,28 +207,31 @@ class StatusWidget(QWidget):
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(800)  # ms
-        self._save_timer.timeout.connect(self._save_status_snapshot)
+        self._save_timer.timeout.connect(self._save_status_snapshot, Qt.QueuedConnection)
 
         self.table.verticalHeader().setVisible(False)
         self.table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
         layout.addWidget(self.table)
 
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self.on_ctx_menu)
+        self.table.customContextMenuRequested.connect(self.on_ctx_menu, Qt.QueuedConnection)
         # Connect filter widgets
-        self.search_edit.textChanged.connect(self.apply_filter)
-        self.section_cb.currentIndexChanged.connect(self.apply_filter)
-        self.stage_cb.currentIndexChanged.connect(self.apply_filter)
-        self.host_cb.currentIndexChanged.connect(self.apply_filter)
+        self.search_edit.textChanged.connect(self.apply_filter, Qt.QueuedConnection)
+        self.section_cb.currentIndexChanged.connect(self.apply_filter, Qt.QueuedConnection)
+        self.stage_cb.currentIndexChanged.connect(self.apply_filter, Qt.QueuedConnection)
+        self.host_cb.currentIndexChanged.connect(self.apply_filter, Qt.QueuedConnection)
 
         self.btn_clear_finished.clicked.connect(
             lambda: self.clear_finished(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier)),
+            Qt.QueuedConnection,
         )
         self.btn_clear_errors.clicked.connect(
             lambda: self.clear_errors(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier)),
+            Qt.QueuedConnection,
         )
         self.btn_clear_selected.clicked.connect(
             lambda: self.clear_selected(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier)),
+            Qt.QueuedConnection,
         )
 
         # Shortcuts
@@ -247,15 +241,15 @@ class StatusWidget(QWidget):
         sc_clear.activated.connect(self._clear_filters)
         sc_clear_finished = QShortcut(QKeySequence("Ctrl+Shift+F"), self)
         sc_clear_finished.activated.connect(
-            lambda: self.clear_finished(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier)),
+            lambda: self.clear_finished(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier))
         )
         sc_clear_errors = QShortcut(QKeySequence("Ctrl+Shift+E"), self)
         sc_clear_errors.activated.connect(
-            lambda: self.clear_errors(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier)),
+            lambda: self.clear_errors(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier))
         )
         sc_clear_selected = QShortcut(QKeySequence(Qt.Key_Delete), self.table)
         sc_clear_selected.activated.connect(
-            lambda: self.clear_selected(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier)),
+            lambda: self.clear_selected(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier))
         )
         sc_pause = QShortcut(QKeySequence("Ctrl+Alt+P"), self)
         sc_pause.activated.connect(lambda: self._emit_selection("pause"))
@@ -301,7 +295,7 @@ class StatusWidget(QWidget):
         self._flush_timer = QTimer(self)
         self._flush_timer.setSingleShot(True)
         self._flush_timer.setInterval(150)
-        self._flush_timer.timeout.connect(self._flush_status)
+        self._flush_timer.timeout.connect(self._flush_status, Qt.QueuedConnection)
 
         self._apply_readability_palette()
         self._row_brushes = self._status_brushes(self.table.palette())
@@ -314,13 +308,6 @@ class StatusWidget(QWidget):
             except Exception:
                 pass
 
-    @pyqtSlot(object)
-    def on_progress_update(self, op: OperationStatus) -> None:
-        """Update model with progress from background workers."""
-        try:
-            self.model.upsert(op)
-        except Exception as e:  # pragma: no cover - defensive
-            print("[StatusWidget] update error:", e)
     # ------------------------------------------------------------------
     def _clear_filters(self) -> None:
         """Clear all filter widgets and reapply."""
@@ -1536,4 +1523,27 @@ class StatusWidget(QWidget):
 
         # 3) لو كل المحاولات فشلت
         log.warning("⚠️ No JD session available for cancel cleanup")
+
+    @pyqtSlot(object)
+    def on_progress_update(self, op: OperationStatus) -> None:
+        """Main-thread slot to handle progress updates from workers.
+
+        This slot forwards the received ``OperationStatus`` to the
+        appropriate handler so that the QTableWidget is updated on
+        the GUI thread.  If a batching method (``_enqueue_status``)
+        exists, it will be used; otherwise it falls back to
+        ``handle_status``.  Errors are logged rather than propagated
+        to avoid crashing the GUI thread.
+
+        Args:
+            op: The OperationStatus instance emitted by a worker.
+        """
+        try:
+            enqueuer = getattr(self, "_enqueue_status", None)
+            if callable(enqueuer):
+                enqueuer(op)
+            else:
+                self.handle_status(op)
+        except Exception as exc:
+            log.error("[StatusWidget] on_progress_update error: %s", exc)
 

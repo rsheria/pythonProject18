@@ -1,7 +1,11 @@
 from typing import List
 
 from PyQt5.QtCore import QAbstractTableModel, QModelIndex, Qt
-from models.operation_status import OperationStatus
+from PyQt5.QtGui import QColor
+
+from .themes import theme_manager
+
+from models.operation_status import OperationStatus, OpStage
 
 
 class StatusTableModel(QAbstractTableModel):
@@ -63,6 +67,34 @@ class StatusTableModel(QAbstractTableModel):
                 return self._human_time(op.eta)
             if col == 10:
                 return op.progress
+        if role == Qt.BackgroundRole:
+            t = theme_manager.get_current_theme()
+            if theme_manager.theme_mode == "dark":
+                colors = {
+                    OpStage.QUEUED: t.SURFACE_VARIANT,
+                    OpStage.RUNNING: getattr(t, "INFO_LIGHT", t.INFO),
+                    OpStage.FINISHED: getattr(t, "SUCCESS_LIGHT", t.SUCCESS),
+                    OpStage.ERROR: getattr(t, "ERROR_LIGHT", t.ERROR),
+
+                }
+            else:
+                colors = {
+                    OpStage.QUEUED: t.SURFACE_VARIANT,
+                    OpStage.RUNNING: t.INFO,
+                    OpStage.FINISHED: t.SUCCESS,
+                    OpStage.ERROR: t.ERROR,
+
+                }
+            color = colors.get(op.stage)
+            if color:
+                return QColor(color)
+        if role == Qt.ForegroundRole:
+            t = theme_manager.get_current_theme()
+            if op.stage == OpStage.QUEUED:
+                return QColor(t.TEXT_PRIMARY)
+            if theme_manager.theme_mode == "dark":
+                return QColor(t.BACKGROUND)
+            return QColor(t.TEXT_ON_PRIMARY)
         return None
 
     # ------------------------------------------------------------------
@@ -85,17 +117,15 @@ class StatusTableModel(QAbstractTableModel):
         return f"{m:d}:{s:02d}"
     def upsert(self, op: OperationStatus) -> None:
         key = (op.section, op.item, op.op_type, op.host)
-        for r, existing in enumerate(self._rows):
+        for row, existing in enumerate(self._rows):
             if (existing.section, existing.item, existing.op_type, existing.host) == key:
-                self._rows[r] = op
-                break
-            else:
-                r = len(self._rows)
-                self.beginInsertRows(QModelIndex(), r, r)
-                self._rows.append(op)
-                self.endInsertRows()
-        self.dataChanged.emit(
-            self.index(r, 0),
-            self.index(r, self.columnCount() - 1),
-            [],
-        )
+                self._rows[row] = op
+                top_left = self.index(row, 0)
+                bottom_right = self.index(row, self.columnCount() - 1)
+                self.dataChanged.emit(
+                    top_left, bottom_right, [Qt.DisplayRole, Qt.BackgroundRole]
+                )
+                return
+        self.beginInsertRows(QModelIndex(), len(self._rows), len(self._rows))
+        self._rows.append(op)
+        self.endInsertRows()

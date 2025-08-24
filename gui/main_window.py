@@ -68,9 +68,8 @@ from core.user_manager import get_user_manager
 from dotenv import find_dotenv, set_key
 from gui.advanced_bbcode_editor import AdvancedBBCodeEditor
 from gui.utils.responsive_manager import ResponsiveManager
-from models.job_model import AutoProcessJob, SelectedRowSnapshot
+from models.job_model import AutoProcessJob
 from models.operation_status import OperationStatus, OpStage, OpType
-from workers.auto_process_worker import AutoProcessWorker
 from utils import sanitize_filename
 from utils.paths import get_data_folder
 from utils.host_priority import (
@@ -81,6 +80,7 @@ from utils.link_cache import persist_link_replacement
 from utils.link_summary import LinkCheckSummary
 from workers.login_thread import LoginThread
 from workers.link_check_worker import LinkCheckWorker, CONTAINER_HOSTS, is_container_host
+
 try:
     from appdirs import user_data_dir
 except Exception:  # pragma: no cover
@@ -90,6 +90,8 @@ NF_RE = re.compile(r"^/view/([A-Za-z0-9]+)(?:/.*)?$")
 DD_RE = re.compile(r"^/(?:f|file)/([A-Za-z0-9]+)(?:/.*)?$")
 TB_RE = re.compile(r"^/([A-Za-z0-9]+)(?:\.html)?(?:/.*)?$")
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+
+
 def _clean_host(host: str) -> str:
     host = (host or "").lower()
     return host[4:] if host.startswith("www.") else host
@@ -120,6 +122,8 @@ def canonicalize_path(host: str, path: str) -> str:
         if m:
             return f"/{m.group(1)}"
     return path
+
+
 from threading import Event
 from .advanced_bbcode_editor import AdvancedBBCodeEditor
 # Import modern UI components
@@ -129,6 +133,8 @@ from .dialogs import LinksDialog
 from .stats_widget import StatsWidget
 from .status_widget import StatusWidget
 from .upload_status_handler import UploadStatusHandler
+
+
 # import the DownloadWorker AGAIN if needed
 class StatusBarMessageBox:
     """Replacement for QMessageBox that writes messages to the status bar.
@@ -163,6 +169,7 @@ class StatusBarMessageBox:
         if hasattr(parent, "show_status_message"):
             parent.show_status_message(text)
         return QtMessageBox.critical(parent, title, text, *args, **kwargs)
+
     @staticmethod
     def question(parent, title, text,
                  buttons=QtMessageBox.Yes | QtMessageBox.No,
@@ -174,6 +181,7 @@ class StatusBarMessageBox:
 
 
 QMessageBox = StatusBarMessageBox
+
 
 class StatusColorDelegate(QStyledItemDelegate):
     """Color only the thread title cell based on status."""
@@ -241,6 +249,8 @@ class StatusColorDelegate(QStyledItemDelegate):
         painter.setPen(text_color)
         painter.drawText(text_rect, text_flags, text)
         painter.restore()
+
+
 class LinkStatusDelegate(QStyledItemDelegate):
     """Paint Rapidgator link cells green or red based on alive/dead status."""
 
@@ -261,11 +271,13 @@ class LinkStatusDelegate(QStyledItemDelegate):
             painter.restore()
         else:
             super().paint(painter, option, index)
+
+
 class ForumBotGUI(QMainWindow):
     # Define Qt signals for thread-safe UI updates
     thread_status_updated = pyqtSignal()
     user_logged_in = pyqtSignal(str)
-    
+
     # Define supported file extensions
     ARCHIVE_EXTENSIONS = ('.rar', '.zip')
     WINDOWS_FILE_EXTENSIONS = ('.pdf', '.epub', '.docx', '.xlsx', '.pptx', '.txt')  # Add more as needed
@@ -274,6 +286,7 @@ class ForumBotGUI(QMainWindow):
     LINK_STATUS_COL = 8
     # Column index containing the thread's Rapidgator links
     RG_LINKS_COL = 3
+
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -397,14 +410,14 @@ class ForumBotGUI(QMainWindow):
         # ثم ننادي على initUI
         self.initUI()
 
-        # Connect the thread status update signal to the UI refresh method  
-        self.thread_status_updated.connect(self.refresh_process_threads_table, type=Qt.QueuedConnection)
+        # Connect the thread status update signal to the UI refresh method
+        self.thread_status_updated.connect(self.refresh_process_threads_table)
 
         # Initialize empty data structures (don't load files before login)
         self.process_threads = {}
         self.backup_threads = {}
         self.replied_thread_ids = set()
-        
+
         # File monitor
         self.file_monitor = FileMonitor()
 
@@ -416,7 +429,7 @@ class ForumBotGUI(QMainWindow):
             self.init_log_viewer()
             self.last_double_click_time = QDateTime.currentDateTime()
             self.backup_threads_table.setContextMenuPolicy(Qt.CustomContextMenu)
-            self.backup_threads_table.customContextMenuRequested.connect(self.show_backup_threads_context_menu, type=Qt.QueuedConnection)
+            self.backup_threads_table.customContextMenuRequested.connect(self.show_backup_threads_context_menu)
             logging.info("GUI initialization completed successfully")
         except Exception as e:
             logging.error(f"Error during GUI initialization: {e}")
@@ -459,9 +472,10 @@ class ForumBotGUI(QMainWindow):
         # Redraw Process-Threads table to update delegate colors
         if hasattr(self, "process_threads_table"):
             self.process_threads_table.viewport().update()
-            
+
         # Update post section buttons and responsive layout
         ResponsiveManager.apply(self)
+
     def show_status_message(self, message: str, timeout: int = 5000):
         """Helper to display a message in the status bar."""
         try:
@@ -469,6 +483,7 @@ class ForumBotGUI(QMainWindow):
                 self.statusBar().showMessage(message, timeout)
         except Exception as e:
             logging.error(f"Failed to show status message: {e}")
+
     def resizeEvent(self, event):
         """Handle window resize events to update responsive layouts."""
         super().resizeEvent(event)
@@ -482,19 +497,19 @@ class ForumBotGUI(QMainWindow):
         from gui.settings_widget import SettingsWidget
 
         self.settings_tab = SettingsWidget(self.config)
-        
+
         # Connect the download directory changed signal
         self.settings_tab.download_directory_changed.connect(self.on_download_directory_changed)
-        
+
         # Connect the hosts updated signal
-        self.settings_tab.hosts_updated.connect(self.on_upload_hosts_updated, type=Qt.QueuedConnection)
+        self.settings_tab.hosts_updated.connect(self.on_upload_hosts_updated)
 
         # Connect Rapidgator backup toggle
-        self.settings_tab.use_backup_rg_changed.connect(self.on_use_backup_rg_changed, type=Qt.QueuedConnection)
-
+        self.settings_tab.use_backup_rg_changed.connect(self.on_use_backup_rg_changed)
 
         # إضافته لمنطقة المحتوى
         self.content_area.addWidget(self.settings_tab)
+
     def init_status_view(self):
         self.status_widget = StatusWidget(self)
         self.content_area.addWidget(self.status_widget)
@@ -502,49 +517,76 @@ class ForumBotGUI(QMainWindow):
         # Mapping from (section, item, op_type) -> worker for quick lookups
         self._worker_key_map = {}
 
+        # Wire status widget control signals to the upload control slots
         self.status_widget.pauseRequested.connect(
-            self._on_upload_pause
+            self._on_upload_pause, Qt.QueuedConnection
         )
         self.status_widget.resumeRequested.connect(
-            self._on_upload_resume
+            self._on_upload_resume, Qt.QueuedConnection
         )
         self.status_widget.cancelRequested.connect(
-            self._on_upload_cancel
+            self._on_upload_cancel, Qt.QueuedConnection
         )
-        self.status_widget.retryRequested.connect(self._on_upload_retry)
-
+        self.status_widget.retryRequested.connect(
+            self._on_upload_retry, Qt.QueuedConnection
+        )
         self.status_widget.resumePendingRequested.connect(
-            self._on_upload_resume_pending
+            self._on_upload_resume_pending, Qt.QueuedConnection
         )
         self.status_widget.reuploadAllRequested.connect(
-            self._on_upload_reupload_all
+            self._on_upload_reupload_all, Qt.QueuedConnection
         )
         self.status_widget.openInJDRequested.connect(
-            self._on_open_in_jd
+            self._on_open_in_jd, Qt.QueuedConnection
         )
         self.status_widget.copyJDLinkRequested.connect(
-            self._on_copy_jd_link
+            self._on_copy_jd_link, Qt.QueuedConnection
         )
 
+        # Allow the status widget to reload its state after login
         self.user_logged_in.connect(
-            self.status_widget.reload_from_disk
+            self.status_widget.reload_from_disk, Qt.QueuedConnection
         )
 
-    # اربط الـ StatusWidget بالـ bot عشان JDownloader يشوف cancel_event بتاع الواجهة
+        # اربط الـ StatusWidget بالـ bot عشان JDownloader يشوف cancel_event بتاع الواجهة
         self.bot.status_widget = self.status_widget
 
-        self.orch = QueueOrchestrator(dl_sem=1, up_sem=3, tpl_sem=1)
-        self.orch.progress_update.connect(
-            self.status_widget.on_progress_update, type=Qt.QueuedConnection
-        )
+        # --- Orchestrator wiring (safe & UI-first) ---
+        # Ensure an orchestrator exists before connecting signals
+        if not hasattr(self, "orch"):
+            try:
+                self.orch = QueueOrchestrator(dl_sem=1, up_sem=3, tpl_sem=1)
+            except Exception:
+                # fallback to default constructor if no sem args
+                self.orch = QueueOrchestrator()
+
+        # Choose the appropriate handler for status updates:
+        # prefer batch enqueuer, then handle_status, then on_progress_update
+        handler = getattr(self.status_widget, "_enqueue_status", None)
+        if handler is None:
+            handler = getattr(self.status_widget, "handle_status", None)
+        if handler is None:
+            handler = getattr(self.status_widget, "on_progress_update", None)
+        # Connect orchestrator progress updates to the handler on the GUI thread
+        if handler is not None:
+            self.orch.progress_update.connect(handler, Qt.QueuedConnection)
 
     def register_worker(self, worker):
-        if hasattr(worker, 'progress_update'):
-            worker.progress_update.connect(
-                self.orch.progress_update.emit, type=Qt.QueuedConnection
-            )
+        """Register a worker with the orchestrator and status widget.
 
-        elif hasattr(worker, 'file_progress_update'):
+        All progress signals from workers are forwarded to the queue
+        orchestrator, which then updates the StatusWidget on the
+        main thread.  Upload workers are also stored for context
+        menu actions.
+        """
+        # Forward worker progress updates through the orchestrator
+        if hasattr(worker, "progress_update"):
+            # Standard workers emit a single OperationStatus
+            worker.progress_update.connect(
+                self.orch.progress_update.emit, Qt.QueuedConnection
+            )
+        elif hasattr(worker, "file_progress_update"):
+            # Download workers may emit file-level progress metrics; adapt
             def _adapter(link_id, pct, stage, cur, tot, name, speed, eta):
                 status = OperationStatus(
                     section="Downloads",
@@ -559,18 +601,23 @@ class ForumBotGUI(QMainWindow):
                 )
                 self.orch.progress_update.emit(status)
 
-            worker.file_progress_update.connect(_adapter, type=Qt.QueuedConnection)
+            worker.file_progress_update.connect(_adapter, Qt.QueuedConnection)
 
+        # Ensure worker receives the cancel event from the status widget
         self.status_widget.connect_worker(worker)
-        # Store mapping for upload workers to allow context‑menu control
+
+        # For upload workers, store mapping so we can control them via context menu
         if isinstance(worker, UploadWorker):
             for f in getattr(worker, "files", []):
                 key = (worker.section, f.name, OpType.UPLOAD.name)
                 self._worker_key_map[key] = worker
+
+        # Switch view to STATUS when registering new worker
         if hasattr(self, "sidebar"):
             self.sidebar.set_active_item_by_text("STATUS")
         else:
             self.content_area.setCurrentWidget(self.status_widget)
+
     def apply_settings(self):
         # مسار التحميل الجديد
         new_dl = self.config['download_dir']
@@ -594,23 +641,23 @@ class ForumBotGUI(QMainWindow):
         try:
             # Update bot's download directory
             self.bot.update_download_directory(new_download_dir)
-            
+
             # Update file processor's download directory
             if hasattr(self, 'file_processor'):
                 self.file_processor.download_dir = new_download_dir
                 logging.info(f"📁 FileProcessor download directory updated to: {new_download_dir}")
-            
+
             logging.info(f"✅ Download directory successfully updated to: {new_download_dir}")
-            
+
         except Exception as e:
             logging.error(f"❌ Error updating download directory: {e}")
             QMessageBox.critical(self, "Error", f"Failed to update download directory: {str(e)}")
-            
+
     def on_upload_hosts_updated(self, hosts_list):
         """
         Handle upload hosts list changes from settings widget.
         Updates bot and config with new upload hosts list.
-        
+
         Args:
             hosts_list (list): List of upload host names
         """
@@ -628,7 +675,7 @@ class ForumBotGUI(QMainWindow):
             if hasattr(self, 'bot') and self.bot:
                 self.bot.upload_hosts = list(hosts_list)  # Make a copy to avoid reference issues
                 logging.info(f"🔄 Updated upload hosts in bot: {hosts_list}")
-                
+
                 # If bot has an uploader, update its hosts too
                 if hasattr(self.bot, 'uploader') and self.bot.uploader:
                     self.bot.uploader.upload_hosts = list(hosts_list)
@@ -643,7 +690,7 @@ class ForumBotGUI(QMainWindow):
                 self.user_manager.set_user_setting('upload_hosts', hosts_list)
                 logging.info("🔄 Updated upload hosts in user settings")
             logging.info(f"✅ Upload hosts successfully updated: {hosts_list}")
-            
+
         except Exception as e:
             logging.error(f"❌ Error updating upload hosts: {e}")
             QMessageBox.critical(self, "Error", f"Failed to update upload hosts: {str(e)}")
@@ -680,7 +727,6 @@ class ForumBotGUI(QMainWindow):
         except Exception as e:
             logging.error(f"Error updating Rapidgator backup preference: {e}")
 
-
     def populate_megathreads_category_tree(self):
         self.megathreads_category_model.clear()
         self.megathreads_category_model.setHorizontalHeaderLabels(['Megathread Category'])
@@ -690,6 +736,7 @@ class ForumBotGUI(QMainWindow):
             item.setIcon(self.style().standardIcon(QStyle.SP_DirIcon))
             self.megathreads_category_model.appendRow(item)
         self.megathreads_category_tree.expandAll()
+
     # ------------------------- NEW ENHANCEMENT END ---------------------------
 
     def add_megathreads_category(self):
@@ -914,10 +961,10 @@ class ForumBotGUI(QMainWindow):
             # Build the WinRAR command
             command = [
                 self.winrar_exe_path,
-                'a',            # Add to archive
-                format_flag,    # Specify archive format
-                '-y',           # Assume Yes on all queries
-                archive_path,   # Destination archive
+                'a',  # Add to archive
+                format_flag,  # Specify archive format
+                '-y',  # Assume Yes on all queries
+                archive_path,  # Destination archive
                 os.path.basename(source_file)  # Source file (relative path)
             ]
 
@@ -948,28 +995,28 @@ class ForumBotGUI(QMainWindow):
 
     def initUI(self):
         self.setWindowTitle('  🚀 ForumBot Pro - Selenium Enhanced  ')
-        
+
         # Get primary screen's available geometry
         screen = QGuiApplication.primaryScreen()
         screen_geometry = screen.availableGeometry()
-        
+
         # Calculate window size as 85% of screen size
         width = int(screen_geometry.width() * 0.85)
         height = int(screen_geometry.height() * 0.85)
-        
+
         # Set window size and center it on screen
         self.resize(width, height)
         self.move(
             screen_geometry.x() + (screen_geometry.width() - width) // 2,
             screen_geometry.y() + (screen_geometry.height() - height) // 2
         )
-        
+
         # Set window icon using built-in system icons
         self.setWindowIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
-        
+
         # Improve window margins and appearance
         self.setContentsMargins(8, 8, 8, 8)
-        
+
         # Main widget and layout
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
@@ -981,7 +1028,7 @@ class ForumBotGUI(QMainWindow):
         self.sidebar = ModernSidebar(self)
         responsive_width = ResponsiveManager.get_responsive_sidebar_width()
         self.sidebar.setFixedWidth(responsive_width)
-        
+
         # Add sidebar items with modern icons
         self.sidebar.add_item("Posts", "📝")
         self.sidebar.add_item("Backup", "💾")
@@ -991,14 +1038,14 @@ class ForumBotGUI(QMainWindow):
         self.sidebar.add_item("Settings", "⚙️")
         self.sidebar.add_item("STATUS", "📊")
         # Connect sidebar signals
-        self.sidebar.item_clicked.connect(self.on_sidebar_item_clicked, type=Qt.QueuedConnection)
-        
+        self.sidebar.item_clicked.connect(self.on_sidebar_item_clicked)
+
         main_layout.addWidget(self.sidebar)
 
         # Main content splitter
         content_splitter = QSplitter(Qt.Horizontal)
         main_layout.addWidget(content_splitter)
-        
+
         # Content Area (QStackedWidget) - styling handled by global theme
         self.content_area = QStackedWidget()
         content_splitter.addWidget(self.content_area)
@@ -1014,20 +1061,20 @@ class ForumBotGUI(QMainWindow):
         templab_manager.set_hooks({
             "rewrite_images": None,
             "rewrite_links": getattr(self, "_rewrite_links", None),
-            "reload_tree": lambda: QMetaObject.invokeMethod(self, "reload_templab_tree"),
+            "reload_tree": lambda: QMetaObject.invokeMethod(self, "reload_templab_tree", Qt.QueuedConnection),
         })
 
         # Right Sidebar for Login with modern styling
         self.init_login_section(content_splitter)
 
         # Set Stretch Factors for Splitter with responsive behavior
-        content_splitter.setStretchFactor(0, 3)  # Content Area 
+        content_splitter.setStretchFactor(0, 3)  # Content Area
         content_splitter.setStretchFactor(1, 1)  # Login Section
-        
+
         # Set minimum widths for responsive behavior
         self.content_area.setMinimumWidth(400)
         self.sidebar.setMinimumWidth(220)
-        
+
         # Set layout stretch properly
         main_layout.setStretchFactor(self.sidebar, 0)  # Sidebar - fixed width
         main_layout.setStretchFactor(content_splitter, 1)  # Content splitter - flexible
@@ -1048,11 +1095,11 @@ class ForumBotGUI(QMainWindow):
         # ─── Light / Dark Mode Toggle ─────────────────────────────
         self.theme_toggle_action = QAction("🌙 Light Mode", self)
         self.theme_toggle_action.setCheckable(True)
-        self.theme_toggle_action.toggled.connect(self.on_theme_toggled, type=Qt.QueuedConnection)
+        self.theme_toggle_action.toggled.connect(self.on_theme_toggled)
         toolbar.addAction(self.theme_toggle_action)
 
         diag_action = QAction("Diagnostics Report", self)
-        diag_action.triggered.connect(self.open_diagnostics_report, type=Qt.QueuedConnection)
+        diag_action.triggered.connect(self.open_diagnostics_report)
         toolbar.addAction(diag_action)
 
         # Default Selection - set first item as active
@@ -1061,22 +1108,23 @@ class ForumBotGUI(QMainWindow):
 
         # Setup keyboard shortcuts
         self.setup_shortcuts()
-        
+
         # Apply global modern theme styling AFTER all UI is created
         self.apply_global_theme()
-        
+
         # ── Fade-in effect for the main window ────────────────────────────
         from PyQt5.QtCore import QPropertyAnimation
         # Start with 0 opacity
         self.setWindowOpacity(0.0)
         # Create animation for the opacity property
         self._fade_anim = QPropertyAnimation(self, b"windowOpacity")
-        self._fade_anim.setDuration(900)      # 900ms duration
+        self._fade_anim.setDuration(900)  # 900ms duration
         self._fade_anim.setStartValue(0.0)
         self._fade_anim.setEndValue(1.0)
         self._fade_anim.start()
 
         self.check_prerequisites()
+
     def apply_global_theme(self):
         """Apply theme palette and stylesheet globally."""
         apply_theme(theme_manager.theme_mode)
@@ -1150,7 +1198,7 @@ class ForumBotGUI(QMainWindow):
                 )
 
             self.statusBar().showMessage('Please log in.')
-    
+
     def run(self):
         """Show the main window and start the application"""
         self.show()
@@ -1179,6 +1227,7 @@ class ForumBotGUI(QMainWindow):
                 "Missing dependencies: " + ", ".join(missing) +
                 "\nPlease configure them in your settings and restart.",
             )
+
     # === STATUS COLOR MANAGEMENT ===
     def set_thread_status_color(self, tree_item, status):
         """
@@ -1211,6 +1260,7 @@ class ForumBotGUI(QMainWindow):
 
         tree_item.setBackground(0, brush_bg)
         tree_item.setForeground(0, brush_fg)
+
     def set_backup_link_status_color(self, item: QTableWidgetItem, alive: bool) -> None:
         """Color the Rapidgator link cell based on availability."""
         try:
@@ -1224,6 +1274,7 @@ class ForumBotGUI(QMainWindow):
                 item.setBackground(QColor(255, 99, 71))  # tomato red
         except Exception as exc:
             logging.error(f"Failed setting backup link color: {exc}")
+
     def init_megathreads_view(self):
         """Initialize the Megathreads view with categories and threads"""
         # Create the main widget and layout
@@ -1246,14 +1297,15 @@ class ForumBotGUI(QMainWindow):
         self.megathreads_category_tree = QTreeView()
         self.megathreads_category_model = QStandardItemModel()
         self.megathreads_category_tree.setModel(self.megathreads_category_model)
-        self.megathreads_category_tree.clicked.connect(self.on_megathreads_category_clicked, type=Qt.QueuedConnection)
+        self.megathreads_category_tree.clicked.connect(self.on_megathreads_category_clicked)
         self.megathreads_category_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         mega_category_controls = QHBoxLayout()
         add_mega_btn = QPushButton("Add Megathread Category")
-        add_mega_btn.clicked.connect(self.add_megathread_category, type=Qt.QueuedConnection)
+        add_mega_btn.clicked.connect(self.add_megathread_category)
         mega_category_controls.addWidget(add_mega_btn)
         remove_mega_btn = QPushButton("Remove Megathread Category(s)")
-        remove_mega_btn.clicked.connect(lambda: self.remove_megathread_categories(self.megathreads_category_tree.selectedIndexes()), type=Qt.QueuedConnection)
+        remove_mega_btn.clicked.connect(
+            lambda: self.remove_megathread_categories(self.megathreads_category_tree.selectedIndexes()))
         mega_category_controls.addWidget(remove_mega_btn)
         mega_categories_layout.addLayout(mega_category_controls)
         mega_categories_layout.addWidget(self.megathreads_category_tree)
@@ -1266,20 +1318,19 @@ class ForumBotGUI(QMainWindow):
         mega_threads_label.setFont(QFont("Arial", 12, QFont.Bold))
         mega_threads_layout.addWidget(mega_threads_label)
 
-
         # Controls Layout for Megathreads (removed tracking inputs)
 
         # Additional Control Buttons for tracking megathreads
         track_layout = QHBoxLayout()
         self.start_megathreads_tracking_button = QPushButton("Start Tracking Megathreads")
-        self.start_megathreads_tracking_button.clicked.connect(self.start_megathreads_tracking, type=Qt.QueuedConnection)
+        self.start_megathreads_tracking_button.clicked.connect(self.start_megathreads_tracking)
         track_layout.addWidget(self.start_megathreads_tracking_button)
 
         self.keep_megathreads_tracking_button = QPushButton("Keep Tracking Megathreads")
-        self.keep_megathreads_tracking_button.clicked.connect(self.keep_tracking_megathreads, type=Qt.QueuedConnection)
+        self.keep_megathreads_tracking_button.clicked.connect(self.keep_tracking_megathreads)
         track_layout.addWidget(self.keep_megathreads_tracking_button)
         self.stop_megathreads_tracking_button = QPushButton("Stop Tracking Megathreads")
-        self.stop_megathreads_tracking_button.clicked.connect(self.stop_megathreads_tracking, type=Qt.QueuedConnection)
+        self.stop_megathreads_tracking_button.clicked.connect(self.stop_megathreads_tracking)
         track_layout.addWidget(self.stop_megathreads_tracking_button)
 
         mega_threads_layout.addLayout(track_layout)
@@ -1288,7 +1339,7 @@ class ForumBotGUI(QMainWindow):
         self.megathreads_tree = QTreeWidget()
         self.megathreads_tree.setColumnCount(1)
         self.megathreads_tree.setHeaderLabels(["Megathread / Versions"])
-        self.megathreads_tree.itemClicked.connect(self.on_megathreads_version_selected, type=Qt.QueuedConnection)
+        self.megathreads_tree.itemClicked.connect(self.on_megathreads_version_selected)
         mega_threads_layout.addWidget(self.megathreads_tree)
 
         upper_splitter.addWidget(mega_threads_widget)
@@ -1362,7 +1413,7 @@ class ForumBotGUI(QMainWindow):
         # Tree on the left
         self.templab_tree = QTreeWidget()
         self.templab_tree.setHeaderHidden(True)
-        self.templab_tree.itemClicked.connect(self.on_templab_tree_item_clicked, type=Qt.QueuedConnection)
+        self.templab_tree.itemClicked.connect(self.on_templab_tree_item_clicked)
         layout.addWidget(self.templab_tree)
 
         # Right side splitter
@@ -1379,7 +1430,7 @@ class ForumBotGUI(QMainWindow):
         tpl_layout.addWidget(self.template_edit)
         tpl_btns = QHBoxLayout()
         self.save_template_btn = QPushButton("Save Template")
-        self.save_template_btn.clicked.connect(self.on_save_template, type=Qt.QueuedConnection)
+        self.save_template_btn.clicked.connect(self.on_save_template)
         tpl_btns.addWidget(self.save_template_btn)
         tpl_layout.addLayout(tpl_btns)
         top_splitter.addWidget(template_widget)
@@ -1394,10 +1445,10 @@ class ForumBotGUI(QMainWindow):
         form.addWidget(self.prompt_edit)
         self.save_prompt_btn = QPushButton("Save Prompt")
         form.addWidget(self.save_prompt_btn)
-        self.save_prompt_btn.clicked.connect(self.on_save_prompt, type=Qt.QueuedConnection)
+        self.save_prompt_btn.clicked.connect(self.on_save_prompt)
         self.test_prompt_btn = QPushButton("Test Prompt")
         form.addWidget(self.test_prompt_btn)
-        self.test_prompt_btn.clicked.connect(self.on_test_prompt, type=Qt.QueuedConnection)
+        self.test_prompt_btn.clicked.connect(self.on_test_prompt)
 
         top_splitter.addWidget(prompt_widget)
 
@@ -1409,6 +1460,7 @@ class ForumBotGUI(QMainWindow):
 
         # Populate tree on startup
         self.reload_templab_tree()
+
     def on_megathreads_version_selected(self, item, column):
         """Handle selection of a version node in the Megathreads tree."""
         version_info = item.data(0, Qt.UserRole)
@@ -1448,12 +1500,12 @@ class ForumBotGUI(QMainWindow):
             return
 
         categories_to_stop = [self.megathreads_category_model.itemFromIndex(index).text() for index in indexes]
-        
+
         for category_name in categories_to_stop:
             worker = self.megathreads_workers.pop(category_name, None)
             if worker:
                 logging.info(f"⛔ Stopping megathreads worker for category '{category_name}'")
-                
+
                 try:
                     # 🔌 DISCONNECT SIGNALS: Prevent signal conflicts after restart
                     try:
@@ -1461,19 +1513,21 @@ class ForumBotGUI(QMainWindow):
                         worker.finished.disconnect()
                         logging.info(f"🔌 Disconnected megathreads signals for worker '{category_name}'")
                     except Exception as disconnect_error:
-                        logging.warning(f"⚠️ Could not disconnect megathreads signals for '{category_name}': {disconnect_error}")
-                    
+                        logging.warning(
+                            f"⚠️ Could not disconnect megathreads signals for '{category_name}': {disconnect_error}")
+
                     # Stop the worker
                     worker.stop()
-                    
+
                     # Wait for worker to stop with increased timeout
                     if not worker.wait(8000):  # Wait max 8 seconds (5+3 from worker timeout)
-                        logging.warning(f"⚠️ Megathreads worker for '{category_name}' didn't stop gracefully, forcing termination")
+                        logging.warning(
+                            f"⚠️ Megathreads worker for '{category_name}' didn't stop gracefully, forcing termination")
                         worker.terminate()
                         worker.wait(2000)  # Wait 2 seconds for termination
-                    
+
                     logging.info(f"✅ Successfully stopped megathreads monitoring for category '{category_name}'")
-                    
+
                 except Exception as e:
                     logging.error(f"❌ Error stopping megathreads worker for '{category_name}': {e}")
                     # Force terminate if there's an error
@@ -1497,7 +1551,7 @@ class ForumBotGUI(QMainWindow):
         # If no thread_id provided, just return without doing anything
         if not thread_id:
             return
-            
+
         if thread_id in self.bot.thread_links:
             thread_info = self.bot.thread_links[thread_id]
 
@@ -1580,7 +1634,7 @@ class ForumBotGUI(QMainWindow):
         self.password_input.setEchoMode(QLineEdit.Password)
         login_group_layout.addWidget(self.password_input)
         self.login_button = QPushButton('Login')
-        self.login_button.clicked.connect(self.handle_login, type=Qt.QueuedConnection)
+        self.login_button.clicked.connect(self.handle_login)
         login_group_layout.addWidget(self.login_button)
         login_layout.addWidget(login_group)
         # Stats widget under login form
@@ -1604,7 +1658,7 @@ class ForumBotGUI(QMainWindow):
             "Settings": 5,
             "STATUS": 6,
         }
-        
+
         if item_text in item_mapping:
             index = item_mapping[item_text]
             self.content_area.setCurrentIndex(index)
@@ -1617,10 +1671,10 @@ class ForumBotGUI(QMainWindow):
         """Initialize the 'Posts' view with modern card-based layout"""
         # Create modern container
         posts_container = ModernContentContainer()
-        
+
         # Create main posts card
         posts_card = ModernSectionCard("Posts Management", "📝")
-        
+
         # Content widget for the card
         content_widget = QWidget()
         content_layout = QVBoxLayout(content_widget)
@@ -1651,10 +1705,12 @@ class ForumBotGUI(QMainWindow):
         remove_category_btn.clicked.connect(lambda: self.remove_categories(self.category_tree.selectedIndexes()))
         category_controls_layout.addWidget(remove_category_btn)
         track_once_btn = QPushButton("Track Once")
-        track_once_btn.clicked.connect(lambda: self.start_monitoring(self.category_tree.selectedIndexes(), mode='Track Once'))
+        track_once_btn.clicked.connect(
+            lambda: self.start_monitoring(self.category_tree.selectedIndexes(), mode='Track Once'))
         category_controls_layout.addWidget(track_once_btn)
         keep_tracking_btn = QPushButton("Keep Tracking")
-        keep_tracking_btn.clicked.connect(lambda: self.start_monitoring(self.category_tree.selectedIndexes(), mode='Keep Tracking'))
+        keep_tracking_btn.clicked.connect(
+            lambda: self.start_monitoring(self.category_tree.selectedIndexes(), mode='Keep Tracking'))
         category_controls_layout.addWidget(keep_tracking_btn)
         stop_tracking_btn = QPushButton("Stop Tracking")
         stop_tracking_btn.clicked.connect(lambda: self.stop_monitoring(self.category_tree.selectedIndexes()))
@@ -1704,7 +1760,6 @@ class ForumBotGUI(QMainWindow):
             self.remove_all_button,
         ])
 
-
         upper_splitter.addWidget(threads_widget)
 
         # Set Stretch Factors for Upper Splitter
@@ -1719,9 +1774,9 @@ class ForumBotGUI(QMainWindow):
         content_layout.addWidget(bbcode_editor_group)
 
         # Add content to card and container
-        posts_card.add_widget(content_widget) 
+        posts_card.add_widget(content_widget)
         posts_container.add_card(posts_card)
-        
+
         # Add container to content_area
         self.content_area.addWidget(posts_container)
         # Apply initial styling to posts buttons
@@ -1930,7 +1985,8 @@ class ForumBotGUI(QMainWindow):
         del self._reupload_state  # cleanup
 
         if not downloaded_files:
-            StatusBarMessageBox.warning(self, "Download Failed", "Failed to download files from Rapidgator backup links.")
+            StatusBarMessageBox.warning(self, "Download Failed",
+                                        "Failed to download files from Rapidgator backup links.")
             return
 
         # For re-upload, pick whichever folder you want—maybe the folder you used above.
@@ -1945,7 +2001,6 @@ class ForumBotGUI(QMainWindow):
             return
 
         thread_id = thread_info.get('thread_id', '')
-
 
         # ***INSTEAD OF USING os.path.dirname(main_file)***
         # we rely on the same folder we used for the MegaDownloadWorker:
@@ -2003,13 +2058,11 @@ class ForumBotGUI(QMainWindow):
         )
         self.register_worker(self.current_upload_worker)
         self.current_upload_worker.upload_complete.connect(
-            lambda r, urls: self.on_reupload_upload_complete(thread_title, thread_info, r, urls),
-            type=Qt.QueuedConnection,
+            lambda r, urls: self.on_reupload_upload_complete(thread_title, thread_info, r, urls)
         )
         self.current_upload_worker.host_progress.connect(
             lambda r, host_idx, prog, status, cur, tot: self.on_reupload_host_progress(r, host_idx, prog, status, cur,
-                                                                                       tot),
-            type=Qt.QueuedConnection,
+                                                                                       tot)
         )
 
         self.current_upload_worker.start()
@@ -2029,11 +2082,11 @@ class ForumBotGUI(QMainWindow):
 
             # Combined new links (excluding Rapidgator backup so it remains private)
             new_links = (
-                rapidgator_links
-                + nitroflare_links
-                + ddownload_links
-                + katfile_links
-                + mega_links
+                    rapidgator_links
+                    + nitroflare_links
+                    + ddownload_links
+                    + katfile_links
+                    + mega_links
             )
 
             # If we already had a Keeplinks link for this thread:
@@ -2144,7 +2197,6 @@ class ForumBotGUI(QMainWindow):
         # Apply custom delegate for per-link coloring
         self.backup_status_delegate = LinkStatusDelegate(self.backup_threads_table)
         self.backup_threads_table.setItemDelegate(self.backup_status_delegate)
-
 
         # ألوان مميّزة للـ selection (تعمل فى Light و Dark)
         self.backup_threads_table.setStyleSheet(
@@ -2425,8 +2477,6 @@ class ForumBotGUI(QMainWindow):
             self.check_timer.start(self.check_interval_minutes * 60 * 1000)  # Convert minutes to milliseconds
             logging.info(f"Automatic Rapidgator link checking set to every {self.check_interval_minutes} minutes.")
 
-
-
     def select_winrar_directory(self):
         directory = QFileDialog.getExistingDirectory(self, "Select WinRAR Directory")
         if directory:
@@ -2672,9 +2722,9 @@ class ForumBotGUI(QMainWindow):
         )
 
         # Connect signals
-        self.login_thread.login_success.connect(self.on_login_success, type=Qt.QueuedConnection)
-        self.login_thread.login_failed.connect(self.on_login_failed, type=Qt.QueuedConnection)
-        self.login_thread.login_status.connect(self.statusBar().showMessage, type=Qt.QueuedConnection)
+        self.login_thread.login_success.connect(self.on_login_success)
+        self.login_thread.login_failed.connect(self.on_login_failed)
+        self.login_thread.login_status.connect(self.statusBar().showMessage)
 
         # Start login process
         self.login_thread.start()
@@ -2692,10 +2742,10 @@ class ForumBotGUI(QMainWindow):
             self.user_manager.set_current_user(username)
             self.user_logged_in.emit(username)
             logging.info(f" User '{username}' logged in successfully")
-            
+
             # Update config with current username for backward compatibility
             self.config['username'] = username
-            
+
             # Migrate legacy data if needed
             self.user_manager.migrate_legacy_data(username)
 
@@ -2726,8 +2776,7 @@ class ForumBotGUI(QMainWindow):
                     self.config['upload_hosts'] = list(self.active_upload_hosts)
             except Exception as e:
                 logging.error(f"Error applying user upload hosts: {e}", exc_info=True)
-                
-        
+
         # Initialize the application with user-specific data
         self.populate_category_tree(load_saved=True)
         self.reload_user_specific_data()
@@ -2748,6 +2797,7 @@ class ForumBotGUI(QMainWindow):
             )
         if hasattr(self, 'stats_widget'):
             self.stats_widget.start_auto_refresh()
+
     def on_login_failed(self, error_msg):
         """Handle failed login"""
         # Re-enable login controls
@@ -2764,16 +2814,16 @@ class ForumBotGUI(QMainWindow):
                 # FIRST: Save all user data BEFORE clearing memory
                 logging.info("💾 Saving user data before logout...")
                 self.save_process_threads_data()  # Save current process threads to user folder
-                self.save_backup_threads_data()   # Save backup threads
-                self.save_replied_thread_ids()    # Save replied thread IDs
+                self.save_backup_threads_data()  # Save backup threads
+                self.save_replied_thread_ids()  # Save replied thread IDs
                 self.save_megathreads_process_threads_data()  # Save megathreads
                 self.megathreads_category_manager.save_categories()  # Save megathreads categories
                 self.bot.save_processed_thread_ids()  # Save processed thread IDs
                 logging.info("✅ User data saved successfully")
-                
+
                 # SECOND: Clear user session and UI
                 self.bot.logout()
-                
+
                 # Clear user manager session
                 if hasattr(self, 'user_manager') and self.user_manager:
                     self.user_manager.clear_session()
@@ -2790,13 +2840,13 @@ class ForumBotGUI(QMainWindow):
                 self.category_model.removeRows(0, self.category_model.rowCount())
                 self.thread_list.clear()
                 self.bbcode_editor.clear()
-                
+
                 # Clear memory data structures (UI only - files are already saved)
                 self.process_threads.clear()
                 self.backup_threads.clear()
                 self.replied_thread_ids.clear()
                 self.process_threads_table.setRowCount(0)
-                
+
                 # THIRD: Reload with empty/global data for next user
                 self.reload_user_specific_data()
 
@@ -2876,9 +2926,10 @@ class ForumBotGUI(QMainWindow):
         current_user = self.user_manager.get_current_user() if self.user_manager else None
         logging.info(f"📁 Category clicked - User: {current_user}, Bot login state: {self.bot.is_logged_in}")
         logging.info(f"📁 CategoryManager file path: {self.category_manager.categories_file}")
-        
+
         if not self.bot.is_logged_in:
-            logging.warning(f"❌ Category access blocked - bot.is_logged_in = {self.bot.is_logged_in}, current_user = {current_user}")
+            logging.warning(
+                f"❌ Category access blocked - bot.is_logged_in = {self.bot.is_logged_in}, current_user = {current_user}")
             QMessageBox.warning(self, "Login Required", "Please log in before accessing categories.")
             return
 
@@ -2979,7 +3030,6 @@ class ForumBotGUI(QMainWindow):
             rg_backup_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             self.backup_threads_table.setItem(row_position, 3, rg_backup_item)
 
-
             # Keeplinks Link
             keeplinks_link = thread_info.get('keeplinks_link', '')
             keeplinks_item = QTableWidgetItem(keeplinks_link)
@@ -3031,6 +3081,7 @@ class ForumBotGUI(QMainWindow):
         # If token was never set, skip
         result = self.bot.check_rapidgator_link_status(url)
         return bool(result and result.get('status') == 'ACCESS')
+
     def init_timers(self):
         """Initialize timers for periodic tasks."""
         self.link_check_timer = QTimer()
@@ -3059,7 +3110,8 @@ class ForumBotGUI(QMainWindow):
             self.check_rapidgator_links(thread_id)
 
         # Optional: Show success message
-        QMessageBox.information(self, "Info", f"Checking Rapidgator links for {len(self.selected_backup_threads)} selected threads...")
+        QMessageBox.information(self, "Info",
+                                f"Checking Rapidgator links for {len(self.selected_backup_threads)} selected threads...")
 
     def on_backup_thread_double_click(self, row, column):
         """Open the thread URL when the thread title is double-clicked."""
@@ -3160,7 +3212,6 @@ class ForumBotGUI(QMainWindow):
             "scroll": 0,
             "selected_ids": [],
         }
-
 
         # --- Action Buttons ---------------------------------------------------
         actions_bar = QWidget()
@@ -3445,6 +3496,7 @@ class ForumBotGUI(QMainWindow):
         self.process_threads_table.verticalScrollBar().setValue(0)
 
         self.filter_process_threads()
+
     def collect_visible_scope_for_selected_threads(self):
         """Collect links from selected threads without host filtering."""
         direct_urls: list[str] = []
@@ -3471,7 +3523,6 @@ class ForumBotGUI(QMainWindow):
             row_urls: list[str] = []
             hosts: set[str] = set()
             urls_to_keep: list[str] = []
-
 
             for m in URL_RE.findall(text):
                 u = m.strip().strip('.,);]')
@@ -3508,6 +3559,7 @@ class ForumBotGUI(QMainWindow):
                 }
 
         return direct_urls, container_urls, visible_scope
+
     def _get_myjd_credentials(self):
         """
         يرجّع (email, password, device_name, app_key) من:
@@ -3550,6 +3602,7 @@ class ForumBotGUI(QMainWindow):
         except Exception:
             pass
         return list(self.config.get("download_hosts_priority", []) or [])
+
     def on_check_links_clicked(self):
         # ما تخلّيش الدالة تشتغل لو فيه وركر شغال
         if getattr(self, "link_check_worker", None) and self.link_check_worker.isRunning():
@@ -3626,11 +3679,9 @@ class ForumBotGUI(QMainWindow):
             len(container_urls),
             chosen_host or "",
         )
-        self.link_check_worker.progress.connect(self._on_link_progress, type=Qt.QueuedConnection)
-        self.link_check_worker.finished.connect(self._on_link_finished, type=Qt.QueuedConnection)
-        self.link_check_worker.error.connect(
-            lambda msg: self.statusBar().showMessage(msg), type=Qt.QueuedConnection
-        )
+        self.link_check_worker.progress.connect(self._on_link_progress)
+        self.link_check_worker.finished.connect(self._on_link_finished)
+        self.link_check_worker.error.connect(lambda msg: self.statusBar().showMessage(msg))
         self.rebuild_row_index()
         total = len(direct_urls) + len(container_urls)
         self.statusBar().showMessage(f"Starting link check for {total} URLs…")
@@ -3745,6 +3796,7 @@ class ForumBotGUI(QMainWindow):
             sample[:3],
         )
         return None
+
     def on_cancel_check_clicked(self):
         if self.link_check_worker and self.link_check_worker.isRunning():
             self.link_check_cancel_event.set()
@@ -3758,6 +3810,7 @@ class ForumBotGUI(QMainWindow):
                     hard_cancel(jd_post, logger=self.log)
             except Exception:
                 pass
+
     def _on_link_progress(self, payload: dict):
         cache = getattr(self, "_link_check_cache", None)
         if cache is None:
@@ -4183,6 +4236,7 @@ class ForumBotGUI(QMainWindow):
                 model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
                 changed.append(c)
         return changed
+
     def find_row_by_url(self, url):
         table = self.process_threads_table
         cols = table.columnCount()
@@ -4192,6 +4246,7 @@ class ForumBotGUI(QMainWindow):
                 if item and url and item.text() == url:
                     return row
         return None
+
     def find_row_by_name_host(self, name, host):
         table = self.process_threads_table
         cols = table.columnCount()
@@ -4214,6 +4269,7 @@ class ForumBotGUI(QMainWindow):
             "UNKNOWN": "Unknown",
         }.get(status, status)
         self.set_row_status(row, display, color, tooltip=tooltip)
+
     def set_row_status(self, row, status, color, tooltip=""):
         item = self.process_threads_table.item(row, self.LINK_STATUS_COL)
         if item is None:
@@ -4230,11 +4286,12 @@ class ForumBotGUI(QMainWindow):
         if size and size > 0:
             from math import log2
             units = ["B", "KB", "MB", "GB", "TB"]
-            i = min(int(log2(size)/10), len(units)-1)
-            human = f"{size/(1024**i):.1f} {units[i]}"
+            i = min(int(log2(size) / 10), len(units) - 1)
+            human = f"{size / (1024 ** i):.1f} {units[i]}"
         else:
             human = "N/A"
         return f"{name}\nHost: {host}\nSize: {human}"
+
     def on_bbcode_content_changed(self, content):
         """Handle BBCode content changes and save to data structure"""
         try:
@@ -4242,25 +4299,25 @@ class ForumBotGUI(QMainWindow):
             selected_rows = list({index.row() for index in self.process_threads_table.selectedIndexes()})
             if not selected_rows:
                 return
-            
+
             row = selected_rows[0]
-            
+
             # Get thread info
             category_item = self.process_threads_table.item(row, 1)
             title_item = self.process_threads_table.item(row, 0)
-            
+
             if not category_item or not title_item:
                 return
-                
+
             category_name = category_item.text()
             thread_title = title_item.text()
-            
+
             # Save BBCode content to data structure
-            if (category_name in self.process_threads and 
-                thread_title in self.process_threads[category_name]):
+            if (category_name in self.process_threads and
+                    thread_title in self.process_threads[category_name]):
                 self.process_threads[category_name][thread_title]['bbcode_content'] = content
                 logging.debug(f"Updated BBCode content for {category_name}/{thread_title}")
-                
+
         except Exception as e:
             logging.error(f"Error saving BBCode content: {e}", exc_info=True)
 
@@ -4270,27 +4327,26 @@ class ForumBotGUI(QMainWindow):
             # Get thread info
             category_item = self.process_threads_table.item(row, 1)
             title_item = self.process_threads_table.item(row, 0)
-            
+
             if not category_item or not title_item:
                 return
-                
+
             category_name = category_item.text()
             thread_title = title_item.text()
-            
+
             # Load BBCode content from data structure
-            if (category_name in self.process_threads and 
-                thread_title in self.process_threads[category_name]):
-                
+            if (category_name in self.process_threads and
+                    thread_title in self.process_threads[category_name]):
                 thread_data = self.process_threads[category_name][thread_title]
                 bbcode_content = thread_data.get('bbcode_content', '')
-                
+
                 # Temporarily disconnect signal to avoid recursive updates
                 self.process_bbcode_editor.content_changed.disconnect()
                 self.process_bbcode_editor.set_text(bbcode_content)
                 self.process_bbcode_editor.content_changed.connect(self.on_bbcode_content_changed)
-                
+
                 logging.debug(f"Loaded BBCode content for {category_name}/{thread_title}")
-                
+
         except Exception as e:
             logging.error(f"Error loading BBCode content: {e}", exc_info=True)
 
@@ -4412,7 +4468,7 @@ class ForumBotGUI(QMainWindow):
                 # Get thread info from table
                 title_item = self.process_threads_table.item(row_index, 0)  # Thread Title column
                 category_item = self.process_threads_table.item(row_index, 1)  # Category column
-                
+
                 if title_item and category_item:
                     thread_title = title_item.text()
                     category_name = category_item.text()
@@ -4433,6 +4489,7 @@ class ForumBotGUI(QMainWindow):
         except Exception as e:
             logging.error(f"Failed to post reply to {thread_url}: {e}", exc_info=True)
             return False
+
     def mark_thread_as_replied(self, row: int):
         """
         Colors the given row green and sets row_status='replied' in self.process_threads.
@@ -4454,61 +4511,92 @@ class ForumBotGUI(QMainWindow):
             self.save_process_threads_data()  # so it persists on disk
 
     def start_download_operation(self, rows: set[int] | None = None):
-        """Start downloads for the given table rows or current selection."""
+        """
+        🔒 Thread-safe download session management
+        Start the download process on the specified rows (or current selection)
+        with progress tracking independent of UI filtering.
+
+        Args:
+            rows: Optional set of row indices to operate on.  If None,
+                falls back to the current selection from the
+                ``process_threads_table``.
+        """
+        # Prevent concurrent download sessions
         if getattr(self, "_download_in_progress", False):
             ui_notifier.warn(
                 "Download In Progress",
-                "⚠️ Another download is already running!\n\nPlease wait or cancel it first.",
+                "⚠️ Another download is already running!\n\nPlease wait for the current download to complete or cancel it first.",
             )
             return
 
+        # Acquire download lock
         self._download_in_progress = True
-        selected_rows = (
-            set(rows)
-            if rows is not None
-            else {idx.row() for idx in self.process_threads_table.selectedIndexes()}
-        )
-        if not selected_rows:
-            self.statusBar().showMessage("Please select at least one thread to download")
+        try:
+            # Determine which rows to download
+            if rows is None:
+                selected_rows = set(index.row() for index in self.process_threads_table.selectedIndexes())
+            else:
+                selected_rows = set(rows)
+            if not selected_rows:
+                self.statusBar().showMessage("Please select at least one thread to download")
+                self._download_in_progress = False
+                return
+
+            # Track selected threads for status update after completion
+            self._current_download_threads = []
+            for row in selected_rows:
+                try:
+                    title_item = self.process_threads_table.item(row, 0)
+                    category_item = self.process_threads_table.item(row, 1)
+                    if title_item and category_item:
+                        thread_title = title_item.text()
+                        category_name = category_item.text()
+                        self._current_download_threads.append((category_name, thread_title))
+                        logging.info(f"📝 Tracking download for: {category_name}/{thread_title}")
+                except Exception as e:
+                    logging.warning(f"Could not track thread for row {row}: {e}")
+            logging.info(f"📋 Tracking {len(self._current_download_threads)} threads for download completion")
+
+            # Clean up any existing download worker
+            if getattr(self, 'download_worker', None):
+                try:
+                    self.download_worker.cancel_downloads()
+                    QApplication.processEvents()
+                    self.download_worker.deleteLater()
+                    self.download_worker = None
+                except Exception as e:
+                    logging.warning(f"⚠️ Error cleaning up existing download worker: {e}")
+
+            # Create a new download worker
+            self.status_widget.cancel_event.clear()
+            self.download_worker = DownloadWorker(
+                bot=self.bot,
+                file_processor=self.file_processor,
+                selected_rows=selected_rows,
+                gui=self,
+                cancel_event=self.status_widget.cancel_event,
+            )
+            self.register_worker(self.download_worker)
+
+            # Connect status and completion signals to handlers on the GUI thread
+            self.download_worker.status_update.connect(self.update_download_status, Qt.QueuedConnection)
+            self.download_worker.operation_complete.connect(self.on_download_complete, Qt.QueuedConnection)
+            self.download_worker.file_progress.connect(self.on_file_progress_update, Qt.QueuedConnection)
+            self.download_worker.download_success.connect(self.on_download_row_success, Qt.QueuedConnection)
+            self.download_worker.download_error.connect(self.on_download_row_error, Qt.QueuedConnection)
+
+            # Start the worker
+            self.download_worker.start()
+            self.statusBar().showMessage("Starting downloads...")
+
+        except Exception as e:
+            logging.error(f"⚠️ Critical error in download setup: {e}")
+            ui_notifier.error(
+                "Download Setup Error",
+                f"Failed to start download operation:\n{str(e)}",
+            )
+            # Release lock on critical error
             self._download_in_progress = False
-            return
-
-        if getattr(self, "download_worker", None):
-            try:
-                self.download_worker.cancel_downloads()
-                QApplication.processEvents()
-                self.download_worker.deleteLater()
-            except Exception:
-                pass
-            self.download_worker = None
-
-        self.status_widget.cancel_event.clear()
-        self.download_worker = DownloadWorker(
-            bot=self.bot,
-            file_processor=self.file_processor,
-            selected_rows=selected_rows,
-            gui=self,
-            cancel_event=self.status_widget.cancel_event,
-        )
-        self.register_worker(self.download_worker)
-
-        self.download_worker.status_update.connect(
-            self.update_download_status, type=Qt.QueuedConnection
-        )
-        self.download_worker.operation_complete.connect(
-            self.on_download_complete, type=Qt.QueuedConnection
-        )
-        self.download_worker.file_progress.connect(
-            self.on_file_progress_update, type=Qt.QueuedConnection
-        )
-        self.download_worker.download_success.connect(
-            self.on_download_row_success, type=Qt.QueuedConnection
-        )
-        self.download_worker.download_error.connect(
-            self.on_download_row_error, type=Qt.QueuedConnection
-        )
-        self.download_worker.start()
-        self.statusBar().showMessage("Starting downloads.")
 
     def pause_downloads(self):
         if self.download_worker:
@@ -4549,7 +4637,7 @@ class ForumBotGUI(QMainWindow):
 
         if success:
             ui_notifier.info("Download Complete", message)
-            
+
             # 🎯 Update thread status for completed downloads
             if hasattr(self, '_current_download_threads') and self._current_download_threads:
                 for category_name, thread_title in self._current_download_threads:
@@ -4567,7 +4655,7 @@ class ForumBotGUI(QMainWindow):
         if self.download_worker:
             self.download_worker.deleteLater()
             self.download_worker = None
-            
+
         # 🔓 Release download lock when operation complete
         if hasattr(self, '_download_in_progress'):
             self._download_in_progress = False
@@ -4660,7 +4748,7 @@ class ForumBotGUI(QMainWindow):
             ui_notifier.error("Upload Failed", message)
             logging.error(message)
 
-# ... (rest of the code remains the same)
+    # ... (rest of the code remains the same)
     def build_links_block(self, category_name: str, thread_title: str) -> str:
         """
         Build a BBCode block containing:
@@ -4804,30 +4892,59 @@ class ForumBotGUI(QMainWindow):
             self.thread_links = {}
 
     def upload_selected_process_threads(self, rows: set[int] | None = None):
-        """Start uploads for the given rows or current selection."""
-        try:
-            if rows is None:
-                selected_rows = sorted({i.row() for i in self.process_threads_table.selectedIndexes()})
-            else:
-                selected_rows = sorted(rows)
+        """Start uploads for the specified rows (or current selection) with pause/resume/cancel control.
 
-            if not selected_rows:
-                ui_notifier.warn("تحذير", "يرجى اختيار موضوع واحد على الأقل للرفع.")
-                return
+        Args:
+            rows: Optional set of row indices to upload.  If None,
+                uses the currently selected rows from the
+                ``process_threads_table``.
+        """
+        try:
+            # Determine which rows to upload
+            if rows is None:
+                selected_items = self.process_threads_table.selectedItems()
+                if not selected_items:
+                    ui_notifier.warn("تحذير", "يرجى اختيار موضوع واحد على الأقل للرفع.")
+                    return
+                selected_rows = sorted(set(item.row() for item in selected_items))
+            else:
+                selected_rows = sorted(set(rows))
             self.pending_uploads = len(selected_rows)
-            if not hasattr(self, "upload_workers"):
+
+            # Initialise upload_workers dict if needed
+            if not hasattr(self, 'upload_workers'):
                 self.upload_workers = {}
 
-            self.process_upload_button.setEnabled(False)
-
             for row in selected_rows:
+                # Read thread info
                 title_item = self.process_threads_table.item(row, 0)
                 category_item = self.process_threads_table.item(row, 1)
-                tid_item = self.process_threads_table.item(row, 2)
-                thread_title = title_item.text() if title_item else ""
-                category_name = category_item.text() if category_item else ""
-                thread_id = tid_item.text() if tid_item else ""
+                thread_id_item = self.process_threads_table.item(row, 2)
+                if not (title_item and category_item and thread_id_item):
+                    continue
+                thread_title = title_item.text()
+                category_name = category_item.text()
+                thread_id = thread_id_item.text()
                 thread_dir = self.get_sanitized_path(category_name, thread_id)
+
+                # Verify folder exists
+                if not os.path.isdir(thread_dir):
+                    ui_notifier.warn("خطأ", f"لم يتم العثور على مجلد للموضوع '{thread_title}'.")
+                    continue
+
+                # Verify there are files inside
+                files_in_dir = [f for f in os.listdir(thread_dir) if os.path.isfile(os.path.join(thread_dir, f))]
+                if not files_in_dir:
+                    ui_notifier.warn(
+                        "خطأ",
+                        f"لا توجد ملفات في المجلد للموضوع '{thread_title}'.",
+                    )
+                    continue
+
+                # Disable upload button to prevent concurrent runs
+                self.process_upload_button.setEnabled(False)
+
+                # Create UploadWorker
                 upload_worker = UploadWorker(
                     self.bot,
                     row,
@@ -4837,14 +4954,32 @@ class ForumBotGUI(QMainWindow):
                 )
                 self.upload_workers[row] = upload_worker
                 self.register_worker(upload_worker)
-                upload_worker.upload_complete.connect(self.handle_upload_complete, type=Qt.QueuedConnection)
-                upload_worker.upload_complete.connect(lambda *_: self._on_upload_worker_complete(), type=Qt.QueuedConnection)
-                upload_worker.upload_success.connect(self.on_upload_row_success, type=Qt.QueuedConnection)
-                upload_worker.upload_error.connect(self.on_upload_row_error, type=Qt.QueuedConnection)
-                upload_worker.finished.connect(
-                    lambda *_: self.process_upload_button.setEnabled(True), type=Qt.QueuedConnection
-                )
 
+                meta = {
+                    "row": row,
+                    "folder": thread_dir,
+                    "thread_id": thread_id,
+                    "hosts": self.active_upload_hosts,
+                    "section": upload_worker.section,
+                    "keeplinks_url": upload_worker.keeplinks_url,
+                    "upload_results": upload_worker.upload_results,
+                    "keeplinks_sent": upload_worker.keeplinks_sent,
+                }
+                for f in getattr(upload_worker, "files", []):
+                    key = (upload_worker.section, f.name, OpType.UPLOAD.name)
+                    self.status_widget.update_upload_meta(key, meta)
+
+                # Connect signals to GUI handlers on main thread
+                upload_worker.upload_complete.connect(self.handle_upload_complete, Qt.QueuedConnection)
+                upload_worker.upload_complete.connect(lambda *_: self._on_upload_worker_complete(), Qt.QueuedConnection)
+                upload_worker.upload_success.connect(self.on_upload_row_success, Qt.QueuedConnection)
+                upload_worker.upload_error.connect(self.on_upload_row_error, Qt.QueuedConnection)
+                upload_worker.finished.connect(lambda *_: self.process_upload_button.setEnabled(True),
+                                               Qt.QueuedConnection)
+                upload_worker.upload_complete.connect(lambda *_: self.process_upload_button.setEnabled(True),
+                                                      Qt.QueuedConnection)
+
+                # Start upload
                 upload_worker.start()
 
         except Exception as e:
@@ -4933,7 +5068,6 @@ class ForumBotGUI(QMainWindow):
                 self.process_threads_table.item(row, 4).setText("\n".join(backup_rg_urls))
                 self.process_threads_table.item(row, 5).setText(new_keeplinks)
 
-
                 # 7) Persist changes
                 self.save_process_threads_data()
 
@@ -5017,12 +5151,11 @@ class ForumBotGUI(QMainWindow):
         for worker in self._upload_workers_for_keys(keys):
             try:
                 QMetaObject.invokeMethod(
-                    worker, "pause_uploads"
+                    worker, "pause_uploads", Qt.QueuedConnection
                 )
             except Exception:
                 pass
         self.status_widget._schedule_status_save()
-
 
     def _on_upload_resume(self, keys):
         logging.info(f"Resume requested for {keys}")
@@ -5030,18 +5163,19 @@ class ForumBotGUI(QMainWindow):
         for worker in self._upload_workers_for_keys(keys):
             try:
                 QMetaObject.invokeMethod(
-                    worker, "resume_uploads"
+                    worker, "resume_uploads", Qt.QueuedConnection
                 )
             except Exception:
                 pass
         self.status_widget._schedule_status_save()
+
     def _on_upload_cancel(self, keys):
         logging.info(f"Cancel requested for {keys}")
         self.statusBar().showMessage("Cancel requested", 3000)
         for worker in self._upload_workers_for_keys(keys):
             try:
                 QMetaObject.invokeMethod(
-                    worker, "cancel_uploads"
+                    worker, "cancel_uploads", Qt.QueuedConnection
                 )
             except Exception:
                 pass
@@ -5087,6 +5221,7 @@ class ForumBotGUI(QMainWindow):
             if link:
                 QDesktopServices.openUrl(QUrl(link))
         self.status_widget._schedule_status_save()
+
     def _on_copy_jd_link(self, keys):
         logging.info(f"Copy JD link for {keys}")
         self.statusBar().showMessage("JD link copied", 3000)
@@ -5095,191 +5230,148 @@ class ForumBotGUI(QMainWindow):
         if links:
             QGuiApplication.clipboard().setText("\n".join(links))
         self.status_widget._schedule_status_save()
+
     def apply_auto_process_result(self, job):
         """Apply links from Auto‑Process job back to process_threads data."""
         try:
             category_name = job.category
             thread_title = job.title
             thread_id = job.thread_id
-            urls_dict = job.uploaded_links or {}
-            urls_dict["keeplinks"] = job.keeplinks_url
+            urls_dict = job.uploaded_links
+            urls_dict['keeplinks'] = job.keeplinks_url
 
-            if (
-                category_name in self.process_threads
-                and thread_title in self.process_threads[category_name]
-            ):
+            if category_name in self.process_threads and thread_title in self.process_threads[category_name]:
                 thread_info = self.process_threads[category_name][thread_title]
 
-                rapidgator_links = (
-                    urls_dict.get("rapidgator", {}).get("urls", []) or []
-                )
-                backup_rg_urls = (
-                    urls_dict.get("rapidgator_backup", {}).get("urls", []) or []
-                )
-                nitroflare_links = (
-                    urls_dict.get("nitroflare", {}).get("urls", []) or []
-                )
-                ddownload_links = (
-                    urls_dict.get("ddownload", {}).get("urls", []) or []
-                )
-                katfile_links = (
-                    urls_dict.get("katfile", {}).get("urls", []) or []
-                )
-                new_keeplinks = urls_dict.get("keeplinks", "")
+                rapidgator_links = urls_dict.get('rapidgator', {}).get('urls', [])
+                backup_rg_urls = urls_dict.get('rapidgator_backup', {}).get('urls', [])
+                nitroflare_links = urls_dict.get('nitroflare', {}).get('urls', [])
+                ddownload_links = urls_dict.get('ddownload', {}).get('urls', [])
+                katfile_links = urls_dict.get('katfile', {}).get('urls', [])
+                katfile_links = urls_dict.get('katfile', [])
+                new_keeplinks = urls_dict.get('keeplinks', '')
 
                 merged_links = {
-                    "rapidgator.net": {
-                        "urls": rapidgator_links,
-                        "is_backup": False,
-                    },
-                    "nitroflare.com": {
-                        "urls": nitroflare_links,
-                        "is_backup": False,
-                    },
-                    "ddownload.com": {
-                        "urls": ddownload_links,
-                        "is_backup": False,
-                    },
-                    "katfile.com": {
-                        "urls": katfile_links,
-                        "is_backup": False,
-                    },
-                    "rapidgator_backup": {
-                        "urls": backup_rg_urls,
-                        "is_backup": True,
-                    },
-                    "keeplinks": new_keeplinks,
+                    'rapidgator.net': {'urls': rapidgator_links, 'is_backup': False},
+                    'nitroflare.com': {'urls': nitroflare_links, 'is_backup': False},
+                    'ddownload.com': {'urls': ddownload_links, 'is_backup': False},
+                    'katfile.com': {'urls': katfile_links, 'is_backup': False},
+                    'rapidgator_backup': {'urls': backup_rg_urls, 'is_backup': True},
+                    'keeplinks': new_keeplinks,
                 }
-
-                thread_info["links"] = merged_links
-                versions_list = thread_info.setdefault("versions", [])
+                thread_info['links'] = merged_links
+                versions_list = thread_info.setdefault('versions', [])
                 if versions_list:
-                    versions_list[-1]["links"] = merged_links
-                    versions_list[-1]["upload_status"] = True
+                    versions_list[-1]['links'] = merged_links
                 else:
-                    versions_list.append(
-                        {
-                            "links": merged_links,
-                            "thread_id": thread_id,
-                            "bbcode_content": thread_info.get("bbcode_content", ""),
-                            "thread_url": thread_info.get("thread_url", ""),
-                            "upload_status": True,
-                        }
-                    )
-                thread_info["upload_status"] = True
+                    versions_list.append({
+                        'links': merged_links,
+                        'thread_id': thread_id,
+                        'bbcode_content': thread_info.get('bbcode_content', ''),
+                        'thread_url': thread_info.get('thread_url', ''),
+                    })
+                thread_info['upload_status'] = True
+                versions_list[-1]['upload_status'] = True
 
-                row_index = -1
+                # find row index
+                row_index = None
                 for row in range(self.process_threads_table.rowCount()):
-                    item = self.process_threads_table.item(row, 2)
-                    if item and item.text() == thread_id:
+                    if self.process_threads_table.item(row, 2).text() == thread_id:
                         row_index = row
                         break
-                if row_index >= 0:
+                if row_index is not None:
                     display_links = rapidgator_links or katfile_links
-                    display_item = self.process_threads_table.item(row_index, 3)
-                    backup_item = self.process_threads_table.item(row_index, 4)
-                    keeplinks_item = self.process_threads_table.item(row_index, 5)
-                    if display_item:
-                        display_item.setText("\n".join(display_links))
-                    if backup_item:
-                        backup_item.setText("\n".join(backup_rg_urls))
-                    if keeplinks_item:
-                        keeplinks_item.setText(new_keeplinks)
+                    self.process_threads_table.item(row_index, 3).setText("\n".join(display_links))
+                    self.process_threads_table.item(row_index, 4).setText("\n".join(backup_rg_urls))
+                    self.process_threads_table.item(row_index, 5).setText(new_keeplinks)
 
                 self.save_process_threads_data()
                 if backup_rg_urls:
                     backup_info = self.backup_threads.get(thread_title, {})
-                    backup_info["thread_id"] = thread_id
-                    backup_info["rapidgator_links"] = rapidgator_links
-                    backup_info["rapidgator_backup_links"] = backup_rg_urls
-                    backup_info["keeplinks_link"] = new_keeplinks
-                    backup_info["katfile_links"] = katfile_links
+                    backup_info['thread_id'] = thread_id
+                    backup_info['rapidgator_links'] = rapidgator_links
+                    backup_info['rapidgator_backup_links'] = backup_rg_urls
+                    backup_info['keeplinks_link'] = new_keeplinks
+                    backup_info['katfile_links'] = katfile_links
                     self.backup_threads[thread_title] = backup_info
                     self.save_backup_threads_data()
                     self.populate_backup_threads_table()
                 self.mark_upload_complete(category_name, thread_title)
         except Exception as e:
-            logging.error(
-                "apply_auto_process_result failed: %s", e, exc_info=True
-            )
+            logging.error("apply_auto_process_result failed: %s", e, exc_info=True)
 
-    def _collect_selected_snapshots(self):
-        """Collect immutable snapshots for the currently selected rows."""
-        view = self.process_threads_table
-        rows = sorted({i.row() for i in view.selectedIndexes()})
-        snapshots = []
-        for row in rows:
-            title = view.item(row, 0).text()
-            category = view.item(row, 1).text()
-            tid = view.item(row, 2).text()
-            url = view.item(row, 0).data(Qt.UserRole + 2) or ""
-            workdir = self.get_sanitized_path(category, tid)
-            snapshots.append(
-                SelectedRowSnapshot(
-                    thread_id=tid,
-                    title=title,
-                    url=url,
-                    category=category,
-                    working_dir=workdir,
-                )
-            )
-        return snapshots
     def start_auto_process_selected(self):
-        """Start Auto-Process pipeline for currently selected threads."""
-        snaps = self._collect_selected_snapshots()
-        if not snaps:
+        """Start Auto‑Process pipeline for selected threads."""
+        selected_rows = sorted(
+            set(index.row() for index in self.process_threads_table.selectedIndexes())
+        )
+        if not selected_rows:
             ui_notifier.warn("Warning", "Please select at least one thread.")
             return
 
-        jd = JDClient(*self._get_myjd_credentials())
-        pool = QThreadPool.globalInstance()
-
-        for s in snaps:
+        for row in selected_rows:
+            title = self.process_threads_table.item(row, 0).text()
+            category = self.process_threads_table.item(row, 1).text()
+            thread_id = self.process_threads_table.item(row, 2).text()
+            url = self.process_threads_table.item(row, 0).data(Qt.UserRole + 2)
+            job_id = f"{thread_id}-{int(time.time())}"
             job = AutoProcessJob(
-                job_id=f"{s.thread_id}-{int(time.time())}",
-                thread_id=s.thread_id,
-                title=s.title,
-                url=s.url,
-                category=s.category,
-                download_folder=s.working_dir,
+                job_id=job_id,
+                thread_id=thread_id,
+                category=category,
+                title=title,
+                url=url,
             )
             self.job_manager.add_job(job)
 
-            w = AutoProcessWorker(job, s, jd)
-            w.signals.progress_update.connect(
-                self.status_widget.on_progress_update, type=Qt.QueuedConnection
+            def download_cb(job=job):
+                job.step = "download"
+                if not self.bot.auto_process_job(job):
+                    return False
+                job.step = "modify"
+                return self.bot.auto_process_job(job)
+
+            def process_cb():
+                return True
+
+            def upload_cb(job=job):
+                job.step = "upload"
+                if not self.bot.auto_process_job(job):
+                    return False
+                job.step = "keeplinks"
+                return self.bot.auto_process_job(job)
+
+            def template_cb(job=job):
+                job.step = "template"
+                ok = self.bot.auto_process_job(job)
+                if ok:
+                    try:
+                        self.apply_auto_process_result(job)
+                    except Exception:
+                        pass
+                return ok
+
+            work_dir = self.get_sanitized_path(category, thread_id)
+            for op in (OpType.DOWNLOAD, OpType.UPLOAD, OpType.POST):
+                self.orch.progress_update.emit(
+                    OperationStatus(
+                        section=category,
+                        item=title,
+                        op_type=op,
+                        stage=OpStage.QUEUED,
+                    )
+                )
+            self.orch.enqueue(
+                topic_id=thread_id,
+                section=category,
+                item=title,
+                download_cb=download_cb,
+                process_cb=process_cb,
+                upload_cb=upload_cb,
+                template_cb=template_cb,
+                working_dir=work_dir,
             )
-            w.signals.result_ready.connect(
-                self.on_auto_process_result, type=Qt.QueuedConnection
-            )
 
-            w.signals.error.connect(
-                self.on_auto_process_error, type=Qt.QueuedConnection
-            )
-
-            w.signals.finished.connect(
-                self.on_auto_process_finished, type=Qt.QueuedConnection
-            )
-            pool.start(w)
-
-    def on_auto_process_result(self, job_id: str, payload: dict) -> None:
-        job = self.job_manager.jobs.get(job_id)
-        if not job:
-            return
-        job.uploaded_links = payload.get("uploaded_links", {})
-        job.keeplinks_url = payload.get("keeplinks_url", "")
-        job.step = "done"
-        job.status = "posted"
-        self.job_manager.update_job(job)
-
-    def on_auto_process_error(self, job_id: str, msg: str) -> None:
-        job = self.job_manager.jobs.get(job_id)
-        if job:
-            job.status = "error"
-            self.job_manager.update_job(job)
-
-    def on_auto_process_finished(self, job_id: str) -> None:
-        pass
     def start_auto_process(self, thread_ids):
         """Public API to start Auto‑Process by thread ids."""
         rows = []
@@ -5292,30 +5384,36 @@ class ForumBotGUI(QMainWindow):
             self.process_threads_table.selectRow(r)
         self.start_auto_process_selected()
 
-    def _row_for_thread_id(self, tid: str) -> int:
-        """Return the table row for the given thread id or -1 if not found."""
-        for r in range(self.process_threads_table.rowCount()):
-            it = self.process_threads_table.item(r, 2)
-            if it and it.text() == str(tid):
-                return r
-        return -1
     def start_auto_process_manual(self):
-        """Run auto process using the same logic as manual buttons."""
-        selected_rows = sorted(
-            set(index.row() for index in self.process_threads_table.selectedIndexes())
-        )
+        """Run auto process using the same logic as manual buttons.
+
+        This implementation queues thread IDs instead of row indices so
+        that filtering or sorting the Process Threads table does not
+        interrupt the sequence.  It enables auto-retry for uploads and
+        sets up a temporary UI sink for status messages.
+        """
+        selected_rows = sorted(set(index.row() for index in self.process_threads_table.selectedIndexes()))
         if not selected_rows:
             ui_notifier.warn("Warning", "Please select at least one thread.")
             return
+        # Build a queue of thread IDs rather than row indices
         self._auto_process_queue_ids = []
-        for row in selected_rows:
-            item = self.process_threads_table.item(row, 2)
-            if item:
-                self._auto_process_queue_ids.append(item.text())
-        # enable automatic retry for uploads while this queue is processed
+        for r in selected_rows:
+            try:
+                tid_item = self.process_threads_table.item(r, 2)
+                if tid_item and tid_item.text():
+                    self._auto_process_queue_ids.append(tid_item.text())
+            except Exception:
+                pass
+        if not self._auto_process_queue_ids:
+            ui_notifier.warn("Warning", "No valid threads found.")
+            return
+
+        # Enable automatic retry mode while the queue is processed
         self.auto_retry_mode = True
         if hasattr(self, "cancel_auto_button"):
             self.cancel_auto_button.setEnabled(True)
+
         def _sink(level, title, text):
             self.statusBar().showMessage(f"[{level}] {title}: {text}")
 
@@ -5326,93 +5424,202 @@ class ForumBotGUI(QMainWindow):
         finally:
             ui_notifier.set_sink(None)
 
+    def _row_for_thread_id(self, thread_id: str) -> int:
+        """Locate the current row for a given thread ID regardless of filtering or sorting.
+
+        Args:
+            thread_id: The thread identifier to look up.
+
+        Returns:
+            The row index if found, otherwise -1.
+        """
+        tbl = self.process_threads_table
+        for r in range(tbl.rowCount()):
+            it = tbl.item(r, 2)
+            if it and it.text() == str(thread_id):
+                return r
+        return -1
+
     def _process_next_auto_thread(self):
-        if not getattr(self, "_auto_process_queue_ids", []):
+        """Process the next thread in the auto-process queue.
+
+        Uses a queue of thread IDs rather than row indices.  If the
+        corresponding row cannot be found (e.g. filtered or removed),
+        it is skipped.  Downloads are started for the row, and a
+        callback is attached to handle completion.
+        """
+        q = getattr(self, "_auto_process_queue_ids", [])
+        if not q:
             ui_notifier.info("Auto Process", "All threads processed.")
             # disable auto retry when processing queue is empty
             self.auto_retry_mode = False
             if hasattr(self, "cancel_auto_button"):
                 self.cancel_auto_button.setEnabled(False)
             return
-        tid = self._auto_process_queue_ids[0]
-        row = self._row_for_thread_id(tid)
+        # Peek at the next thread ID
+        thread_id = q[0]
+        row = self._row_for_thread_id(thread_id)
         if row < 0:
+            # Missing or filtered out: skip this ID
             self._auto_process_queue_ids.pop(0)
             QTimer.singleShot(100, self._process_next_auto_thread)
             return
-        self.start_download_operation(rows={row})
-        if hasattr(self, "download_worker") and self.download_worker:
+        # Start download for this row without relying on current selection
+        try:
+            self.start_download_operation(rows={row})
+        except TypeError:
+            # Fallback for legacy signature; select row first
+            self.process_threads_table.clearSelection()
+            self.process_threads_table.selectRow(row)
+            self.start_download_operation()
+        # Attach completion callback
+        if getattr(self, "download_worker", None):
+            try:
+                self.download_worker.operation_complete.disconnect()
+            except Exception:
+                pass
             self.download_worker.operation_complete.connect(
                 lambda success, msg, r=row: self._auto_after_download(success, msg, r),
-                type=Qt.QueuedConnection,
+                Qt.QueuedConnection,
             )
 
     def _auto_after_download(self, success, message, row):
+        """Handle the completion of a download step in the auto-process sequence.
+
+        Args:
+            success: Whether the download was successful.
+            message: The message from the download worker (ignored here).
+            row: The row index of the thread that just completed download.
+        """
+        # Disconnect previous completion signal to avoid multiple triggers
         try:
-            self.download_worker.operation_complete.disconnect()
+            if getattr(self, "download_worker", None):
+                self.download_worker.operation_complete.disconnect()
         except Exception:
             pass
+        # If download failed, remove the current thread ID from the queue and proceed
         if not success:
-            if self._auto_process_queue_ids:
-                self._auto_process_queue_ids.pop(0)
+            if getattr(self, "_auto_process_queue_ids", None):
+                try:
+                    self._auto_process_queue_ids.pop(0)
+                except Exception:
+                    pass
             QTimer.singleShot(100, self._process_next_auto_thread)
             return
+        # Start upload for the same row without relying on current selection
         try:
             self.upload_selected_process_threads(rows={row})
         except TypeError:
+            # Fallback: select and call existing signature
+            self.process_threads_table.clearSelection()
             self.process_threads_table.selectRow(row)
             self.upload_selected_process_threads()
-        worker = self.upload_workers.get(row)
+        worker = getattr(self, "upload_workers", {}).get(row)
         if worker:
-            worker.upload_complete.connect(
-                lambda *_: self._auto_after_upload(row),
-                type=Qt.QueuedConnection,
-            )
+            try:
+                worker.upload_complete.disconnect()
+            except Exception:
+                pass
+            worker.upload_complete.connect(lambda *_: self._auto_after_upload(row), Qt.QueuedConnection)
         else:
-            if self._auto_process_queue_ids:
-                self._auto_process_queue_ids.pop(0)
+            if getattr(self, "_auto_process_queue_ids", None):
+                try:
+                    self._auto_process_queue_ids.pop(0)
+                except Exception:
+                    pass
             QTimer.singleShot(100, self._process_next_auto_thread)
 
     def _auto_after_upload(self, row):
-        worker = self.upload_workers.get(row)
+        """Handle completion of an upload step in the auto-process sequence.
+
+        Args:
+            row: The row index of the thread that just completed upload.
+        """
+        worker = getattr(self, "upload_workers", {}).get(row)
+        # If auto-retry is enabled and there are failed hosts, wait for retry cycles
         if (
-            getattr(self, "auto_retry_mode", False)
-            and worker
-            and any(v.get("status") == "failed" for v in worker.upload_results.values())
+                getattr(self, "auto_retry_mode", False)
+                and worker
+                and any(res.get("status") == "failed" for res in worker.upload_results.values())
         ):
             return
+        # Disconnect to avoid duplicate callbacks
         if worker:
-            worker.upload_complete.disconnect()
-        tid_item = self.process_threads_table.item(row, 2)
-        r = (
-            row
-            if row < self.process_threads_table.rowCount()
-            else self._row_for_thread_id(tid_item.text() if tid_item else "")
-        )
-        if r >= 0:
-            self.process_threads_table.clearSelection()
-            self.process_threads_table.selectRow(r)
+            try:
+                worker.upload_complete.disconnect()
+            except Exception:
+                pass
+        # Proceed to template generation; select the row if needed for UI
+        try:
+            # Try to re-select the row in case the table has been filtered or sorted
+            tid_item = self.process_threads_table.item(row, 2)
+            tid = tid_item.text() if tid_item else None
+            if tid:
+                r_now = self._row_for_thread_id(tid)
+                if r_now >= 0:
+                    self.process_threads_table.clearSelection()
+                    self.process_threads_table.selectRow(r_now)
+        except Exception:
+            pass
         self.on_proceed_template_clicked()
-        if self._auto_process_queue_ids:
-            self._auto_process_queue_ids.pop(0)
+        # Remove the processed thread ID from the queue and schedule next
+        if getattr(self, "_auto_process_queue_ids", None):
+            try:
+                self._auto_process_queue_ids.pop(0)
+            except Exception:
+                pass
         QTimer.singleShot(100, self._process_next_auto_thread)
 
     def cancel_auto_process(self):
-        self._auto_process_queue_ids = []
-        self.auto_retry_mode = False
-        if self.download_worker:
-            self.download_worker.cancel_downloads()
-        for w in getattr(self, "upload_workers", {}).values():
-            w.cancel_uploads()
-        self.statusBar().showMessage("Auto process cancelled.")
+        """Cancel the Auto‑Process queue and stop active workers."""
         try:
-            jd_post = getattr(getattr(self, "download_worker", None), "_jd_post", None)
-        except Exception:
-            jd_post = None
-        if jd_post:
-            hard_cancel(jd_post, logger=logging)
-        if hasattr(self, "cancel_auto_button"):
-            self.cancel_auto_button.setEnabled(False)
+            """
+            Reset the auto‑process queue and stop all running workers.
+            Use the new `_auto_process_queue_ids` if present; fall back to
+            older `_auto_process_queue` for backward compatibility.  This
+            ensures that filtering or sorting the Process Threads table
+            does not prevent cancellation from clearing the right queue.
+            """
+            # Clear the queue of thread IDs (preferred attribute)
+            if hasattr(self, "_auto_process_queue_ids"):
+                self._auto_process_queue_ids = []
+            # Also clear legacy queue if it exists
+            if hasattr(self, "_auto_process_queue"):
+                self._auto_process_queue = []
+
+            # Disable auto retry mode
+            self.auto_retry_mode = False
+
+            # Cancel the active download worker, if any
+            try:
+                if getattr(self, "download_worker", None):
+                    self.download_worker.cancel_downloads()
+            except Exception:
+                pass
+
+            # Cancel all active upload workers
+            try:
+                for worker in getattr(self, "upload_workers", {}).values():
+                    worker.cancel_uploads()
+            except Exception:
+                pass
+
+            # Inform the user
+            self.statusBar().showMessage("Auto process cancelled.")
+
+            # Perform a hard cancel on JD if possible
+            try:
+                jd_post = getattr(getattr(self, "download_worker", None), "_jd_post", None)
+                if jd_post:
+                    hard_cancel(jd_post, logger=logging)
+            except Exception:
+                pass
+
+        finally:
+            # Always disable the cancel button, if present
+            if hasattr(self, "cancel_auto_button"):
+                self.cancel_auto_button.setEnabled(False)
+
     def setup_upload_progress_bars(self, row):
         """Set up progress bars for each host with proper organization."""
         try:
@@ -5998,14 +6205,16 @@ class ForumBotGUI(QMainWindow):
         """Update thread data and UI immediately after upload completion."""
         try:
 
-
             # Update process_threads data
             if category_name in self.process_threads:
                 thread_data = self.process_threads[category_name][thread_title]
                 thread_data['links'] = {
-                    'rapidgator.net': {'urls': [url for url in uploaded_urls if 'rapidgator.net' in url], 'is_backup': False},
-                    'nitroflare.com': {'urls': [url for url in uploaded_urls if 'nitroflare.com' in url], 'is_backup': False},
-                    'ddownload.com': {'urls': [url for url in uploaded_urls if 'ddownload.com' in url], 'is_backup': False},
+                    'rapidgator.net': {'urls': [url for url in uploaded_urls if 'rapidgator.net' in url],
+                                       'is_backup': False},
+                    'nitroflare.com': {'urls': [url for url in uploaded_urls if 'nitroflare.com' in url],
+                                       'is_backup': False},
+                    'ddownload.com': {'urls': [url for url in uploaded_urls if 'ddownload.com' in url],
+                                      'is_backup': False},
                     'katfile.com': {'urls': [url for url in uploaded_urls if 'katfile.com' in url], 'is_backup': False},
                     'rapidgator_backup': {'urls': list(backup_rg_urls) if backup_rg_urls else [], 'is_backup': True},
                     'keeplinks': keeplinks_url,
@@ -6195,17 +6404,17 @@ class ForumBotGUI(QMainWindow):
                     backup_data = self.backup_threads[thread_title]
                     # Keep existing data and merge with new info
                     thread_info.update(backup_data)
-                
+
                 # Add to backup
                 self.backup_threads[thread_title] = thread_info
-                
+
                 # Remove from process_threads
                 del self.process_threads[category_name][thread_title]
-                
+
                 # Save changes
                 self.save_process_threads_data()
                 self.save_backup_threads_data()
-                
+
                 logging.info(f"Thread '{thread_title}' moved from {category_name} to backup")
                 return True
         except Exception as e:
@@ -6454,13 +6663,13 @@ class ForumBotGUI(QMainWindow):
 
     def show_process_threads_context_menu(self, position):
         menu = QMenu()
-        
+
         # Add new actions
         open_browser_action = menu.addAction("Open Thread in Browser")
         copy_url_action = menu.addAction("Copy Thread URL")
         copy_title_action = menu.addAction("Copy Thread Title")
         menu.addSeparator()
-        
+
         # Keep existing actions
         view_links_action = menu.addAction("View Links")
         replace_links_action = menu.addAction("Replace Links")
@@ -6471,29 +6680,29 @@ class ForumBotGUI(QMainWindow):
         selected_rows = sorted(set(index.row() for index in self.process_threads_table.selectedIndexes()))
         if not selected_rows:
             return
-            
+
         # Get the first selected row for single-selection actions
         first_row = selected_rows[0]
-        
+
         # Get thread data
         thread_title_item = self.process_threads_table.item(first_row, 0)
         thread_title = thread_title_item.text() if thread_title_item else ""
         thread_url = thread_title_item.data(Qt.UserRole + 2) if thread_title_item else ""
-        
+
         # Execute the menu and get the selected action
         action = menu.exec_(self.process_threads_table.viewport().mapToGlobal(position))
         if not action:
             return
-            
+
         # Handle the selected action
         if action == open_browser_action and thread_url:
             webbrowser.open(thread_url)
-            
+
         elif action == copy_url_action and thread_url:
             clipboard = QApplication.clipboard()
             clipboard.setText(thread_url)
             self.statusBar().showMessage("Thread URL copied to clipboard", 3000)
-            
+
         elif action == copy_title_action and thread_title:
             clipboard = QApplication.clipboard()
             clipboard.setText(thread_title)
@@ -6517,8 +6726,8 @@ class ForumBotGUI(QMainWindow):
                     worker = self.upload_workers[row]
                 else:
                     QMessageBox.warning(self, "No Upload Worker",
-                                     "No upload worker found for the selected thread(s). "
-                                     "Please start an upload first.")
+                                        "No upload worker found for the selected thread(s). "
+                                        "Please start an upload first.")
 
         elif action == set_password_action:
             text, ok = QInputDialog.getText(self, 'Set Password', 'Enter password:')
@@ -6567,20 +6776,20 @@ class ForumBotGUI(QMainWindow):
             current_row = self.process_threads_table.currentRow()
             if current_row < 0:
                 return  # No thread selected
-            
+
             thread_title = self.process_threads_table.item(current_row, 0).text()
             category_name = self.process_threads_table.item(current_row, 1).text()
-            
+
             # Get BBCode content from the advanced editor
             bbcode_content = self.process_bbcode_editor.get_text()
-            
+
             # Update the process_threads data structure
             if category_name in self.process_threads and thread_title in self.process_threads[category_name]:
                 self.process_threads[category_name][thread_title]['bbcode_content'] = bbcode_content
                 # Save the updated data
                 self.save_process_threads_data()
                 logging.debug(f"BBCode content updated for thread '{thread_title}' in category '{category_name}'")
-        
+
         except Exception as e:
             logging.error(f"Error in on_bbcode_content_changed: {e}")
 
@@ -6786,7 +6995,7 @@ class ForumBotGUI(QMainWindow):
                 if not all([thread_url, thread_title, thread_id]):
                     logging.warning(f"Incomplete thread info for '{thread_title}' (ID: {thread_id}). Skipping.")
                     continue
-                
+
                 # Log thread processing status
                 hosts_info = f" with {len(file_hosts)} known hosts" if has_known_hosts else " (no known hosts)"
                 logging.info(f"📄 Processing thread '{thread_title}'{hosts_info}")
@@ -6873,9 +7082,9 @@ class ForumBotGUI(QMainWindow):
             logging.info(f"💾 About to save process threads data - Current data size: {len(self.process_threads)}")
             for cat, threads in self.process_threads.items():
                 logging.info(f"💾 Category '{cat}': {len(threads)} threads")
-            
+
             self.save_process_threads_data()
-            
+
             # Also save the category data so the Posts section persists across restarts
             self.save_category_data(category_name)
 
@@ -7084,7 +7293,7 @@ class ForumBotGUI(QMainWindow):
 
             # Determine status string for filtering (without 'status-' prefix)
             status_str = status_class.replace('status-', '') if status_class else 'pending'
-            
+
             title_item = QTableWidgetItem(thread['thread_title'])
             title_item.setData(Qt.UserRole, status_class)  # ← store CSS class here
             title_item.setData(Qt.UserRole + 1, status_str)  # ← if you still need string for filtering
@@ -7127,7 +7336,6 @@ class ForumBotGUI(QMainWindow):
 
                 title_item.setBackground(background_brush)
                 title_item.setForeground(text_brush)
-
 
                 print(f"🎨 FORCE APPLIED: {status_class} -> BG: {bg_color}, Text: {text_color} on row {row_position}")
                 logging.info(f"🎨 FORCE STYLING: {thread_title} -> {status_class} -> BG: {bg_color}")
@@ -7236,7 +7444,6 @@ class ForumBotGUI(QMainWindow):
             status_item = QTableWidgetItem("")
             self.process_threads_table.setItem(row_position, 8, status_item)
 
-
         self.process_threads_table.resizeColumnsToContents()
         self.process_threads_table.resizeRowsToContents()
         logging.info("Process Threads table populated successfully")
@@ -7252,6 +7459,7 @@ class ForumBotGUI(QMainWindow):
                 logging.error(f"Failed to update thread stats: {e}")
 
         self._restore_proc_filter_state()
+
     def migrate_old_links_format(self):
         """Migrate old links format to new dictionary format."""
         try:
@@ -7263,7 +7471,8 @@ class ForumBotGUI(QMainWindow):
                         if isinstance(links, list):
                             # Convert old format to new
                             thread_data['links'] = {
-                                'rapidgator.net': {'urls': [link for link in links if 'rapidgator.net' in link], 'is_backup': False},
+                                'rapidgator.net': {'urls': [link for link in links if 'rapidgator.net' in link],
+                                                   'is_backup': False},
                                 'rapidgator_backup': {'urls': [], 'is_backup': True},
                                 'keeplinks': ''
                             }
@@ -7276,7 +7485,8 @@ class ForumBotGUI(QMainWindow):
     def open_process_thread_url(self, row, column):
         """Open the thread URL in the default web browser when the Thread Title is clicked."""
         if column == 0:  # Ensure only clicks on the Thread Title column are handled
-            thread_url = self.process_threads_table.item(row, column).data(Qt.UserRole + 2)  # URL is now in UserRole + 2
+            thread_url = self.process_threads_table.item(row, column).data(
+                Qt.UserRole + 2)  # URL is now in UserRole + 2
             if thread_url:
                 webbrowser.open(thread_url)
                 logging.info(f"Opened thread URL: {thread_url}")
@@ -7287,14 +7497,16 @@ class ForumBotGUI(QMainWindow):
     def start_megathreads_tracking(self):
         indexes = self.megathreads_category_tree.selectedIndexes()
         if not indexes:
-            QMessageBox.warning(self, "No Selection", "Please select at least one megathread category to start tracking.")
+            QMessageBox.warning(self, "No Selection",
+                                "Please select at least one megathread category to start tracking.")
             return
         self.start_monitoring_megathreads(indexes, mode='Track Once')
 
     def keep_tracking_megathreads(self):
         indexes = self.megathreads_category_tree.selectedIndexes()
         if not indexes:
-            QMessageBox.warning(self, "No Selection", "Please select at least one megathread category to keep tracking.")
+            QMessageBox.warning(self, "No Selection",
+                                "Please select at least one megathread category to keep tracking.")
             return
         self.start_monitoring_megathreads(indexes, mode='Keep Tracking')
 
@@ -7334,12 +7546,8 @@ class ForumBotGUI(QMainWindow):
             )
 
             # 4) وصل الإشارات وشغّل الـ thread
-            worker.update_megathreads.connect(
-                self.handle_new_megathreads_versions, type=Qt.QueuedConnection
-            )
-            worker.finished.connect(
-                self.megathreads_monitoring_finished, type=Qt.QueuedConnection
-            )
+            worker.update_megathreads.connect(self.handle_new_megathreads_versions)
+            worker.finished.connect(self.megathreads_monitoring_finished)
             self.megathreads_workers[category_name] = worker
             worker.start()
 
@@ -7355,14 +7563,15 @@ class ForumBotGUI(QMainWindow):
         """
         try:
             logging.info(f"🔄 Handling new megathreads versions for '{category_name}': {len(new_versions)} found.")
-            
+
             # Log priority breakdown
             rapidgator_count = sum(1 for v in new_versions.values() if v.get('has_rapidgator'))
             katfile_count = sum(1 for v in new_versions.values() if v.get('has_katfile'))
             other_hosts_count = sum(1 for v in new_versions.values() if v.get('has_other_known_hosts'))
             manual_review_count = len(new_versions) - rapidgator_count - katfile_count - other_hosts_count
-            
-            logging.info(f"📊 Priority breakdown: 🥇 Rapidgator: {rapidgator_count}, 🥈 Katfile: {katfile_count}, 🥉 Other hosts: {other_hosts_count}, 📝 Manual review: {manual_review_count}")
+
+            logging.info(
+                f"📊 Priority breakdown: 🥇 Rapidgator: {rapidgator_count}, 🥈 Katfile: {katfile_count}, 🥉 Other hosts: {other_hosts_count}, 📝 Manual review: {manual_review_count}")
 
             proceed_category_name = f"Megathreads_{category_name}"
             if proceed_category_name not in self.megathreads_process_threads:
@@ -7380,15 +7589,19 @@ class ForumBotGUI(QMainWindow):
                 # Log version details with priority info
                 priority_score = version_info.get('priority_score', 0)
                 post_date = version_info.get('post_date', 'Unknown')
-                
+
                 if version_info.get('has_rapidgator'):
-                    logging.info(f"🥇 Processing RAPIDGATOR version: '{actual_version_title}' (Score: {priority_score}, Date: {post_date})")
+                    logging.info(
+                        f"🥇 Processing RAPIDGATOR version: '{actual_version_title}' (Score: {priority_score}, Date: {post_date})")
                 elif version_info.get('has_katfile'):
-                    logging.info(f"🥈 Processing KATFILE version: '{actual_version_title}' (Score: {priority_score}, Date: {post_date})")
+                    logging.info(
+                        f"🥈 Processing KATFILE version: '{actual_version_title}' (Score: {priority_score}, Date: {post_date})")
                 elif version_info.get('has_other_known_hosts'):
-                    logging.info(f"🥉 Processing KNOWN HOST version: '{actual_version_title}' (Score: {priority_score}, Date: {post_date})")
+                    logging.info(
+                        f"🥉 Processing KNOWN HOST version: '{actual_version_title}' (Score: {priority_score}, Date: {post_date})")
                 else:
-                    logging.info(f"📝 Processing MANUAL REVIEW version: '{actual_version_title}' (Score: {priority_score}, Date: {post_date})")
+                    logging.info(
+                        f"📝 Processing MANUAL REVIEW version: '{actual_version_title}' (Score: {priority_score}, Date: {post_date})")
 
                 new_version_data = {
                     'version_title': actual_version_title,
@@ -7416,19 +7629,22 @@ class ForumBotGUI(QMainWindow):
                     last_version = old_versions[-1]
                     last_version_title = last_version.get('version_title', '')
                     last_priority_score = last_version.get('priority_score', 0)
-                    
+
                     if actual_version_title == last_version_title:
                         # Same version title, but check if priority improved
                         if priority_score > last_priority_score:
-                            logging.info(f"⬆️ PRIORITY UPDATE: '{actual_version_title}' for '{main_thread_title}' - Score improved from {last_priority_score} to {priority_score}")
+                            logging.info(
+                                f"⬆️ PRIORITY UPDATE: '{actual_version_title}' for '{main_thread_title}' - Score improved from {last_priority_score} to {priority_score}")
                             # Remove old version to replace with better one
                             old_versions.pop()
                         else:
                             # Not a new or better version, skip
-                            logging.info(f"ℹ️ Version '{actual_version_title}' for '{main_thread_title}' is unchanged (Score: {priority_score}).")
+                            logging.info(
+                                f"ℹ️ Version '{actual_version_title}' for '{main_thread_title}' is unchanged (Score: {priority_score}).")
                             continue
                     else:
-                        logging.info(f"🆕 NEW VERSION: '{actual_version_title}' for '{main_thread_title}' (replacing '{last_version_title}')")
+                        logging.info(
+                            f"🆕 NEW VERSION: '{actual_version_title}' for '{main_thread_title}' (replacing '{last_version_title}')")
 
                 # Append the new version
                 self.megathreads_process_threads[proceed_category_name][main_thread_title]['versions'].append(
@@ -7483,9 +7699,10 @@ class ForumBotGUI(QMainWindow):
             if manual_review_count > 0:
                 success_msg += f"📝 {manual_review_count} version(s) need manual review\n"
             success_msg += "\nAll versions are now visible in the Process Threads table."
-            
+
             QMessageBox.information(self, "Megathread Versions Updated", success_msg)
-            logging.info(f"✅ Successfully processed {len(new_versions)} megathread versions for '{category_name}' with priority-based selection")
+            logging.info(
+                f"✅ Successfully processed {len(new_versions)} megathread versions for '{category_name}' with priority-based selection")
         except Exception as e:
             self.handle_exception(f"handle_new_megathreads_versions for category '{category_name}'", e)
 
@@ -7541,16 +7758,17 @@ class ForumBotGUI(QMainWindow):
                 # Fallback to raw filters if no actual filters found
                 logging.info(f"⚠️ No actual date filters found for '{category_name}', using raw filters as fallback")
                 raw_filters = self.settings_tab.get_date_filters()
-                df_list = raw_filters if isinstance(raw_filters, list) else raw_filters.split(',') if raw_filters else []
+                df_list = raw_filters if isinstance(raw_filters, list) else raw_filters.split(
+                    ',') if raw_filters else []
             else:
                 logging.info(f"📅 Using actual date filters for '{category_name}': {df_list}")
-            
+
             # Convert list to comma-separated string for WorkerThread
             if isinstance(df_list, list):
                 date_filter = ','.join(df_list)
             else:
                 date_filter = df_list if df_list else ''
-            
+
             logging.info(f"🎆 Final date filter string for '{category_name}': '{date_filter}'")
 
             # وخذ منهما أيضاً page_from و page_to كما سبق
@@ -7568,7 +7786,7 @@ class ForumBotGUI(QMainWindow):
             except Exception as bot_check_error:
                 logging.error(f"⚠️ Bot health check failed for '{category_name}': {bot_check_error}")
                 # Continue anyway - let the worker handle bot issues
-        
+
             # 🔐 BOT LOCK STATUS CHECK: Ensure lock is not stuck from previous session
             logging.info(f"🔐 Checking bot_lock status before starting '{category_name}'")
             try:
@@ -7601,12 +7819,8 @@ class ForumBotGUI(QMainWindow):
             )
 
             # 2) شبّك الإشارات
-            worker.update_threads.connect(
-                self.handle_new_threads, type=Qt.QueuedConnection
-            )
-            worker.finished.connect(
-                self.monitoring_finished, type=Qt.QueuedConnection
-            )
+            worker.update_threads.connect(self.handle_new_threads)
+            worker.finished.connect(self.monitoring_finished)
 
             # 3) خزّنه علشان ما يتمش حذفه من الـ Python GC
             self.category_workers[category_name] = worker
@@ -7658,12 +7872,12 @@ class ForumBotGUI(QMainWindow):
     def stop_monitoring(self, indexes):
         """Stop monitoring selected categories."""
         categories_to_stop = [self.category_model.itemFromIndex(index).text() for index in indexes]
-        
+
         for category_name in categories_to_stop:
             worker = self.category_workers.pop(category_name, None)
             if worker:
                 logging.info(f"⛔ Stopping worker for category '{category_name}'")
-                
+
                 try:
                     # 🔌 DISCONNECT SIGNALS: Prevent signal conflicts after restart
                     try:
@@ -7672,18 +7886,18 @@ class ForumBotGUI(QMainWindow):
                         logging.info(f" Disconnected signals for worker '{category_name}'")
                     except Exception as disconnect_error:
                         logging.warning(f" Could not disconnect signals for '{category_name}': {disconnect_error}")
-                    
+
                     # Stop the worker
                     worker.stop()
-                    
+
                     # Wait for worker to stop with increased timeout
                     if not worker.wait(8000):  # Wait max 8 seconds (5+3 from worker timeout)
                         logging.warning(f" Worker for '{category_name}' didn't stop gracefully, forcing termination")
                         worker.terminate()
                         worker.wait(2000)  # Wait 2 seconds for termination
-                        
+
                         logging.info(f" Successfully stopped monitoring for category '{category_name}'")
-                        
+
                 except Exception as e:
                     logging.error(f" Error stopping worker for '{category_name}': {e}")
                     # Force terminate if there's an error
@@ -7691,7 +7905,7 @@ class ForumBotGUI(QMainWindow):
                         worker.terminate()
                     except:
                         pass
-        
+
         self.statusBar().showMessage(f"Stopped monitoring selected categories.")
         logging.info(f"🏁 Finished stopping categories: {', '.join(categories_to_stop)}")
 
@@ -7745,15 +7959,15 @@ class ForumBotGUI(QMainWindow):
             msg_box = QtMessageBox(self)
             msg_box.setWindowTitle("No Links Found")
             msg_box.setText(f"No links found for '{thread_title}'.\n\nWhat would you like to do?")
-            
+
             # إضافة أزرار مخصصة
             add_link_btn = msg_box.addButton("Add Manual Link", QtMessageBox.ActionRole)
             create_folder_btn = msg_box.addButton("Create Download Folder", QtMessageBox.ActionRole)
             cancel_btn = msg_box.addButton("Cancel", QtMessageBox.RejectRole)
-            
+
             msg_box.setDefaultButton(add_link_btn)
             msg_box.exec_()
-            
+
             clicked_button = msg_box.clickedButton()
             if clicked_button == add_link_btn:
                 self.add_manual_link(thread_title, from_section, category)
@@ -7987,7 +8201,7 @@ class ForumBotGUI(QMainWindow):
         """Create a download folder for manually downloaded files using thread_id for consistent naming."""
         import os
         from PyQt5.QtWidgets import QFileDialog
-        
+
         try:
             # Get thread_id from process_threads data structure
             thread_id = None
@@ -8000,20 +8214,20 @@ class ForumBotGUI(QMainWindow):
                         thread_id = versions[-1].get('thread_id')  # Get from latest version
                     else:
                         thread_id = thread_info.get('thread_id')  # Direct storage
-            
+
             if not thread_id:
                 QMessageBox.warning(self, "Error", "Could not retrieve thread ID for folder creation.")
                 return
-            
+
             # Get download path from settings
             download_path = self.config.get('download_dir', os.path.expanduser('~/Downloads'))
-            
+
             # Create folder path using category and thread_id (matching automatic downloads)
             folder_path = os.path.join(download_path, category, str(thread_id))
-            
+
             # Create folder if it doesn't exist
             os.makedirs(folder_path, exist_ok=True)
-            
+
             # Ask user if they want to open the folder
             reply = QMessageBox.question(
                 self,
@@ -8022,38 +8236,39 @@ class ForumBotGUI(QMainWindow):
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.Yes
             )
-            
+
             if reply == QMessageBox.Yes:
                 # Open folder in file explorer
                 if os.name == 'nt':  # Windows
                     os.startfile(folder_path)
                 elif os.name == 'posix':  # macOS and Linux
                     os.system(f'open "{folder_path}"' if sys.platform == 'darwin' else f'xdg-open "{folder_path}"')
-            
+
             # Update thread data to mark as "manual download"
             if from_section == 'Process Threads' and category:
                 if category not in self.process_threads:
                     self.process_threads[category] = {}
                 if thread_title not in self.process_threads[category]:
                     self.process_threads[category][thread_title] = {}
-                
+
                 # Mark as manual download and update folder path
                 self.process_threads[category][thread_title]['manual_download'] = True
                 self.process_threads[category][thread_title]['download_folder'] = folder_path
-                
+
                 # Add manual link entry to links dictionary
                 if 'links' not in self.process_threads[category][thread_title]:
                     self.process_threads[category][thread_title]['links'] = {}
                 self.process_threads[category][thread_title]['links']['manual'] = [f'Manual folder: {folder_path}']
-                
+
                 # Save data
                 self.save_process_threads_data()
-                
+
                 # Refresh UI to show the manual folder/link immediately
                 self.populate_process_threads_table(self.process_threads)
-                
-                logging.info(f"Manual download folder created for thread '{thread_title}' (ID: {thread_id}) in category '{category}': {folder_path}")
-            
+
+                logging.info(
+                    f"Manual download folder created for thread '{thread_title}' (ID: {thread_id}) in category '{category}': {folder_path}")
+
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to create download folder:\n{str(e)}")
             logging.error(f"Failed to create manual download folder for '{thread_title}': {e}")
@@ -8252,7 +8467,7 @@ class ForumBotGUI(QMainWindow):
     def load_data(self, category_name):
         """Load thread data from JSON في فولدر data/."""
         sanitized_name = sanitize_filename(category_name)
-        
+
         # Load from user-specific folder if user is logged in
         if self.user_manager.get_current_user():
             user_folder = self.user_manager.get_user_folder()
@@ -8329,7 +8544,6 @@ class ForumBotGUI(QMainWindow):
             # Persist changes
             self.save_category_data(self.current_category)
             self.bot.save_processed_thread_ids()
-
 
             self.statusBar().showMessage(f'Removed {len(selected_items)} thread(s)')
             logging.info(f"Removed {len(selected_items)} thread(s) from category '{self.current_category}'.")
@@ -8447,23 +8661,23 @@ class ForumBotGUI(QMainWindow):
         try:
             filename = self.get_process_threads_filepath()
             current_user = self.user_manager.get_current_user() if hasattr(self, 'user_manager') else None
-            
+
             logging.info(f"💾 Saving process threads data for user: {current_user}")
             logging.info(f"💾 Target file path: {filename}")
             logging.info(f"💾 Data to save: {len(self.process_threads)} threads")
-            
+
             # Ensure directory exists
             os.makedirs(os.path.dirname(filename), exist_ok=True)
-            
+
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(self.process_threads, f, ensure_ascii=False, indent=4)
-            
+
             # Verify the save by reading back
             if os.path.exists(filename):
                 with open(filename, 'r', encoding='utf-8') as f:
                     saved_data = json.load(f)
                     logging.info(f"✅ Verification: File saved with {len(saved_data)} threads")
-            
+
             logging.info(f"✅ Process Threads data saved successfully to {filename}")
         except Exception as e:
             logging.error(f"❌ Error in save_process_threads_data: {e}", exc_info=True)
@@ -8475,10 +8689,10 @@ class ForumBotGUI(QMainWindow):
         """
         filename = self.get_process_threads_filepath()
         current_user = self.user_manager.get_current_user() if hasattr(self, 'user_manager') else None
-        
+
         logging.info(f"📂 Loading process threads data for user: {current_user}")
         logging.info(f"📂 Target file path: {filename}")
-        
+
         if not os.path.exists(filename):
             logging.warning(f"❌ No saved Process Threads data found: {filename}")
             self.process_threads = {}  # Initialize empty dict
@@ -8489,10 +8703,10 @@ class ForumBotGUI(QMainWindow):
                 loaded_data = json.load(f)
                 logging.info(f"📊 Raw loaded data keys: {list(loaded_data.keys()) if loaded_data else 'EMPTY'}")
                 logging.info(f"📊 Raw loaded data size: {len(loaded_data) if loaded_data else 0} threads")
-                
+
                 self.process_threads = loaded_data
                 logging.info(f"📊 self.process_threads after loading: {len(self.process_threads)} threads")
-                
+
             self.populate_process_threads_table(self.process_threads)
             logging.info(f"✅ Process Threads data loaded from {filename} - {len(self.process_threads)} threads")
             return True
@@ -8544,7 +8758,7 @@ class ForumBotGUI(QMainWindow):
         """
         # Initialize replied_thread_ids first to ensure it always exists
         self.replied_thread_ids = set()
-        
+
         try:
             if self.user_manager.get_current_user():
                 user_folder = self.user_manager.get_user_folder()
@@ -8553,7 +8767,7 @@ class ForumBotGUI(QMainWindow):
             else:
                 data_dir = get_data_folder()
                 filename = os.path.join(data_dir, "replied_thread_ids.json")
-            
+
             if os.path.exists(filename):
                 with open(filename, 'r', encoding='utf-8') as f:
                     arr = json.load(f)
@@ -8579,7 +8793,7 @@ class ForumBotGUI(QMainWindow):
             else:
                 data_dir = get_data_folder()
                 filename = os.path.join(data_dir, "replied_thread_ids.json")
-            
+
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(list(self.replied_thread_ids), f, ensure_ascii=False, indent=4)
             logging.info(f"replied_thread_ids saved to {filename}.")
@@ -8594,61 +8808,62 @@ class ForumBotGUI(QMainWindow):
         try:
             current_user = self.user_manager.get_current_user()
             logging.info(f"🔄 Reloading user-specific data for user: {current_user}")
-            
+
             # Run migration for legacy data files FIRST
             self.migrate_legacy_data_files()
-            
+
             # Update file paths for user-specific data
-            self.category_manager.update_user_file_paths() 
+            self.category_manager.update_user_file_paths()
             self.megathreads_category_manager.update_user_file_paths()
-            
+
             # Reload categories for both managers
             self.category_manager.load_categories()
             self.megathreads_category_manager.load_categories()
             # Refresh category views after reloading
             self.populate_category_tree(load_saved=True)
             self.populate_megathreads_category_tree()
-            
+
             # Reload all user-specific data files
             self.load_process_threads_data()
             self.load_backup_threads_data()
             self.load_replied_thread_ids()
             self.load_megathreads_process_threads_data()
-            
+
             # Run migration for old links format if needed
             self.migrate_old_links_format()
-            
+
             # Load all saved category thread files for tracking continuity
             self.load_all_saved_category_threads()
-            
+
             # Reload bot data (user-specific cookies, tokens, processed thread IDs)
             if hasattr(self, 'bot') and self.bot:
                 # Update bot file paths for current user
                 self.bot.update_user_file_paths()
-                
+
                 # Load user-specific bot data only if user is logged in
                 if current_user:
                     # Load cookies and check login status
                     cookies_loaded = self.bot.load_cookies()
                     logging.info(f"🍪 Cookies loaded result: {cookies_loaded}")
-                    
+
                     login_status_verified = False
                     if cookies_loaded:
                         login_status_verified = self.bot.check_login_status()
                         logging.info(f"🔐 Login status verification result: {login_status_verified}")
-                    
+
                     if cookies_loaded and login_status_verified:
                         logging.info("✅ Cookies loaded and login verified for user")
                         self.bot.is_logged_in = True
                     else:
-                        logging.info(f"❌ Login verification failed - cookies: {cookies_loaded}, status: {login_status_verified}")
+                        logging.info(
+                            f"❌ Login verification failed - cookies: {cookies_loaded}, status: {login_status_verified}")
                         self.bot.is_logged_in = False
-                    
+
                     # Load Rapidgator tokens
                     # Load Rapidgator tokens (backup for download, main for upload)
                     self.bot.load_token('backup')
                     self.bot.load_token('main')
-                    
+
                     # Load processed thread IDs
                     self.bot.load_processed_thread_ids()
                     logging.info(f"🔄 Loaded {len(self.bot.processed_thread_ids)} processed thread IDs for user")
@@ -8659,22 +8874,22 @@ class ForumBotGUI(QMainWindow):
                     self.bot.rapidgator_token = None
                     self.bot.upload_rapidgator_token = None
                     logging.info("Bot data cleared - no user logged in")
-            
+
             # Update download directory based on user settings
             self.update_download_directory_from_user_settings()
-            
+
             # Refresh UI components
             self.populate_process_threads_table(self.process_threads)
             self.populate_backup_threads_table()
-            
+
             # Clear current category selection to force refresh
             self.current_category = None
-            
+
             logging.info(f"🔄 User-specific data reloaded successfully for: {current_user}")
-            
+
         except Exception as e:
             logging.error(f"❌ Failed to reload user-specific data: {e}", exc_info=True)
-    
+
     def load_all_saved_category_threads(self):
         """
         Load all saved category thread JSON files for tracking continuity.
@@ -8682,7 +8897,7 @@ class ForumBotGUI(QMainWindow):
         """
         try:
             current_user = self.user_manager.get_current_user()
-            
+
             # Determine the directory to scan for thread files
             if current_user:
                 user_folder = self.user_manager.get_user_folder()
@@ -8692,61 +8907,62 @@ class ForumBotGUI(QMainWindow):
                 data_dir = get_data_folder()
                 scan_directory = data_dir
                 logging.info(f"📁 Loading saved category threads from global folder: {scan_directory}")
-            
+
             if not os.path.exists(scan_directory):
                 logging.info(f"📁 Directory does not exist, no saved threads to load: {scan_directory}")
                 return
-            
+
             # Initialize category_threads if not exists
             if not hasattr(self, 'category_threads'):
                 self.category_threads = {}
-            
+
             loaded_categories = 0
             loaded_threads_total = 0
-            
+
             # Scan for all threads_*.json files
             for filename in os.listdir(scan_directory):
                 if filename.startswith('threads_') and filename.endswith('.json'):
                     # Extract category name from filename
                     sanitized_name = filename[8:-5]  # Remove 'threads_' prefix and '.json' suffix
-                    
+
                     # Find actual category name by matching sanitized names
                     category_name = None
                     for cat in self.category_manager.get_categories():
                         if sanitize_filename(cat) == sanitized_name:
                             category_name = cat
                             break
-                    
+
                     if not category_name:
                         # If no exact match, use the sanitized name as category name
                         category_name = sanitized_name
-                        logging.warning(f"⚠️ Could not find exact category match for '{sanitized_name}', using as category name")
-                    
+                        logging.warning(
+                            f"⚠️ Could not find exact category match for '{sanitized_name}', using as category name")
+
                     # Load the thread data for this category
                     try:
                         file_path = os.path.join(scan_directory, filename)
                         with open(file_path, 'r', encoding='utf-8') as f:
                             data = json.load(f)
-                        
+
                         threads = {}
                         loaded_threads_count = 0
-                        
+
                         for thread_title, thread_info in data.items():
                             thread_url = thread_info['thread_url']
                             thread_date = thread_info['thread_date']
                             thread_id = thread_info['thread_id']
                             file_hosts = thread_info.get('file_hosts', [])
                             links = thread_info.get('links', {})
-                            
+
                             # Normalize the links
                             normalized_links = self.normalize_rapidgator_links(links)
-                            
+
                             threads[thread_title] = (thread_url, thread_date, thread_id, file_hosts)
-                            
+
                             # Add thread ID to processed_thread_ids to avoid reprocessing
                             if hasattr(self, 'bot') and self.bot:
                                 self.bot.processed_thread_ids.add(thread_id)
-                            
+
                             # Load links into bot.thread_links
                             if normalized_links and hasattr(self, 'bot') and self.bot:
                                 existing = self.bot.thread_links.get(thread_title, {})
@@ -8756,28 +8972,30 @@ class ForumBotGUI(QMainWindow):
                                         existing_links.add(l)
                                     existing[host] = list(existing_links)
                                 self.bot.thread_links[thread_title] = existing
-                            
+
                             loaded_threads_count += 1
-                        
+
                         # Store loaded threads for this category
                         self.category_threads[category_name] = threads
                         loaded_categories += 1
                         loaded_threads_total += loaded_threads_count
-                        
-                        logging.info(f"✅ Loaded {loaded_threads_count} threads for category '{category_name}' from {filename}")
-                        
+
+                        logging.info(
+                            f"✅ Loaded {loaded_threads_count} threads for category '{category_name}' from {filename}")
+
                     except Exception as e:
                         logging.error(f"❌ Failed to load threads from {filename}: {e}")
-            
+
             # Save processed thread IDs if any were loaded
             if hasattr(self, 'bot') and self.bot and loaded_threads_total > 0:
                 self.bot.save_processed_thread_ids()
-            
+
             if loaded_categories > 0:
-                logging.info(f"🎉 Successfully loaded {loaded_threads_total} threads from {loaded_categories} categories for tracking continuity")
+                logging.info(
+                    f"🎉 Successfully loaded {loaded_threads_total} threads from {loaded_categories} categories for tracking continuity")
             else:
                 logging.info(f"📁 No saved category thread files found in {scan_directory}")
-                
+
         except Exception as e:
             logging.error(f"❌ Failed to load saved category threads: {e}", exc_info=True)
 
@@ -8791,7 +9009,7 @@ class ForumBotGUI(QMainWindow):
             if not current_user:
                 logging.debug("🚫 No user logged in - using default download directory")
                 return
-            
+
             # Get user-specific download directory setting
             user_download_dir = self.user_manager.get_user_setting('download_dir')
             if user_download_dir:
@@ -8811,7 +9029,7 @@ class ForumBotGUI(QMainWindow):
                 logging.debug(
                     f"⚠️ No download directory setting found for user '{current_user}', using default"
                 )
-                
+
         except Exception as e:
             logging.error(f"❌ Error updating download directory from user settings: {e}")
 
@@ -8822,23 +9040,23 @@ class ForumBotGUI(QMainWindow):
         """
         try:
             logging.info("🧹 Clearing user-specific data on logout...")
-            
+
             # Clear process threads data
             self.process_threads = {}
-            
-            # Clear backup threads data  
+
+            # Clear backup threads data
             self.backup_threads = {}
-            
+
             # Clear replied thread IDs
             self.replied_thread_ids = set()
-            
+
             # Clear megathreads data
             self.megathreads_process_threads = {}
-            
+
             # Clear category-related data
             self.category_threads = {}
             self.current_category = None
-            
+
             # Clear bot data
             if hasattr(self, 'bot') and self.bot:
                 self.bot.processed_thread_ids = set()
@@ -8851,27 +9069,27 @@ class ForumBotGUI(QMainWindow):
                         self.bot.driver.delete_all_cookies()
                     except Exception:
                         pass  # Ignore if browser is not available
-            
+
             # Clear UI tables
             if hasattr(self, 'process_threads_table'):
                 self.process_threads_table.setRowCount(0)
-            
+
             if hasattr(self, 'backup_threads_table'):
                 self.backup_threads_table.setRowCount(0)
-            
+
             # Clear thread list
             if hasattr(self, 'thread_list'):
                 self.thread_list.clear()
-            
+
             # Reset download directory to default
             default_download_dir = os.path.join(os.path.expanduser('~'), 'Downloads', 'ForumBot')
             if hasattr(self, 'file_processor') and self.file_processor:
                 self.file_processor.download_dir = default_download_dir
             if hasattr(self, 'bot') and self.bot:
                 self.bot.download_dir = default_download_dir
-            
+
             logging.info("✅ User-specific data cleared successfully on logout")
-            
+
         except Exception as e:
             logging.error(f"❌ Error clearing user data on logout: {e}", exc_info=True)
 
@@ -8883,23 +9101,23 @@ class ForumBotGUI(QMainWindow):
             current_user = self.user_manager.get_current_user()
             if not current_user:
                 return  # No migration needed if no user logged in
-            
+
             user_folder = self.user_manager.get_user_folder()
             os.makedirs(user_folder, exist_ok=True)
-            
+
             # List of files to migrate from global data folder to user folder
             files_to_migrate = [
                 'cookies.pkl',
-                'processed_threads.pkl', 
+                'processed_threads.pkl',
                 'rapidgator_download_token.json',
                 'rapidgator_upload_token.json'
             ]
-            
+
             migrated_files = []
             for filename in files_to_migrate:
                 global_file = os.path.join(DATA_DIR, filename)
                 user_file = os.path.join(user_folder, filename)
-                
+
                 # Only migrate if global file exists and user file doesn't exist
                 if os.path.exists(global_file) and not os.path.exists(user_file):
                     try:
@@ -8909,12 +9127,13 @@ class ForumBotGUI(QMainWindow):
                         logging.info(f"📦 Migrated {filename} from global folder to user folder")
                     except Exception as e:
                         logging.error(f"❌ Failed to migrate {filename}: {e}")
-            
+
             if migrated_files:
-                logging.info(f"✅ Successfully migrated {len(migrated_files)} legacy files for user {current_user}: {', '.join(migrated_files)}")
+                logging.info(
+                    f"✅ Successfully migrated {len(migrated_files)} legacy files for user {current_user}: {', '.join(migrated_files)}")
             else:
                 logging.info(f"ℹ️  No legacy files to migrate for user {current_user}")
-                
+
         except Exception as e:
             logging.error(f"❌ Error during legacy data migration: {e}", exc_info=True)
 
@@ -8937,17 +9156,17 @@ class ForumBotGUI(QMainWindow):
                             version['links'] = {'mixed': [old_links]}
                             migrated_count += 1
                             logging.debug(f"Migrated old links format for thread {thread_id}")
-                        
+
                         # Also check direct links field
                         if 'links' in version and isinstance(version['links'], str) and version['links']:
                             old_links = version['links']
                             version['links'] = {'mixed': [old_links]}
                             migrated_count += 1
-            
+
             if migrated_count > 0:
                 logging.info(f"🔄 Migrated {migrated_count} old links format entries to new dictionary format")
                 self.save_process_threads_data()  # Save migrated data
-                
+
         except Exception as e:
             logging.error(f"Error migrating old links format: {e}", exc_info=True)
 
@@ -9024,12 +9243,14 @@ class ForumBotGUI(QMainWindow):
                 # New format: update latest version
                 latest_version = thread_info['versions'][-1]
                 latest_version[status_type] = completed
-                logging.info(f"🐛 DEBUG - Updated {status_type} = {completed} for thread '{thread_title}' (versions format)")
+                logging.info(
+                    f"🐛 DEBUG - Updated {status_type} = {completed} for thread '{thread_title}' (versions format)")
                 logging.info(f"🐛 DEBUG - Latest version data: {latest_version}")
             else:
                 # Old format: update directly
                 thread_info[status_type] = completed
-                logging.info(f"🐛 DEBUG - Updated {status_type} = {completed} for thread '{thread_title}' (direct format)")
+                logging.info(
+                    f"🐛 DEBUG - Updated {status_type} = {completed} for thread '{thread_title}' (direct format)")
                 logging.info(f"🐛 DEBUG - Thread info data: {thread_info}")
 
             # Save the updated data
@@ -9038,7 +9259,7 @@ class ForumBotGUI(QMainWindow):
 
             # Emit signal for thread-safe UI update
             self.thread_status_updated.emit()
-            
+
             logging.info(f"🐛 DEBUG - Emitted thread_status_updated signal for UI refresh")
             logging.info(f"Thread status updated: {category_name}/{thread_title} - {status_type}: {completed}")
 
@@ -9060,11 +9281,11 @@ class ForumBotGUI(QMainWindow):
             self.process_threads_table.update()
             self.process_threads_table.repaint()
             QApplication.processEvents()  # Process any pending UI events
-            
+
             logging.info(f"✅ Process threads table refreshed successfully")
         except Exception as e:
             logging.error(f"❌ Error refreshing process threads table: {e}", exc_info=True)
-    
+
     def mark_download_complete(self, category_name, thread_title):
         """
         Mark a thread as download complete.
@@ -9087,12 +9308,12 @@ class ForumBotGUI(QMainWindow):
         """Mark thread as download complete"""
         logging.info(f"🔵 Marking download complete: {category_name}/{thread_title}")
         self.update_thread_status(category_name, thread_title, 'download_status', True)
-    
+
     def mark_upload_complete(self, category_name, thread_title):
         """Mark thread as upload complete"""
         logging.info(f"🟡 Marking upload complete: {category_name}/{thread_title}")
         self.update_thread_status(category_name, thread_title, 'upload_status', True)
-    
+
     def mark_post_complete(self, category_name, thread_title):
         """Mark thread as post complete"""
         logging.info(f"🟢 Marking post complete: {category_name}/{thread_title}")
@@ -9156,7 +9377,7 @@ class ForumBotGUI(QMainWindow):
             self.on_templab_tree_item_clicked(item, 0)
 
         elif getattr(self, "current_templab_category", None) and getattr(
-            self, "current_templab_author", None
+                self, "current_templab_author", None
         ):
             cfg = templab_manager._load_cfg(
                 self.current_templab_category, self.current_templab_author
@@ -9244,7 +9465,6 @@ class ForumBotGUI(QMainWindow):
         raw = post.get("bbcode_original") or post.get("bbcode_content", "")
         self.current_post_raw = raw
         self.preview_edit.setPlainText(raw)
-
 
     def on_save_template(self):
         if not getattr(self, "current_templab_category", None):
@@ -9360,8 +9580,7 @@ class ForumBotGUI(QMainWindow):
         self.proceed_template_workers[row] = worker
         self.register_worker(worker)
         worker.finished.connect(
-            lambda cat, t, bb: self.on_proceed_template_finished(row, thread, cat, t, bb),
-            Qt.QueuedConnection,
+            lambda cat, t, bb: self.on_proceed_template_finished(row, thread, cat, t, bb)
         )
         worker.start()
 
