@@ -120,7 +120,7 @@ class DownloadWorker(QThread):
     file_progress_update = pyqtSignal(str, int, str, int, int, str, float, float)
     download_success = pyqtSignal(int)
     download_error = pyqtSignal(int, str)
-    progress_update = pyqtSignal(OperationStatus)
+    progress_update = pyqtSignal(object)  # OperationStatus
 
     def __init__(self, bot, file_processor, selected_rows, gui, cancel_event=None):
         super().__init__()

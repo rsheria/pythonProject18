@@ -17,7 +17,8 @@ from typing import Any, Dict, List
 from bs4 import BeautifulSoup
 import requests
 from requests.exceptions import SSLError, ConnectionError
-from PyQt5.QtCore import QDate, QRunnable, QThreadPool, QObject, pyqtSignal
+from PyQt5.QtCore import QDate, QRunnable, QThreadPool, QObject, pyqtSignal, Qt
+
 from PyQt5.QtGui import QStandardItem, QStandardItemModel
 from PyQt5.QtWidgets import (
     QDateEdit,
@@ -409,7 +410,7 @@ class StatsWidget(QWidget):
                 self._pending -= 1
                 continue
             sig = _WorkerSignals()
-            sig.finished.connect(self._on_worker_done)
+            sig.finished.connect(self._on_worker_done, type=Qt.QueuedConnection)
             self.thread_pool.start(_StatsWorker(site, sess, d_from, d_to, sig))
 
     # ------------------------- call-backs -------------------------------- #

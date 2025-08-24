@@ -67,7 +67,7 @@ class ModernSidebarItem(QPushButton):
         self.setText(f"{self.icon}  {self.txt}")
 
         # إشارة الضغط
-        self.clicked.connect(lambda: self.clicked_text.emit(self.txt))
+        self.clicked.connect(lambda: self.clicked_text.emit(self.txt), type=Qt.QueuedConnection)
         self.update_style()
 
     # --- Active state ---
@@ -221,7 +221,7 @@ class ModernSidebar(QWidget):
         if not self.sections:
             self.add_section("")
         item = self.sections[0].add_item(text, icon)
-        item.clicked_text.connect(self._on_item_clicked)
+        item.clicked_text.connect(self._on_item_clicked, type=Qt.QueuedConnection)
         return item
 
     def set_active_by_text(self, text: str):

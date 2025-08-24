@@ -216,31 +216,28 @@ class StatusWidget(QWidget):
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(800)  # ms
-        self._save_timer.timeout.connect(self._save_status_snapshot, Qt.QueuedConnection)
+        self._save_timer.timeout.connect(self._save_status_snapshot)
 
         self.table.verticalHeader().setVisible(False)
         self.table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
         layout.addWidget(self.table)
 
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self.on_ctx_menu, Qt.QueuedConnection)
+        self.table.customContextMenuRequested.connect(self.on_ctx_menu)
         # Connect filter widgets
-        self.search_edit.textChanged.connect(self.apply_filter, Qt.QueuedConnection)
-        self.section_cb.currentIndexChanged.connect(self.apply_filter, Qt.QueuedConnection)
-        self.stage_cb.currentIndexChanged.connect(self.apply_filter, Qt.QueuedConnection)
-        self.host_cb.currentIndexChanged.connect(self.apply_filter, Qt.QueuedConnection)
+        self.search_edit.textChanged.connect(self.apply_filter)
+        self.section_cb.currentIndexChanged.connect(self.apply_filter)
+        self.stage_cb.currentIndexChanged.connect(self.apply_filter)
+        self.host_cb.currentIndexChanged.connect(self.apply_filter)
 
         self.btn_clear_finished.clicked.connect(
             lambda: self.clear_finished(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier)),
-            Qt.QueuedConnection,
         )
         self.btn_clear_errors.clicked.connect(
             lambda: self.clear_errors(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier)),
-            Qt.QueuedConnection,
         )
         self.btn_clear_selected.clicked.connect(
             lambda: self.clear_selected(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier)),
-            Qt.QueuedConnection,
         )
 
         # Shortcuts
@@ -250,15 +247,15 @@ class StatusWidget(QWidget):
         sc_clear.activated.connect(self._clear_filters)
         sc_clear_finished = QShortcut(QKeySequence("Ctrl+Shift+F"), self)
         sc_clear_finished.activated.connect(
-            lambda: self.clear_finished(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier))
+            lambda: self.clear_finished(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier)),
         )
         sc_clear_errors = QShortcut(QKeySequence("Ctrl+Shift+E"), self)
         sc_clear_errors.activated.connect(
-            lambda: self.clear_errors(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier))
+            lambda: self.clear_errors(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier)),
         )
         sc_clear_selected = QShortcut(QKeySequence(Qt.Key_Delete), self.table)
         sc_clear_selected.activated.connect(
-            lambda: self.clear_selected(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier))
+            lambda: self.clear_selected(ignore_running=not (QApplication.keyboardModifiers() & Qt.AltModifier)),
         )
         sc_pause = QShortcut(QKeySequence("Ctrl+Alt+P"), self)
         sc_pause.activated.connect(lambda: self._emit_selection("pause"))
@@ -304,7 +301,7 @@ class StatusWidget(QWidget):
         self._flush_timer = QTimer(self)
         self._flush_timer.setSingleShot(True)
         self._flush_timer.setInterval(150)
-        self._flush_timer.timeout.connect(self._flush_status, Qt.QueuedConnection)
+        self._flush_timer.timeout.connect(self._flush_status)
 
         self._apply_readability_palette()
         self._row_brushes = self._status_brushes(self.table.palette())
@@ -320,7 +317,10 @@ class StatusWidget(QWidget):
     @pyqtSlot(object)
     def on_progress_update(self, op: OperationStatus) -> None:
         """Update model with progress from background workers."""
-        self.model.upsert(op)
+        try:
+            self.model.upsert(op)
+        except Exception as e:  # pragma: no cover - defensive
+            print("[StatusWidget] update error:", e)
     # ------------------------------------------------------------------
     def _clear_filters(self) -> None:
         """Clear all filter widgets and reapply."""

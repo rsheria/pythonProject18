@@ -58,19 +58,19 @@ class DownloadProgressDialog(QDialog):
         btn_layout = QHBoxLayout()
 
         self.pause_button = QPushButton("Pause")
-        self.pause_button.clicked.connect(self.on_pause_clicked)
+        self.pause_button.clicked.connect(self.on_pause_clicked, type=Qt.QueuedConnection)
         btn_layout.addWidget(self.pause_button)
 
         self.continue_button = QPushButton("Continue")
-        self.continue_button.clicked.connect(self.on_continue_clicked)
+        self.continue_button.clicked.connect(self.on_continue_clicked, type=Qt.QueuedConnection)
         btn_layout.addWidget(self.continue_button)
 
         self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.clicked.connect(self.on_cancel_clicked)
+        self.cancel_button.clicked.connect(self.on_cancel_clicked, type=Qt.QueuedConnection)
         btn_layout.addWidget(self.cancel_button)
 
         self.close_button = QPushButton("Close")
-        self.close_button.clicked.connect(self.close)
+        self.close_button.clicked.connect(self.close, type=Qt.QueuedConnection)
         btn_layout.addWidget(self.close_button)
 
         self.main_layout.addLayout(btn_layout)

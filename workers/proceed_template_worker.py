@@ -8,7 +8,7 @@ import templab_manager
 class ProceedTemplateWorker(QThread):
     """Worker to apply templates and upload images without blocking the UI."""
 
-    progress_update = pyqtSignal(OperationStatus)
+    progress_update = pyqtSignal(object)  # OperationStatus
     finished = pyqtSignal(str, str, str)  # category, title, processed bbcode
 
     def __init__(self, bot, bot_lock, category, title, raw_bbcode, author, links_block, cancel_event=None):

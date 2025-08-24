@@ -133,7 +133,7 @@ class TopicPipeline:
 class QueueOrchestrator(QObject):
     """Coordinate Auto‑Proceed operations with throttling and persistence."""
 
-    progress_update = pyqtSignal(OperationStatus)
+    progress_update = pyqtSignal(object)  # OperationStatus
 
     def __init__(
         self,

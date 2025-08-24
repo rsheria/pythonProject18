@@ -1,11 +1,7 @@
 from typing import List
 
 from PyQt5.QtCore import QAbstractTableModel, QModelIndex, Qt
-from PyQt5.QtGui import QColor
-
-from .themes import theme_manager
-
-from models.operation_status import OperationStatus, OpStage
+from models.operation_status import OperationStatus
 
 
 class StatusTableModel(QAbstractTableModel):
@@ -67,34 +63,6 @@ class StatusTableModel(QAbstractTableModel):
                 return self._human_time(op.eta)
             if col == 10:
                 return op.progress
-        if role == Qt.BackgroundRole:
-            t = theme_manager.get_current_theme()
-            if theme_manager.theme_mode == "dark":
-                colors = {
-                    OpStage.QUEUED: t.SURFACE_VARIANT,
-                    OpStage.RUNNING: getattr(t, "INFO_LIGHT", t.INFO),
-                    OpStage.FINISHED: getattr(t, "SUCCESS_LIGHT", t.SUCCESS),
-                    OpStage.ERROR: getattr(t, "ERROR_LIGHT", t.ERROR),
-
-                }
-            else:
-                colors = {
-                    OpStage.QUEUED: t.SURFACE_VARIANT,
-                    OpStage.RUNNING: t.INFO,
-                    OpStage.FINISHED: t.SUCCESS,
-                    OpStage.ERROR: t.ERROR,
-
-                }
-            color = colors.get(op.stage)
-            if color:
-                return QColor(color)
-        if role == Qt.ForegroundRole:
-            t = theme_manager.get_current_theme()
-            if op.stage == OpStage.QUEUED:
-                return QColor(t.TEXT_PRIMARY)
-            if theme_manager.theme_mode == "dark":
-                return QColor(t.BACKGROUND)
-            return QColor(t.TEXT_ON_PRIMARY)
         return None
 
     # ------------------------------------------------------------------
@@ -120,16 +88,12 @@ class StatusTableModel(QAbstractTableModel):
         for r, existing in enumerate(self._rows):
             if (existing.section, existing.item, existing.op_type, existing.host) == key:
                 self._rows[r] = op
-                self.dataChanged.emit(
-                    self.index(r, 0),
-                    self.index(r, self.columnCount() - 1),
-                    [],
-                )
-                return
-        r = len(self._rows)
-        self.beginInsertRows(QModelIndex(), r, r)
-        self._rows.append(op)
-        self.endInsertRows()
+                break
+            else:
+                r = len(self._rows)
+                self.beginInsertRows(QModelIndex(), r, r)
+                self._rows.append(op)
+                self.endInsertRows()
         self.dataChanged.emit(
             self.index(r, 0),
             self.index(r, self.columnCount() - 1),

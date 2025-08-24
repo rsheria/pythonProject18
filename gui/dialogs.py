@@ -1,5 +1,5 @@
-from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QTextEdit, QDialogButtonBox
-
+from PyQt5.QtWidgets import QDialog, QLabel, QDialogButtonBox, QTextEdit, QVBoxLayout
+from PyQt5.QtCore import Qt
 # ====================================
 # LinksDialog: عرْض الروابط بعد الرفع
 # ====================================
@@ -45,7 +45,7 @@ class LinksDialog(QDialog):
             layout.addWidget(edit)
 
         button_box = QDialogButtonBox(QDialogButtonBox.Close)
-        button_box.rejected.connect(self.reject)
+        button_box.rejected.connect(self.reject, type=Qt.QueuedConnection)
         layout.addWidget(button_box)
 
 

@@ -28,7 +28,7 @@ class UploadWorker(QThread):
     upload_complete = pyqtSignal(int, dict)
     upload_success = pyqtSignal(int)
     upload_error = pyqtSignal(int, str)
-    progress_update = pyqtSignal(OperationStatus)
+    progress_update = pyqtSignal(object)  # OperationStatus
 
     def __init__(
             self,

@@ -139,7 +139,7 @@ class AdvancedBBCodeEditor(QWidget):
         self.setup_ui()
         self.setup_connections()
         self.update_timer = QTimer()
-        self.update_timer.timeout.connect(self.update_preview)
+        self.update_timer.timeout.connect(self.update_preview, type=Qt.QueuedConnection)
         self.update_timer.setSingleShot(True)
         
     def setup_ui(self):
@@ -177,27 +177,27 @@ class AdvancedBBCodeEditor(QWidget):
         bold_action = QAction("B", self)
         bold_action.setToolTip("Bold [b]text[/b]")
         bold_action.setShortcut(QKeySequence.Bold)
-        bold_action.triggered.connect(lambda: self.apply_formatting("b"))
+        bold_action.triggered.connect(lambda: self.apply_formatting("b"), type=Qt.QueuedConnection)
         self.toolbar.addAction(bold_action)
         
         # Italic
         italic_action = QAction("I", self)
         italic_action.setToolTip("Italic [i]text[/i]")
         italic_action.setShortcut(QKeySequence.Italic)
-        italic_action.triggered.connect(lambda: self.apply_formatting("i"))
+        italic_action.triggered.connect(lambda: self.apply_formatting("i"), type=Qt.QueuedConnection)
         self.toolbar.addAction(italic_action)
         
         # Underline
         underline_action = QAction("U", self)
         underline_action.setToolTip("Underline [u]text[/u]")
         underline_action.setShortcut(QKeySequence.Underline)
-        underline_action.triggered.connect(lambda: self.apply_formatting("u"))
+        underline_action.triggered.connect(lambda: self.apply_formatting("u"), type=Qt.QueuedConnection)
         self.toolbar.addAction(underline_action)
         
         # Strikethrough
         strike_action = QAction("S", self)
         strike_action.setToolTip("Strikethrough [s]text[/s]")
-        strike_action.triggered.connect(lambda: self.apply_formatting("s"))
+        strike_action.triggered.connect(lambda: self.apply_formatting("s"), type=Qt.QueuedConnection)
         self.toolbar.addAction(strike_action)
         
         self.toolbar.addSeparator()
@@ -205,7 +205,7 @@ class AdvancedBBCodeEditor(QWidget):
         # Color
         color_action = QAction("Color", self)
         color_action.setToolTip("Text Color")
-        color_action.triggered.connect(self.apply_color)
+        color_action.triggered.connect(self.apply_color, type=Qt.QueuedConnection)
         self.toolbar.addAction(color_action)
         
         # Font size
@@ -213,7 +213,7 @@ class AdvancedBBCodeEditor(QWidget):
         self.size_combo.addItems(["8", "10", "12", "14", "16", "18", "20", "24", "28", "32"])
         self.size_combo.setCurrentText("12")
         self.size_combo.setToolTip("Font Size")
-        self.size_combo.currentTextChanged.connect(self.apply_size)
+        self.size_combo.currentTextChanged.connect(self.apply_size, type=Qt.QueuedConnection)
         self.toolbar.addWidget(QLabel("Size:"))
         self.toolbar.addWidget(self.size_combo)
         
@@ -222,25 +222,25 @@ class AdvancedBBCodeEditor(QWidget):
         # URL
         url_action = QAction("URL", self)
         url_action.setToolTip("Insert Link [url]")
-        url_action.triggered.connect(self.insert_url)
+        url_action.triggered.connect(self.insert_url, type=Qt.QueuedConnection)
         self.toolbar.addAction(url_action)
         
         # Image
         img_action = QAction("IMG", self)
         img_action.setToolTip("Insert Image [img]")
-        img_action.triggered.connect(self.insert_image)
+        img_action.triggered.connect(self.insert_image, type=Qt.QueuedConnection)
         self.toolbar.addAction(img_action)
         
         # Quote
         quote_action = QAction("Quote", self)
         quote_action.setToolTip("Quote [quote]")
-        quote_action.triggered.connect(self.insert_quote)
+        quote_action.triggered.connect(self.insert_quote, type=Qt.QueuedConnection)
         self.toolbar.addAction(quote_action)
         
         # Code
         code_action = QAction("Code", self)
         code_action.setToolTip("Code Block [code]")
-        code_action.triggered.connect(lambda: self.apply_formatting("code"))
+        code_action.triggered.connect(lambda: self.apply_formatting("code"), type=Qt.QueuedConnection)
         self.toolbar.addAction(code_action)
         
         self.toolbar.addSeparator()
@@ -248,13 +248,13 @@ class AdvancedBBCodeEditor(QWidget):
         # List
         list_action = QAction("List", self)
         list_action.setToolTip("Bulleted List")
-        list_action.triggered.connect(self.insert_list)
+        list_action.triggered.connect(self.insert_list, type=Qt.QueuedConnection)
         self.toolbar.addAction(list_action)
         
         # Spoiler
         spoiler_action = QAction("Spoiler", self)
         spoiler_action.setToolTip("Spoiler Tag")
-        spoiler_action.triggered.connect(self.insert_spoiler)
+        spoiler_action.triggered.connect(self.insert_spoiler, type=Qt.QueuedConnection)
         self.toolbar.addAction(spoiler_action)
         
     def create_editor_panel(self):
@@ -284,14 +284,14 @@ class AdvancedBBCodeEditor(QWidget):
         
         # Add refresh button
         refresh_btn = QPushButton("🔄 Refresh Preview")
-        refresh_btn.clicked.connect(self.update_preview)
+        refresh_btn.clicked.connect(self.update_preview, type=Qt.QueuedConnection)
         
         preview_layout.addWidget(refresh_btn)
         preview_layout.addWidget(self.preview)
         
     def setup_connections(self):
         """Setup signal connections"""
-        self.editor.textChanged.connect(self.on_text_changed)
+        self.editor.textChanged.connect(self.on_text_changed, type=Qt.QueuedConnection)
         
     def on_text_changed(self):
         """Handle text changes in editor"""

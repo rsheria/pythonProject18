@@ -1,5 +1,5 @@
 import logging
-from PyQt5.QtCore import pyqtSignal, QMutexLocker
+from PyQt5.QtCore import QMutexLocker, pyqtSignal
 from .worker_thread import WorkerThread
 from datetime import date, timedelta
 

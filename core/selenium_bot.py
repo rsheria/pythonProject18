@@ -32,7 +32,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
-from PyQt5.QtCore import QThread, pyqtSignal, QTimer
+from PyQt5.QtCore import QThread, pyqtSignal, QTimer, Qt
 from utils import sanitize_filename
 import deathbycaptcha
 from uploaders.rapidgator_upload_handler import RapidgatorUploadHandler
@@ -1927,7 +1927,7 @@ class ForumBotSelenium:
     def init_timers(self):
         """Initialize timers for periodic tasks."""
         self.link_check_timer = QTimer()
-        self.link_check_timer.timeout.connect(self.check_rapidgator_links)
+        self.link_check_timer.timeout.connect(self.check_rapidgator_links, type=Qt.QueuedConnection)
         self.link_check_timer.start(3600000)  # Check every hour (3600000 ms)
 
     def upload_file(self, upload_process_url, file_path):

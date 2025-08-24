@@ -36,57 +36,57 @@ class AutoProcessWorker(QRunnable):
         self.jd_client = jd_client
         self.signals = AutoProcessWorkerSignals()
 
-        # ------------------------------------------------------------------
-        def _emit(
-                self,
-                op_type: OpType,
-                stage: OpStage,
-                msg: str,
-                progress: int = 0,
-                host: str = "-",
-                speed: float = 0.0,
-                eta: float = 0.0,
-                errors: int = 0,
-        ) -> None:
-            """Helper to emit a progress update."""
+    # ------------------------------------------------------------------
+    def _emit(
+        self,
+        op_type: OpType,
+        stage: OpStage,
+        msg: str,
+        progress: int = 0,
+        host: str = "-",
+        speed: float = 0.0,
+        eta: float = 0.0,
+        errors: int = 0,
+    ) -> None:
+        """Helper to emit a progress update."""
 
-            op = OperationStatus(
-                section=self.snapshot.category,
-                item=self.snapshot.title,
-                op_type=op_type,
-                stage=stage,
-                message=msg,
-                progress=progress,
-                host=host,
-                speed=speed,
-                eta=eta,
-                errors=errors,
-            )
-            self.signals.progress_update.emit(op)
+        op = OperationStatus(
+            section=self.snapshot.category,
+            item=self.snapshot.title,
+            op_type=op_type,
+            stage=stage,
+            message=msg,
+            progress=progress,
+            host=host,
+            speed=speed,
+            eta=eta,
+            errors=errors,
+        )
+        self.signals.progress_update.emit(op)
 
-        # ------------------------------------------------------------------
-        def run(self) -> None:  # pragma: no cover - worker logic not unit tested
-            logging.info("AutoProcessWorker starting job %s", self.job.job_id)
+    # ------------------------------------------------------------------
+    def run(self) -> None:  # pragma: no cover - worker logic not unit tested
+        logging.info("AutoProcessWorker starting job %s", self.job.job_id)
 
         try:
             # Download stage -------------------------------------------------
             self._emit(OpType.DOWNLOAD, OpStage.RUNNING, "Downloading")
-            try:
-                if hasattr(self.jd_client, "download"):
-                    self.jd_client.download(self.snapshot.url, self.snapshot.working_dir)
-                else:
-                    time.sleep(0.1)  # simulate work
-            except Exception as e:
-                raise RuntimeError(f"download failed: {e}")
+            if hasattr(self.jd_client, "download"):
+                self.jd_client.download(self.snapshot.url, self.snapshot.working_dir)
+            else:
+                time.sleep(0.1)  # simulate work
 
             # Upload stage ---------------------------------------------------
-            for host in ["RG", "DDL", "KF", "NF", "RG_BAK"]:
+            hosts = ["RG", "DDL", "KF", "NF", "RG_BAK"]
+            for host in hosts:
                 self._emit(OpType.UPLOAD, OpStage.RUNNING, f"Uploading to {host}", host=host)
                 time.sleep(0.05)
 
             # Post stage -----------------------------------------------------
             self._emit(OpType.POST, OpStage.RUNNING, "Posting")
-            payload = {"uploaded_links": {}, "keeplinks_url": ""}
+            uploaded_links = {h: f"https://{h.lower()}.example/{self.snapshot.thread_id}" for h in hosts}
+            keeplinks_url = f"https://keeplinks.example/{self.snapshot.thread_id}"
+            payload = {"uploaded_links": uploaded_links, "keeplinks_url": keeplinks_url}
             self.signals.result_ready.emit(self.job.job_id, payload)
             self._emit(OpType.POST, OpStage.FINISHED, "Finished")
             self.signals.finished.emit(self.job.job_id)
