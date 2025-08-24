@@ -68,8 +68,9 @@ from core.user_manager import get_user_manager
 from dotenv import find_dotenv, set_key
 from gui.advanced_bbcode_editor import AdvancedBBCodeEditor
 from gui.utils.responsive_manager import ResponsiveManager
-from models.job_model import AutoProcessJob
+from models.job_model import AutoProcessJob, SelectedRowSnapshot
 from models.operation_status import OperationStatus, OpStage, OpType
+from workers.auto_process_worker import AutoProcessWorker
 from utils import sanitize_filename
 from utils.paths import get_data_folder
 from utils.host_priority import (
@@ -4447,38 +4448,31 @@ class ForumBotGUI(QMainWindow):
             self.process_threads[category_name][thread_title]['row_status'] = 'replied'
             self.save_process_threads_data()  # so it persists on disk
 
-    def start_download_operation(self):
+    def start_download_operation(self, rows: set[int] | None = None):
         """
         🔒 Thread-safe download session management
-        Start the download process with progress tracking
+        Start the download process with progress tracking (independent from selection/filter).
         """
-        # 🔒 Prevent concurrent download sessions - CRITICAL FOR STABILITY
-        if hasattr(self, '_download_in_progress') and self._download_in_progress:
-            ui_notifier.warn(
-                "Download In Progress",
-                "⚠️ Another download is already running!\n\nPlease wait for the current download to complete or cancel it first.",
-            )
+        if getattr(self, '_download_in_progress', False):
+            ui_notifier.warn("Download In Progress",
+                             "⚠️ Another download is already running!\n\nPlease wait or cancel it first.")
             return
 
-        # 🔒 Set download lock
         self._download_in_progress = True
-
         try:
-            selected_rows = set(index.row() for index in self.process_threads_table.selectedIndexes())
+            selected_rows = set(rows) if rows is not None else set(
+                idx.row() for idx in self.process_threads_table.selectedIndexes()
+            )
             if not selected_rows:
                 self.statusBar().showMessage("Please select at least one thread to download")
-                # 🔓 Release lock if no rows selected
                 self._download_in_progress = False
                 return
 
-            # 📋 Track selected threads for status update after completion
             self._current_download_threads = []
             for row in selected_rows:
                 try:
-                    # Get thread info from table
-                    title_item = self.process_threads_table.item(row, 0)  # Thread Title column
-                    category_item = self.process_threads_table.item(row, 1)  # Category column
-
+                    title_item = self.process_threads_table.item(row, 0)
+                    category_item = self.process_threads_table.item(row, 1)
                     if title_item and category_item:
                         thread_title = title_item.text()
                         category_name = category_item.text()
@@ -4487,19 +4481,15 @@ class ForumBotGUI(QMainWindow):
                 except Exception as e:
                     logging.warning(f"Could not track thread for row {row}: {e}")
 
-            logging.info(f"📋 Tracking {len(self._current_download_threads)} threads for download completion")
-
-            # Cleanup any existing download worker
-            if hasattr(self, 'download_worker') and self.download_worker:
+            if getattr(self, 'download_worker', None):
                 try:
                     self.download_worker.cancel_downloads()
                     QApplication.processEvents()
                     self.download_worker.deleteLater()
-                    self.download_worker = None
                 except Exception as e:
                     logging.warning(f"⚠️ Error cleaning up existing download worker: {e}")
+                self.download_worker = None
 
-            # Create the worker
             self.status_widget.cancel_event.clear()
             self.download_worker = DownloadWorker(
                 bot=self.bot,
@@ -4510,26 +4500,17 @@ class ForumBotGUI(QMainWindow):
             )
             self.register_worker(self.download_worker)
 
+            self.download_worker.status_update.connect(self.update_download_status, Qt.QueuedConnection)
+            self.download_worker.operation_complete.connect(self.on_download_complete, Qt.QueuedConnection)
+            self.download_worker.file_progress.connect(self.on_file_progress_update, Qt.QueuedConnection)
+            self.download_worker.download_success.connect(self.on_download_row_success, Qt.QueuedConnection)
+            self.download_worker.download_error.connect(self.on_download_row_error, Qt.QueuedConnection)
 
-            # Connect status and completion signals
-            self.download_worker.status_update.connect(self.update_download_status)
-            self.download_worker.operation_complete.connect(self.on_download_complete)
-            self.download_worker.file_progress.connect(self.on_file_progress_update)
-            self.download_worker.download_success.connect(self.on_download_row_success)
-            self.download_worker.download_error.connect(self.on_download_row_error)
-
-            # Start the worker
             self.download_worker.start()
-            self.statusBar().showMessage("Starting downloads...")
-
+            self.statusBar().showMessage("Starting downloads.")
         except Exception as e:
-            # 😱 Critical error during download setup
-            logging.error(f"⚠️ Critical error in download setup: {e}")
-            ui_notifier.error(
-                "Download Setup Error",
-                f"Failed to start download operation:\n{str(e)}",
-            )
-            # 🔓 Release lock on critical error
+            logging.error(f"⚠️ Critical error in download setup: {e}", exc_info=True)
+            ui_notifier.error("Download Setup Error", f"Failed to start download operation:\n{str(e)}")
             self._download_in_progress = False
 
     def pause_downloads(self):
@@ -5222,78 +5203,96 @@ class ForumBotGUI(QMainWindow):
         except Exception as e:
             logging.error("apply_auto_process_result failed: %s", e, exc_info=True)
 
+    def _collect_selected_snapshots(self):
+        """Gather immutable snapshots of selected rows in Process Threads table."""
+        view = getattr(self, "process_threads_table", None)
+        if view is None:
+            return []
+        selected_rows = sorted({idx.row() for idx in view.selectedIndexes()})
+        snapshots = []
+        for row in selected_rows:
+            title_item = view.item(row, 0)
+            category_item = view.item(row, 1)
+            thread_id_item = view.item(row, 2)
+            if not (title_item and category_item and thread_id_item):
+                continue
+            title = title_item.text()
+            category = category_item.text()
+            thread_id = thread_id_item.text()
+            url = title_item.data(Qt.UserRole + 2) or ""
+            work_dir = self.get_sanitized_path(category, thread_id)
+            snapshots.append(
+                SelectedRowSnapshot(
+                    thread_id=thread_id,
+                    title=title,
+                    url=url,
+                    category=category,
+                    working_dir=work_dir,
+                )
+            )
+        return snapshots
     def start_auto_process_selected(self):
-        """Start Auto‑Process pipeline for selected threads."""
-        selected_rows = sorted(
-            set(index.row() for index in self.process_threads_table.selectedIndexes())
-        )
-        if not selected_rows:
+        """Start Auto‑Process pipeline for currently selected threads."""
+        snapshots = self._collect_selected_snapshots()
+        if not snapshots:
             ui_notifier.warn("Warning", "Please select at least one thread.")
             return
 
-        for row in selected_rows:
-            title = self.process_threads_table.item(row, 0).text()
-            category = self.process_threads_table.item(row, 1).text()
-            thread_id = self.process_threads_table.item(row, 2).text()
-            url = self.process_threads_table.item(row, 0).data(Qt.UserRole + 2)
-            job_id = f"{thread_id}-{int(time.time())}"
+        email, password, device_name, app_key = self._get_myjd_credentials()
+        jd_client = JDClient(
+            email=email,
+            password=password,
+            device_name=device_name,
+            app_key=app_key,
+        )
+        pool = QThreadPool.globalInstance()
+
+        for snap in snapshots:
+            job_id = f"{snap.thread_id}-{int(time.time())}"
             job = AutoProcessJob(
                 job_id=job_id,
-                thread_id=thread_id,
-                category=category,
-                title=title,
-                url=url,
+                thread_id=snap.thread_id,
+                title=snap.title,
+                url=snap.url,
+                category=snap.category,
+                download_folder=snap.working_dir,
             )
             self.job_manager.add_job(job)
 
-            def download_cb(job=job):
-                job.step = "download"
-                if not self.bot.auto_process_job(job):
-                    return False
-                job.step = "modify"
-                return self.bot.auto_process_job(job)
-
-            def process_cb():
-                return True
-
-            def upload_cb(job=job):
-                job.step = "upload"
-                if not self.bot.auto_process_job(job):
-                    return False
-                job.step = "keeplinks"
-                return self.bot.auto_process_job(job)
-
-            def template_cb(job=job):
-                job.step = "template"
-                ok = self.bot.auto_process_job(job)
-                if ok:
-                    try:
-                        self.apply_auto_process_result(job)
-                    except Exception:
-                        pass
-                return ok
-
-            work_dir = self.get_sanitized_path(category, thread_id)
-            for op in (OpType.DOWNLOAD, OpType.UPLOAD, OpType.POST):
-                self.orch.progress_update.emit(
-                    OperationStatus(
-                        section=category,
-                        item=title,
-                        op_type=op,
-                        stage=OpStage.QUEUED,
-                    )
-                )
-            self.orch.enqueue(
-                topic_id=thread_id,
-                section=category,
-                item=title,
-                download_cb=download_cb,
-                process_cb=process_cb,
-                upload_cb=upload_cb,
-                template_cb=template_cb,
-                working_dir=work_dir,
+            worker = AutoProcessWorker(job, snap, jd_client)
+            worker.signals.progress_update.connect(
+                self.status_widget.on_progress_update, Qt.QueuedConnection
+            )
+            worker.signals.result_ready.connect(
+                self.on_auto_process_result, Qt.QueuedConnection
+            )
+            worker.signals.error.connect(
+                self.on_auto_process_error, Qt.QueuedConnection
             )
 
+            worker.signals.finished.connect(
+                self.on_auto_process_finished, Qt.QueuedConnection
+            )
+            pool.start(worker)
+
+    def on_auto_process_result(self, job_id: str, payload: dict) -> None:
+        job = self.job_manager.jobs.get(job_id)
+        if not job:
+            return
+        job.uploaded_links = payload.get("uploaded_links", {})
+        job.keeplinks_url = payload.get("keeplinks_url", "")
+        job.step = "done"
+        job.status = "posted"
+        self.job_manager.update_job(job)
+
+    def on_auto_process_error(self, job_id: str, msg: str) -> None:
+        job = self.job_manager.jobs.get(job_id)
+        if job:
+            job.status = "error"
+            self.job_manager.update_job(job)
+
+    def on_auto_process_finished(self, job_id: str) -> None:
+        pass
     def start_auto_process(self, thread_ids):
         """Public API to start Auto‑Process by thread ids."""
         rows = []

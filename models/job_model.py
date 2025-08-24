@@ -25,3 +25,13 @@ class AutoProcessJob:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AutoProcessJob":
         return cls(**data)
+
+@dataclass(frozen=True)
+class SelectedRowSnapshot:
+        """Immutable snapshot of a selected row from the threads table."""
+
+        thread_id: str
+        title: str
+        url: str
+        category: str
+        working_dir: str

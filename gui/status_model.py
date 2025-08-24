@@ -117,15 +117,21 @@ class StatusTableModel(QAbstractTableModel):
         return f"{m:d}:{s:02d}"
     def upsert(self, op: OperationStatus) -> None:
         key = (op.section, op.item, op.op_type, op.host)
-        for row, existing in enumerate(self._rows):
+        for r, existing in enumerate(self._rows):
             if (existing.section, existing.item, existing.op_type, existing.host) == key:
-                self._rows[row] = op
-                top_left = self.index(row, 0)
-                bottom_right = self.index(row, self.columnCount() - 1)
+                self._rows[r] = op
                 self.dataChanged.emit(
-                    top_left, bottom_right, [Qt.DisplayRole, Qt.BackgroundRole]
+                    self.index(r, 0),
+                    self.index(r, self.columnCount() - 1),
+                    [],
                 )
                 return
-        self.beginInsertRows(QModelIndex(), len(self._rows), len(self._rows))
+        r = len(self._rows)
+        self.beginInsertRows(QModelIndex(), r, r)
         self._rows.append(op)
         self.endInsertRows()
+        self.dataChanged.emit(
+            self.index(r, 0),
+            self.index(r, self.columnCount() - 1),
+            [],
+        )

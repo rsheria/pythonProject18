@@ -3,7 +3,16 @@ import logging
 import os
 import threading
 import time
-from PyQt5.QtCore import QTimer, Qt, QSize, QEvent, QObject, pyqtSignal, QItemSelectionModel
+from PyQt5.QtCore import (
+    QTimer,
+    Qt,
+    QSize,
+    QEvent,
+    QObject,
+    pyqtSignal,
+    QItemSelectionModel,
+    pyqtSlot,
+)
 from PyQt5.QtGui import QColor, QPalette, QBrush, QKeySequence
 
 from PyQt5.QtWidgets import (
@@ -28,8 +37,7 @@ from PyQt5.QtWidgets import (
 from core.user_manager import get_user_manager
 from integrations.jd_client import hard_cancel
 from models.operation_status import OperationStatus, OpStage, OpType
-
-
+from .status_model import StatusTableModel
 class ProgressBarDelegate(QStyledItemDelegate):
     """ProgressBar يحترم الـPalette الحالية ويرفع التباين تلقائيًا فى الدارك."""
     @staticmethod
@@ -158,6 +166,7 @@ class StatusWidget(QWidget):
         layout.addLayout(filter_layout)
 
         self.table = QTableWidget(self)
+        self.model = StatusTableModel()
         headers = [
             "Section", "Item", "Stage", "Message", "Speed", "ETA",
             "Progress", "RG", "DDL", "KF", "NF", "RG_BAK",
@@ -308,6 +317,10 @@ class StatusWidget(QWidget):
             except Exception:
                 pass
 
+    @pyqtSlot(object)
+    def on_progress_update(self, op: OperationStatus) -> None:
+        """Update model with progress from background workers."""
+        self.model.upsert(op)
     # ------------------------------------------------------------------
     def _clear_filters(self) -> None:
         """Clear all filter widgets and reapply."""
