@@ -2058,11 +2058,13 @@ class ForumBotGUI(QMainWindow):
         )
         self.register_worker(self.current_upload_worker)
         self.current_upload_worker.upload_complete.connect(
-            lambda r, urls: self.on_reupload_upload_complete(thread_title, thread_info, r, urls)
+            lambda r, urls: self.on_reupload_upload_complete(thread_title, thread_info, r, urls),
+            Qt.QueuedConnection,
         )
         self.current_upload_worker.host_progress.connect(
             lambda r, host_idx, prog, status, cur, tot: self.on_reupload_host_progress(r, host_idx, prog, status, cur,
-                                                                                       tot)
+                                                                                       tot),
+            Qt.QueuedConnection,
         )
 
         self.current_upload_worker.start()
@@ -5026,33 +5028,21 @@ class ForumBotGUI(QMainWindow):
 
     def handle_upload_complete(self, row, urls_dict):
         try:
-            # If an error occurred, optionally retry automatically and exit
-            if isinstance(urls_dict, dict) and 'error' in urls_dict:
-                if getattr(self, 'auto_retry_mode', False):
-                    worker_retry = getattr(self, 'upload_workers', {}).get(row)
+            if isinstance(urls_dict, dict) and "error" in urls_dict:
+                if getattr(self, "auto_retry_mode", False):
+                    worker_retry = getattr(self, "upload_workers", {}).get(row)
                     if worker_retry:
                         QTimer.singleShot(10000, lambda w=worker_retry, r=row: w.retry_failed_uploads(r))
                 return
 
-            # --------------------------------------------------------------
-            # Normalize and resolve the thread ID from the payload
-            # --------------------------------------------------------------
-            tid = ''
-            if isinstance(urls_dict, dict):
-                try:
-                    tid = str(urls_dict.get('thread_id', '')).strip()
-                except Exception:
-                    tid = ''
+            tid = str(urls_dict.get("thread_id", "")) if isinstance(urls_dict, dict) else ""
 
-            # Attempt to find the associated worker using thread ID mapping
             worker = None
-            if tid and hasattr(self, 'upload_workers_by_tid'):
+            if tid and hasattr(self, "upload_workers_by_tid"):
                 worker = self.upload_workers_by_tid.get(tid)
             if not worker:
-                # Fallback to using the worker keyed by the original row
-                worker = getattr(self, 'upload_workers', {}).get(row)
+                worker = getattr(self, "upload_workers", {}).get(row)
 
-            # Update meta information for any files belonging to this worker
             if worker:
                 meta = {
                     "row": row,
@@ -5064,120 +5054,83 @@ class ForumBotGUI(QMainWindow):
                     "upload_results": worker.upload_results,
                     "keeplinks_sent": worker.keeplinks_sent,
                 }
-                for f in getattr(worker, 'files', []):
+                for f in getattr(worker, "files", []):
                     key = (worker.section, f.name, OpType.UPLOAD.name)
                     self.status_widget.update_upload_meta(key, meta)
 
-            # Locate the real row in the table by scanning the Thread ID column.
-            # If not found (due to sorting/filtering), fall back to the provided
-            # row index but log a warning for visibility.
-            current_row = self._row_for_tid(tid) if tid else -1
-            if current_row < 0:
-                logging.warning(
-                    "Thread ID '%s' not found; falling back to row %s", tid, row
-                )
+            if tid:
+                current_row = self._row_for_tid(tid)
+                if current_row < 0:
+                    logging.warning("Thread ID '%s' not found; skipping update", tid)
+                    return
+            else:
                 current_row = row
 
-            # Determine the thread title and category name based on the resolved row
-            thread_title = None
-            category_name = None
-            try:
-                t_item = self.process_threads_table.item(current_row, 0)
-                c_item = self.process_threads_table.item(current_row, 1)
-                if t_item:
-                    thread_title = t_item.text()
-                if c_item:
-                    category_name = c_item.text()
-            except Exception:
-                pass
-            # If either identifier is missing, we cannot proceed with update
-            if not category_name or not thread_title:
+            t_item = self.process_threads_table.item(current_row, 0)
+            c_item = self.process_threads_table.item(current_row, 1)
+            if not t_item or not c_item:
+                return
+            thread_title = t_item.text()
+            category_name = c_item.text()
+            thread_info = self.process_threads.get(category_name, {}).get(thread_title)
+            if not thread_info:
+                logging.warning("Thread '%s' not found in category '%s' after upload.", thread_title, category_name)
                 return
 
-            # Ensure the thread exists in our data structure
-            if category_name not in self.process_threads or thread_title not in self.process_threads[category_name]:
-                logging.warning(f"Thread '{thread_title}' not found in category '{category_name}' after upload.")
-                return
-
-            thread_info = self.process_threads[category_name][thread_title]
-
-            # ------------------------------------------------------------------
-            # Extract and normalise host links from ``urls_dict`` using the
-            # ``_as_list`` helper.  Keeplinks is converted to a single string.
-            rg_links = []
+            rg_links = self._as_list(urls_dict.get("rapidgator")) if isinstance(urls_dict, dict) else []
             rg_backup_links = []
-            nf_links = []
-            dd_links = []
-            kf_links = []
-            klinks_str = ""
             if isinstance(urls_dict, dict):
-                rg_links = self._as_list(urls_dict.get('rapidgator'))
                 rg_backup_links = self._as_list(
-                    urls_dict.get('rapidgator_backup') or urls_dict.get('rapidgator-backup')
+                    urls_dict.get("rapidgator_backup")
+                    or urls_dict.get("rapidgator_bak")
+                    or urls_dict.get("rapidgator-backup")
                 )
-                nf_links = self._as_list(urls_dict.get('nitroflare'))
-                dd_links = self._as_list(urls_dict.get('ddownload'))
-                kf_links = self._as_list(urls_dict.get('katfile'))
-                klinks_list = self._as_list(urls_dict.get('keeplinks'))
-                if klinks_list:
-                    klinks_str = "\n".join([str(x) for x in klinks_list])
+                keeplink = str(urls_dict.get("keeplinks", "")) if isinstance(urls_dict, dict) else ""
 
-            # Consolidated links mapping stored on ``process_threads``
-            new_links = {
-                'rapidgator.net': rg_links,
-                'nitroflare.com': nf_links,
-                'ddownload.com': dd_links,
-                'katfile.com': kf_links,
-                'rapidgator-backup': rg_backup_links,
-                'keeplinks': klinks_str,
-            }
-
-            versions = thread_info.get('versions', [])
-            if versions:
-                versions[-1]['links'] = new_links
-                versions[-1]['upload_status'] = True
-                versions[-1]['thread_id'] = tid
-            thread_info['links'] = new_links
-            thread_info['upload_status'] = True
-            thread_info['thread_id'] = tid
-
-            # Update table cells for Rapidgator, RG_BAK and Keeplinks columns
-            try:
-                self.process_threads_table.item(current_row, 3).setText("\n".join(rg_links))
-                self.process_threads_table.item(current_row, 4).setText("\n".join(rg_backup_links))
-                self.process_threads_table.item(current_row, 5).setText(klinks_str)
                 model = self.process_threads_table.model()
-                top_left = model.index(current_row, 3)
-                bottom_right = model.index(current_row, 5)
-                model.dataChanged.emit(top_left, bottom_right)
-                self.process_threads_table.item(current_row, 5).setText(keeplinks_str)
-            except Exception:
-                pass
+                self.process_threads_table.item(current_row, 3).setText(rg_links[0] if rg_links else "")
+                model.dataChanged.emit(model.index(current_row, 3), model.index(current_row, 3))
+                self.process_threads_table.item(current_row, 4).setText(
+                    "\n".join(rg_backup_links) if rg_backup_links else "")
+                model.dataChanged.emit(model.index(current_row, 4), model.index(current_row, 4))
+                self.process_threads_table.item(current_row, 5).setText(keeplink if keeplink else "")
+                model.dataChanged.emit(model.index(current_row, 5), model.index(current_row, 5))
 
-            # Persist changes and refresh status
+                links = thread_info.get("links", {})
+                links["rapidgator.net"] = rg_links
+                if rg_backup_links:
+                    links["rapidgator-backup"] = rg_backup_links
+                else:
+                    links.pop("rapidgator-backup", None)
+                if keeplink:
+                    links["keeplinks"] = keeplink
+                else:
+                    links.pop("keeplinks", None)
+                thread_info["links"] = links
+                thread_info["upload_status"] = True
+                thread_info["thread_id"] = tid
+
             self.save_process_threads_data()
 
             self.mark_upload_complete(category_name, thread_title)
 
-            # Backup threads update
             if rg_backup_links:
                 backup_info = self.backup_threads.get(thread_title, {}) or {}
-                backup_info['thread_id'] = tid
-                backup_info['rapidgator_links'] = rg_links
-                backup_info['rapidgator_backup_links'] = rg_backup_links
-                backup_info['keeplinks_link'] = klinks_str
-                backup_info['katfile_links'] = kf_links
+                backup_info["thread_id"] = tid
+                backup_info["rapidgator_links"] = rg_links
+                backup_info["rapidgator_backup_links"] = rg_backup_links
+                backup_info["keeplinks_link"] = keeplink
                 self.backup_threads[thread_title] = backup_info
                 self.save_backup_threads_data()
                 self.populate_backup_threads_table()
-            logging.info(
-                "Upload complete tid=%s row=%s cols updated RG:%d RG_BAK:%d Keeplinks:%s",
-                tid,
-                current_row,
-                len(rg_links),
-                len(rg_backup_links),
-                "yes" if klinks_str else "no",
-            )
+            updated_cols = []
+            if rg_links:
+                updated_cols.append("RG")
+            if rg_backup_links:
+                updated_cols.append("RG_BAK")
+            if keeplink:
+                updated_cols.append("Keeplinks")
+            logging.info("POPULATE-LINKS tid=%s row=%s updated=%s", tid, current_row, updated_cols)
         except Exception as e:
             logging.error(f"Error in handle_upload_complete: {e}", exc_info=True)
             ui_notifier.error("Upload Error", str(e))

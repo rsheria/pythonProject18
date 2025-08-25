@@ -192,6 +192,13 @@ class UploadWorker(QThread):
                 return
 
             self._emit_final_statuses(self.row)
+            links_payload = {
+                "rapidgator": final.get("rapidgator", []),
+                "ddownload": final.get("ddownload", []),
+                "katfile": final.get("katfile", []),
+                "nitroflare": final.get("nitroflare", []),
+                "rapidgator_bak": final.get("rapidgator_backup", []),
+            }
             status = OperationStatus(
                 section=self.section,
                 item=self.files[0].name if self.files else "",
@@ -200,8 +207,8 @@ class UploadWorker(QThread):
                 message="Complete",
                 progress=100,
                 thread_id=final.get("thread_id", ""),
-                links=final.get("links", {}),
-                keeplinks_url=final.get("keeplinks_url", ""),
+                links=links_payload,
+                keeplinks_url=final.get("keeplinks", ""),
             )
             self.progress_update.emit(status)
             self.upload_success.emit(self.row)
@@ -404,9 +411,13 @@ class UploadWorker(QThread):
             self.keeplinks_sent = True
 
         return {
-            "thread_id": getattr(self, "thread_id", ""),
-            "links": links,
-            "keeplinks_url": keeplink,
+            "thread_id": str(getattr(self, "thread_id", "")),
+            "rapidgator": links["rapidgator"],
+            "ddownload": links["ddownload"],
+            "katfile": links["katfile"],
+            "nitroflare": links["nitroflare"],
+            "rapidgator_backup": links["rapidgator_bak"],
+            "keeplinks": keeplink,
         }
 
     def _emit_final_statuses(self, row: int) -> None:
@@ -463,6 +474,13 @@ class UploadWorker(QThread):
                 final = self._prepare_final_urls()
                 self._emit_final_statuses(row)
                 if "error" not in final:
+                    links_payload = {
+                        "rapidgator": final.get("rapidgator", []),
+                        "ddownload": final.get("ddownload", []),
+                        "katfile": final.get("katfile", []),
+                        "nitroflare": final.get("nitroflare", []),
+                        "rapidgator_bak": final.get("rapidgator_backup", []),
+                    }
                     status = OperationStatus(
                         section=self.section,
                         item=self.files[0].name if self.files else "",
@@ -471,8 +489,8 @@ class UploadWorker(QThread):
                         message="Complete",
                         progress=100,
                         thread_id=final.get("thread_id", ""),
-                        links=final.get("links", {}),
-                        keeplinks_url=final.get("keeplinks_url", ""),
+                        links=links_payload,
+                        keeplinks_url=final.get("keeplinks", ""),
                     )
                     self.progress_update.emit(status)
                 self.upload_complete.emit(row, final)
@@ -507,6 +525,13 @@ class UploadWorker(QThread):
             final = self._prepare_final_urls()
             self._emit_final_statuses(row)
             if "error" not in final:
+                links_payload = {
+                    "rapidgator": final.get("rapidgator", []),
+                    "ddownload": final.get("ddownload", []),
+                    "katfile": final.get("katfile", []),
+                    "nitroflare": final.get("nitroflare", []),
+                    "rapidgator_bak": final.get("rapidgator_backup", []),
+                }
                 status = OperationStatus(
                     section=self.section,
                     item=self.files[0].name if self.files else "",
@@ -515,8 +540,8 @@ class UploadWorker(QThread):
                     message="Complete",
                     progress=100,
                     thread_id=final.get("thread_id", ""),
-                    links=final.get("links", {}),
-                    keeplinks_url=final.get("keeplinks_url", ""),
+                    links=links_payload,
+                    keeplinks_url=final.get("keeplinks", ""),
                 )
                 self.progress_update.emit(status)
             self.upload_complete.emit(row, final)
@@ -535,6 +560,13 @@ class UploadWorker(QThread):
                 final = self._prepare_final_urls()
                 self._emit_final_statuses(row)
                 if "error" not in final:
+                    links_payload = {
+                        "rapidgator": final.get("rapidgator", []),
+                        "ddownload": final.get("ddownload", []),
+                        "katfile": final.get("katfile", []),
+                        "nitroflare": final.get("nitroflare", []),
+                        "rapidgator_bak": final.get("rapidgator_backup", []),
+                    }
                     status = OperationStatus(
                         section=self.section,
                         item=self.files[0].name if self.files else "",
@@ -543,8 +575,8 @@ class UploadWorker(QThread):
                         message="Complete",
                         progress=100,
                         thread_id=final.get("thread_id", ""),
-                        links=final.get("links", {}),
-                        keeplinks_url=final.get("keeplinks_url", ""),
+                        links=links_payload,
+                        keeplinks_url=final.get("keeplinks", ""),
                     )
                     self.progress_update.emit(status)
                 self.upload_complete.emit(row, final)
@@ -576,6 +608,13 @@ class UploadWorker(QThread):
             final = self._prepare_final_urls()
             self._emit_final_statuses(row)
             if "error" not in final:
+                links_payload = {
+                    "rapidgator": final.get("rapidgator", []),
+                    "ddownload": final.get("ddownload", []),
+                    "katfile": final.get("katfile", []),
+                    "nitroflare": final.get("nitroflare", []),
+                    "rapidgator_bak": final.get("rapidgator_backup", []),
+                }
                 status = OperationStatus(
                     section=self.section,
                     item=self.files[0].name if self.files else "",
@@ -584,8 +623,8 @@ class UploadWorker(QThread):
                     message="Complete",
                     progress=100,
                     thread_id=final.get("thread_id", ""),
-                    links=final.get("links", {}),
-                    keeplinks_url=final.get("keeplinks_url", ""),
+                    links=links_payload,
+                    keeplinks_url=final.get("keeplinks", ""),
                 )
                 self.progress_update.emit(status)
             self.upload_complete.emit(row, final)
@@ -624,6 +663,13 @@ class UploadWorker(QThread):
             final = self._prepare_final_urls()
             self._emit_final_statuses(row)
             if "error" not in final:
+                links_payload = {
+                    "rapidgator": final.get("rapidgator", []),
+                    "ddownload": final.get("ddownload", []),
+                    "katfile": final.get("katfile", []),
+                    "nitroflare": final.get("nitroflare", []),
+                    "rapidgator_bak": final.get("rapidgator_backup", []),
+                }
                 status = OperationStatus(
                     section=self.section,
                     item=self.files[0].name if self.files else "",
@@ -632,8 +678,8 @@ class UploadWorker(QThread):
                     message="Complete",
                     progress=100,
                     thread_id=final.get("thread_id", ""),
-                    links=final.get("links", {}),
-                    keeplinks_url=final.get("keeplinks_url", ""),
+                    links=links_payload,
+                    keeplinks_url=final.get("keeplinks", ""),
                 )
                 self.progress_update.emit(status)
             self.upload_complete.emit(row, final)

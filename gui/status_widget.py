@@ -1318,7 +1318,8 @@ class StatusWidget(QWidget):
         if row is None:
             row = self._row_by_key.get(key)
         if row is None and st.links:
-            log.info("POPULATE-LINKS tid=%s row=? updated=[] keeplinks=%s", tid, st.keeplinks_url)
+            updated = ["Keeplinks"] if st.keeplinks_url else []
+            log.info("POPULATE-LINKS tid=%s row=? updated=%s", tid, updated)
             return
         if row is None:
             row = self.table.rowCount()
@@ -1419,14 +1420,11 @@ class StatusWidget(QWidget):
                     idx = model.index(row, col)
                     model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
                     updated_hosts.append(header)
-            if updated_hosts:
-                log.info(
-                    "POPULATE-LINKS tid=%s row=%s updated=%s keeplinks=%s",
-                    tid,
-                    row,
-                    updated_hosts,
-                    st.keeplinks_url or "",
-                )
+            if updated_hosts or st.keeplinks_url:
+                log_hosts = [h for h in updated_hosts if h in ("RG", "RG_BAK")]
+                if st.keeplinks_url:
+                    log_hosts.append("Keeplinks")
+                log.info("POPULATE-LINKS tid=%s row=%s updated=%s", tid, row, log_hosts)
                 link_col = self._col_map.get("Links")
                 if link_col is not None:
                     rg = _normalize_links(st.links.get("rapidgator"))
