@@ -137,6 +137,69 @@ class JDClient:
             log.exception("JD.connect failed: %s", e)
             return False
 
+    def is_available(self) -> bool:
+        """هل في جهاز متصل صالح للاستخدام؟"""
+        try:
+            return self.device is not None
+        except Exception:
+            return False
+
+    def post(self, path: str, payload=None, _retry: bool = False):
+        """
+        استدعاء موحّد لواجهات My.JDownloader مع إعادة مصادقة تلقائية لو التوكن باظ.
+        - path: ممكن يبدأ بـ "/" أو بدونه.
+        - payload: list أو None.
+        - يعيد المحاولة مرة واحدة فقط بعد re-login.
+        """
+        if not path:
+            raise ValueError("Empty JD API path")
+        ep = path if path.startswith("/") else f"/{path}"
+        body = [] if payload is None else payload
+
+        try:
+            # myjdapi: device.action(endpoint, [payload])
+            return self.device.action(ep, body)
+        except Exception as e:
+            msg = str(e) or ""
+            # حالات الـ 403 / TOKEN_INVALID
+            if (("TOKEN_INVALID" in msg) or ("403" in msg)) and not _retry:
+                log.warning("MYJD token invalid; attempting re-login…")
+                # حاول إعادة الاتصال بنفس الإعدادات
+                try:
+                    self.api.disconnect()
+                except Exception:
+                    pass
+                try:
+                    self.api.set_app_key(self.app_key)
+                except Exception:
+                    pass
+                try:
+                    self.api.connect(self.email, self.password)
+                    try:
+                        self.api.update_devices()
+                    except Exception:
+                        pass
+                    sel = None
+                    if self.device_name:
+                        try:
+                            sel = self.api.get_device(self.device_name)
+                        except Exception:
+                            sel = None
+                    if not sel:
+                        devices = getattr(self.api, "devices", {}) or {}
+                        if devices:
+                            sel = list(devices.values())[0]
+                    if not sel:
+                        raise RuntimeError("No JD device after re-login")
+                    self.device = sel
+                    log.info("MYJD re-login succeeded; retrying request…")
+                    return self.post(path, payload, _retry=True)
+                except Exception as re:
+                    log.error("MYJD re-login failed: %s", re, exc_info=True)
+                    raise
+            # أى خطأ تانى: سيبه للـcaller
+            raise
+
     def add_links_to_linkgrabber(self, urls: List[str], start_check: bool = True) -> bool:
         try:
             if not self.device:

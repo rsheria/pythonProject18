@@ -183,7 +183,7 @@ class UploadWorker(QThread):
                 completed += 1
 
 
-            # تحضير القاموس النهائي مع Keeplinks
+            # Prepare final URLs dict using canonical schema
             final = self._prepare_final_urls()
 
             if "error" in final:
@@ -191,13 +191,22 @@ class UploadWorker(QThread):
                 self.upload_complete.emit(self.row, final)
                 return
 
+            # Update host progress/finish statuses
             self._emit_final_statuses(self.row)
+
+            # Build links payload for OperationStatus using canonical keys
+            def _get_urls(key: str) -> list:
+                val = final.get(key)
+                if isinstance(val, dict):
+                    return val.get("urls", [])
+                return val or []
+
             links_payload = {
-                "rapidgator": final.get("rapidgator", []),
-                "ddownload": final.get("ddownload", []),
-                "katfile": final.get("katfile", []),
-                "nitroflare": final.get("nitroflare", []),
-                "rapidgator_bak": final.get("rapidgator_backup", []),
+                "rapidgator": _get_urls("rapidgator.net"),
+                "ddownload": _get_urls("ddownload.com"),
+                "katfile": _get_urls("katfile.com"),
+                "nitroflare": _get_urls("nitroflare.com"),
+                "rapidgator_bak": _get_urls("rapidgator-backup"),
             }
             status = OperationStatus(
                 section=self.section,
@@ -212,6 +221,7 @@ class UploadWorker(QThread):
             )
             self.progress_update.emit(status)
             self.upload_success.emit(self.row)
+            # Emit canonical final result
             self.upload_complete.emit(self.row, final)
 
         except Exception as e:
@@ -410,14 +420,42 @@ class UploadWorker(QThread):
                     self.keeplinks_url = k
             self.keeplinks_sent = True
 
+        # Assemble canonical mapping: host -> {'urls': [...], 'is_backup': bool}
+        canonical: dict[str, dict] = {}
+        # Main Rapidgator
+        if links["rapidgator"]:
+            canonical["rapidgator.net"] = {
+                "urls": links["rapidgator"],
+                "is_backup": False,
+            }
+        # DDownload
+        if links["ddownload"]:
+            canonical["ddownload.com"] = {
+                "urls": links["ddownload"],
+            }
+        # Katfile
+        if links["katfile"]:
+            canonical["katfile.com"] = {
+                "urls": links["katfile"],
+            }
+        # Nitroflare
+        if links["nitroflare"]:
+            canonical["nitroflare.com"] = {
+                "urls": links["nitroflare"],
+            }
+        # Rapidgator backup
+        if links["rapidgator_bak"]:
+            canonical["rapidgator-backup"] = {
+                "urls": links["rapidgator_bak"],
+                "is_backup": True,
+            }
+        # Attach Keeplinks as string if available
+        if keeplink:
+            canonical["keeplinks"] = keeplink
+
         return {
             "thread_id": str(getattr(self, "thread_id", "")),
-            "rapidgator": links["rapidgator"],
-            "ddownload": links["ddownload"],
-            "katfile": links["katfile"],
-            "nitroflare": links["nitroflare"],
-            "rapidgator_backup": links["rapidgator_bak"],
-            "keeplinks": keeplink,
+            **canonical,
         }
 
     def _emit_final_statuses(self, row: int) -> None:

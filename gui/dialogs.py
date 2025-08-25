@@ -1,44 +1,55 @@
 from PyQt5.QtWidgets import QDialog, QLabel, QDialogButtonBox, QTextEdit, QVBoxLayout
 from PyQt5.QtCore import Qt
+
 # ====================================
 # LinksDialog: عرْض الروابط بعد الرفع
 # ====================================
 class LinksDialog(QDialog):
-    """Simple dialog to display uploaded links."""
+    """Dialog to display uploaded links and tolerate old/new formats.
+
+    تقبل:
+      - قيم list[str] أو str عادى
+      - dict فيه {'urls': [...], 'is_backup': bool}
+      - نص ممثل لقائمة/قاموس (مثلا "{'urls': [...]}") ويتم تفريغه بأمان
+      - مفاتيح مضيفين قديمة (rapidgator) أو جديدة (rapidgator.net, rapidgator-backup)
+    """
     def __init__(self, thread_title, links_dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Links for {thread_title}")
         layout = QVBoxLayout(self)
 
-        # Display Keeplinks URL first if present
-        keeplinks_url = links_dict.get("keeplinks")
+        flat = self._normalize_links(links_dict or {})
+
+        # 1) Keeplinks أولًا كسطر واحد
+        keeplinks_url = flat.get("keeplinks", "")
         if keeplinks_url:
             layout.addWidget(QLabel("<b>Keeplinks URL:</b>"))
             keeplinks_edit = QTextEdit()
-            if isinstance(keeplinks_url, (list, tuple)):
-                keeplinks_edit.setPlainText("\n".join(str(u) for u in keeplinks_url))
-            else:
-                keeplinks_edit.setPlainText(str(keeplinks_url))
+            keeplinks_edit.setPlainText(str(keeplinks_url))
             keeplinks_edit.setReadOnly(True)
             layout.addWidget(keeplinks_edit)
 
-        # Order hosts: mega/mega.nz, then others alphabetically
-        order = []
-        if "mega" in links_dict:
-            order.append("mega")
-        elif "mega.nz" in links_dict:
-            order.append("mega.nz")
-        for host in sorted(h for h in links_dict if h not in order and h != "keeplinks"):
-            order.append(host)
+        # 2) ترتيب الهوستات: RG, DDL, KF, NF, RG_BAK ثم أى مفاتيح أخرى
+        preferred = ["rapidgator.net", "ddownload.com", "katfile.com", "nitroflare.com", "rapidgator-backup"]
+        order, seen = [], set()
+        for h in preferred:
+            if flat.get(h):
+                order.append(h); seen.add(h)
+        for h, v in flat.items():
+            if h in seen or h == "keeplinks":
+                continue
+            if v:
+                order.append(h)
 
+        # 3) عرض الروابط
         for host in order:
-            urls = links_dict.get(host)
+            urls = flat.get(host)
             if not urls:
                 continue
-            layout.addWidget(QLabel(f"<b>{host.capitalize()} URLs:</b>"))
+            layout.addWidget(QLabel(f"<b>{host} URLs:</b>"))
             edit = QTextEdit()
             if isinstance(urls, (list, tuple)):
-                edit.setPlainText("\n".join(urls))
+                edit.setPlainText("\n".join(str(u) for u in urls if u))
             else:
                 edit.setPlainText(str(urls))
             edit.setReadOnly(True)
@@ -48,4 +59,70 @@ class LinksDialog(QDialog):
         button_box.rejected.connect(self.reject, type=Qt.QueuedConnection)
         layout.addWidget(button_box)
 
+    # -------- Helpers --------
+    def _normalize_links(self, src: dict) -> dict:
+        """ترجع خريطة مسطحة: host -> list[str] + 'keeplinks': str"""
+        import ast
 
+        def try_eval(s):
+            # يحاول يفك نص ممثل لـ list/dict بأمان؛ وإلا يرجّع s كما هو
+            if not isinstance(s, str):
+                return s
+            s_strip = s.strip()
+            if (s_strip.startswith("{") and s_strip.endswith("}")) or (s_strip.startswith("[") and s_strip.endswith("]")):
+                try:
+                    return ast.literal_eval(s_strip)
+                except Exception:
+                    return s
+            return s
+
+        def as_list(v):
+            v = try_eval(v)
+            if v is None or v is True or v is False:
+                return []
+            if isinstance(v, dict):
+                v = v.get("urls") or v.get("url") or v.get("link") or []
+            if isinstance(v, str):
+                return [v] if v else []
+            if isinstance(v, (list, tuple, set)):
+                out = []
+                for x in v:
+                    x = try_eval(x)
+                    if isinstance(x, dict):
+                        out.extend(as_list(x))
+                    elif isinstance(x, (list, tuple, set)):
+                        out.extend([str(i) for i in x if i])
+                    elif x:
+                        out.append(str(x))
+                return out
+            return []
+
+        def norm_key(k: str) -> str:
+            k = (k or "").lower().strip()
+            if k == "rapidgator":
+                return "rapidgator.net"
+            if k in ("rg_bak", "rapidgator_bak", "rapidgatorbackup"):
+                return "rapidgator-backup"
+            return k
+
+        out = {}
+
+        # keeplinks كنص واحد (لو قائمة نجمعها كسطور)
+        klinks = src.get("keeplinks")
+        klinks = try_eval(klinks)
+        if isinstance(klinks, (list, tuple)):
+            klinks = "\n".join([str(x) for x in klinks if x])
+        elif not isinstance(klinks, str):
+            klinks = str(klinks) if klinks else ""
+        out["keeplinks"] = klinks.strip()
+
+        for raw_k, raw_v in (src or {}).items():
+            k = norm_key(raw_k)
+            if k in ("keeplinks", ""):
+                continue
+            vals = as_list(raw_v)
+            if not vals:
+                continue
+            out[k] = vals
+
+        return out

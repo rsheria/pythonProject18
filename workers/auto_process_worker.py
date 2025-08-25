@@ -84,9 +84,43 @@ class AutoProcessWorker(QRunnable):
 
             # Post stage -----------------------------------------------------
             self._emit(OpType.POST, OpStage.RUNNING, "Posting")
-            uploaded_links = {h: f"https://{h.lower()}.example/{self.snapshot.thread_id}" for h in hosts}
-            keeplinks_url = f"https://keeplinks.example/{self.snapshot.thread_id}"
-            payload = {"uploaded_links": uploaded_links, "keeplinks_url": keeplinks_url}
+            # Build a canonical mapping for uploaded links similar to UploadWorker
+            canonical: dict[str, dict] = {}
+            # Generate dummy URLs per host for simulation
+            # Note: hosts = ["RG", "DDL", "KF", "NF", "RG_BAK"]
+            try:
+                tid = self.snapshot.thread_id
+            except Exception:
+                tid = ""
+            # Rapidgator main
+            rg_url = f"https://rg.example/{tid}"
+            canonical['rapidgator.net'] = {
+                'urls': [rg_url],
+                'is_backup': False,
+            }
+            # DDownload
+            ddl_url = f"https://ddl.example/{tid}"
+            canonical['ddownload.com'] = {'urls': [ddl_url]}
+            # Katfile
+            kf_url = f"https://kf.example/{tid}"
+            canonical['katfile.com'] = {'urls': [kf_url]}
+            # Nitroflare
+            nf_url = f"https://nf.example/{tid}"
+            canonical['nitroflare.com'] = {'urls': [nf_url]}
+            # Rapidgator backup
+            rg_bak_url = f"https://rgbak.example/{tid}"
+            canonical['rapidgator-backup'] = {
+                'urls': [rg_bak_url],
+                'is_backup': True,
+            }
+            # Keeplinks
+            keeplinks_url = f"https://keeplinks.example/{tid}"
+            canonical['keeplinks'] = keeplinks_url
+            payload = {
+                'thread_id': tid,
+                'uploaded_links': canonical,
+                'keeplinks': keeplinks_url,
+            }
             self.signals.result_ready.emit(self.job.job_id, payload)
             self._emit(OpType.POST, OpStage.FINISHED, "Finished")
             self.signals.finished.emit(self.job.job_id)

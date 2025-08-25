@@ -846,33 +846,37 @@ class ForumBotGUI(QMainWindow):
 
         Parameters:
         - links (dict): A dictionary with hosts as keys and values either lists or
-          dictionaries containing ``urls`` and ``is_backup``.
+          dictionaries that may include ``urls`` and ``is_backup`` flags.
 
         Returns:
-        - dict: A dictionary with normalized links using the same structure.
+        - dict: A dictionary with normalized links in a flat structure.
         """
         normalized_links = {}
-        for host, data in links.items():
-            if host == 'keeplinks':
+        for host, data in (links or {}).items():
+            if host == "keeplinks":
                 normalized_links[host] = data
                 continue
-
+            is_backup = False
+            urls = []
             if isinstance(data, dict):
-                urls = data.get('urls', [])
-                is_backup = data.get('is_backup', False)
-                new_host = 'rapidgator_backup' if ('rapidgator' in host.lower() and is_backup) else (
-                    'rapidgator.net' if 'rapidgator' in host.lower() or 'rg.to' in host.lower() else host
-                )
-                normalized_urls = [self.normalize_link(u) for u in urls]
-                normalized_links[new_host] = {'urls': normalized_urls, 'is_backup': is_backup}
+                urls = self._as_list(data.get("urls") or data)
+                is_backup = bool(data.get("is_backup"))
             else:
-                urls = data if isinstance(data, list) else [data]
-                if 'rapidgator' in host.lower() or 'rg.to' in host.lower():
-                    new_host = 'rapidgator.net'
-                    normalized_links.setdefault(new_host, [])
-                    normalized_links[new_host].extend(self.normalize_link(u) for u in urls)
-                else:
-                    normalized_links[host] = [self.normalize_link(u) for u in urls]
+                urls = self._as_list(data)
+
+            h_lower = host.lower()
+            is_backup = is_backup or (
+                    "rapidgator" in h_lower and (
+                        "backup" in h_lower or h_lower.endswith("_bak") or h_lower.endswith("_backup"))
+            )
+
+            if "rapidgator" in h_lower or "rg.to" in h_lower:
+                new_host = "rapidgator-backup" if is_backup else "rapidgator.net"
+            else:
+                new_host = host
+
+            normalized_links.setdefault(new_host, [])
+            normalized_links[new_host].extend(self.normalize_link(u) for u in urls)
         return normalized_links
 
     def prompt_for_password(self, archive_name):
@@ -2116,24 +2120,102 @@ class ForumBotGUI(QMainWindow):
                 return
             keeplinks_url = updated_link
             # If success, store them in backup data
+            #
+            # First update the backup entry itself.  We keep the Keeplinks
+            # string and both primary and backup Rapidgator lists here for
+            # display in the Backup tab.  Clear any dead link tracking.
             thread_info['keeplinks_link'] = keeplinks_url  # final Keeplinks
-            # Replace old Rapidgator links with the freshly uploaded ones
             thread_info['rapidgator_links'] = list(rapidgator_links)
-            # Always overwrite Rapidgator backup links so old links don't linger
             thread_info['rapidgator_backup_links'] = list(backup_rg_urls)
-            # Reset dead-link tracking; we now have fresh links
             thread_info['dead_rapidgator_links'] = []
-            # If new mega links were provided, keep them
             if mega_links:
                 thread_info['mega_link'] = "\n".join(mega_links)
                 thread_info['mega_links'] = mega_links
 
+            # Persist backup data
             self.backup_threads[thread_title] = thread_info
             self.save_backup_threads_data()
             self.populate_backup_threads_table()
 
-            QMessageBox.information(self, "Re-upload Successful",
-                                    f"Files re-uploaded and Keeplinks link updated for '{thread_title}'.")
+            # ------------------------------------------------------------------
+            # Update the canonical links schema in process_threads using the
+            # same structure as handle_upload_complete.  This ensures the
+            # template generator sees the latest Rapidgator/KF/NF/DD links.
+            try:
+                canonical_links: dict[str, dict] = {}
+                # Main Rapidgator
+                if rapidgator_links:
+                    canonical_links['rapidgator.net'] = {
+                        'urls': list(rapidgator_links),
+                        'is_backup': False,
+                    }
+                # Nitroflare
+                if nitroflare_links:
+                    canonical_links['nitroflare.com'] = {
+                        'urls': list(nitroflare_links),
+                    }
+                # DDownload
+                if ddownload_links:
+                    canonical_links['ddownload.com'] = {
+                        'urls': list(ddownload_links),
+                    }
+                # Katfile
+                if katfile_links:
+                    canonical_links['katfile.com'] = {
+                        'urls': list(katfile_links),
+                    }
+                # Rapidgator backup
+                if backup_rg_urls:
+                    canonical_links['rapidgator-backup'] = {
+                        'urls': list(backup_rg_urls),
+                        'is_backup': True,
+                    }
+                # Keeplinks
+                if keeplinks_url:
+                    canonical_links['keeplinks'] = keeplinks_url
+
+                # Iterate through categories and update matching records
+                for cat_name, threads in (self.process_threads or {}).items():
+                    if thread_title in threads:
+                        rec = threads[thread_title]
+                        # Log before update
+                        try:
+                            logging.info(
+                                "LINKS-BEFORE cat=%s title=%s links=%s (reupload)",
+                                cat_name, thread_title, rec.get('links')
+                            )
+                        except Exception:
+                            pass
+                        rec['links'] = canonical_links.copy()
+                        # update versions if present
+                        versions = rec.get('versions')
+                        if isinstance(versions, list) and versions:
+                            latest = versions[-1]
+                            if isinstance(latest, dict):
+                                latest['links'] = canonical_links.copy()
+                        # also update upload_status/thread_id if present
+                        if rapidgator_links or nitroflare_links or ddownload_links or katfile_links:
+                            rec['upload_status'] = True
+                            if 'thread_id' not in rec:
+                                rec['thread_id'] = thread_info.get('thread_id', '')
+                        # Log after update
+                        try:
+                            logging.info(
+                                "LINKS-AFTER  cat=%s title=%s links=%s (reupload)",
+                                cat_name, thread_title, rec.get('links')
+                            )
+                        except Exception:
+                            pass
+                # Persist the updated canonical data
+                self.save_process_threads_data()
+            except Exception:
+                logging.exception("Failed to update canonical links on reupload")
+
+            QMessageBox.information(
+                self,
+                "Re-upload Successful",
+                f"Files re-uploaded and Keeplinks link updated for '{thread_title}'.",
+            )
         except Exception as e:
             logging.error(f"Error in on_reupload_upload_complete: {e}", exc_info=True)
             QMessageBox.warning(self, "Error", f"An unexpected error occurred: {e}")
@@ -2911,10 +2993,57 @@ class ForumBotGUI(QMainWindow):
             keeplinks_link = updated_link
             # Store the (unchanged) Keeplinks link back into thread info
             thread_info['keeplinks_link'] = keeplinks_link
-            # Update Rapidgator links in backup data
+            # Update Rapidgator links in backup data (we may have multiple hosts)
             thread_info['rapidgator_links'] = new_links
+            # Persist backup data
             self.save_backup_threads_data()
             self.populate_backup_threads_table()
+
+            # ------------------------------------------------------------------
+            # Also update canonical 'links' in process_threads.  Construct
+            # a simple mapping with only Rapidgator since we don't know the
+            # other hosts from this path (reupload_files is Mega re-upload).
+            try:
+                canonical_links = {
+                    'rapidgator.net': list(new_links),
+                    'nitroflare.com': [],
+                    'ddownload.com': [],
+                    'katfile.com': [],
+                    'rapidgator-backup': [],
+                    'keeplinks': keeplinks_link,
+                }
+                for cat_name, threads in (self.process_threads or {}).items():
+                    if thread_title in threads:
+                        rec = threads[thread_title]
+                        # log before
+                        try:
+                            logging.info(
+                                "LINKS-BEFORE cat=%s title=%s links=%s (reupload_files)",
+                                cat_name, thread_title, rec.get('links')
+                            )
+                        except Exception:
+                            pass
+                        rec['links'] = canonical_links
+                        versions = rec.get('versions')
+                        if isinstance(versions, list) and versions:
+                            latest = versions[-1]
+                            if isinstance(latest, dict):
+                                latest['links'] = canonical_links
+                        rec['upload_status'] = True
+                        if 'thread_id' not in rec:
+                            rec['thread_id'] = thread_info.get('thread_id', '')
+                        # log after
+                        try:
+                            logging.info(
+                                "LINKS-AFTER  cat=%s title=%s links=%s (reupload_files)",
+                                cat_name, thread_title, rec.get('links')
+                            )
+                        except Exception:
+                            pass
+                # Persist updated canonical data
+                self.save_process_threads_data()
+            except Exception:
+                logging.exception("Failed to update canonical links in reupload_files")
         else:
             logging.error("Failed to update Keeplinks link.")
 
@@ -4072,7 +4201,18 @@ class ForumBotGUI(QMainWindow):
             # 4) Write back into the model (root and latest version if present)
             # Root
             links_root = thread_info.setdefault('links', {})
-            links_root[chosen_host_norm] = list(extracted_links)
+            # Determine if this is a Rapidgator backup host
+            is_backup = False
+            norm_lower = chosen_host_norm.lower()
+            if ('rapidgator' in norm_lower or norm_lower.startswith('rg')) and ('backup' in norm_lower or 'bak' in norm_lower):
+                is_backup = True
+            # Build canonical entry for the chosen host
+            entry: dict = {'urls': list(extracted_links)}
+            if ('rapidgator' in norm_lower or norm_lower.startswith('rg')):
+                # Mark backup status only for Rapidgator
+                entry['is_backup'] = bool(is_backup)
+            links_root[chosen_host_norm] = entry
+            # Remove keeplinks if present
             links_root.pop('keeplinks', None)
 
             # Versions
@@ -4080,7 +4220,10 @@ class ForumBotGUI(QMainWindow):
             if versions_list:
                 last = versions_list[-1]
                 vlinks = last.setdefault('links', {})
-                vlinks[chosen_host_norm] = list(extracted_links)
+                ventry: dict = {'urls': list(extracted_links)}
+                if ('rapidgator' in norm_lower or norm_lower.startswith('rg')):
+                    ventry['is_backup'] = bool(is_backup)
+                vlinks[chosen_host_norm] = ventry
                 vlinks.pop('keeplinks', None)
 
             # 5) Persist to disk and refresh indices
@@ -4764,8 +4907,7 @@ class ForumBotGUI(QMainWindow):
 
             # Update links in process_threads to only include the new Rapidgator link
             new_links = self.process_threads[category_name][thread_title].get('links', {})
-            rg_entry = new_links.get('rapidgator.net', {})
-            rapidgator_links = rg_entry.get('urls', []) if isinstance(rg_entry, dict) else rg_entry
+            rapidgator_links = self._as_list(new_links.get('rapidgator.net'))
 
             # Replace existing links with only Rapidgator links
             self.process_threads[category_name][thread_title]['links'] = {
@@ -4824,11 +4966,19 @@ class ForumBotGUI(QMainWindow):
         keeplinks = links_dict.get("keeplinks")
         if keeplinks:
             result_lines.append("[B]Download via Keeplinks (Short Link):[/B]")
-            if isinstance(keeplinks, list):
+            # Support keeplinks stored as list or newline-separated string
+            if isinstance(keeplinks, (list, tuple, set)):
                 for url in keeplinks:
+                    if not url:
+                        continue
                     result_lines.append(f"[url]{url}[/url]")
             else:
-                result_lines.append(f"[url]{keeplinks}[/url]")
+                # If newline-separated string, split into lines
+                parts = str(keeplinks).strip().split("\n")
+                for url in parts:
+                    if not url:
+                        continue
+                    result_lines.append(f"[url]{url}[/url]")
             result_lines.append("")  # blank line
 
         # 3) خريطة من اسم المضيف في الإعدادات إلى (key في links_dict، label للعرض)
@@ -4852,32 +5002,25 @@ class ForumBotGUI(QMainWindow):
         for host in filtered_hosts:
             key, label = host_key_map.get(host.lower(), (host.lower(), host.capitalize()))
             entry = links_dict.get(key)
-
+            # Fallback to normalised key (strip suffixes)
             if entry is None:
-                # fallback by normalized key
                 entry = links_dict.get(key.replace(".net", "").replace(".com", ""))
             if entry is None:
                 continue
-
-            if isinstance(entry, dict):
-                if entry.get("is_backup"):
-                    backup_filtered += len(entry.get("urls", []))
-                    continue
-                direct_links = entry.get("urls", [])
-            else:
-                direct_links = entry
-
-            if backup_pattern.search(_norm(key)):
-                backup_filtered += len(direct_links)
+            # If entry is a dict with an 'is_backup' flag set to True, skip it entirely
+            if isinstance(entry, dict) and entry.get('is_backup'):
+                backup_filtered += len(self._as_list(entry.get('urls')))
                 continue
-
+            # Obtain list of direct links from entry
+            direct_links = self._as_list(entry if not isinstance(entry, dict) else entry.get('urls'))
+            if not direct_links:
+                continue
             # Deduplicate while preserving order
             direct_links = list(dict.fromkeys(direct_links))
-            if direct_links:
-                result_lines.append(f"[B]Download From {label}:[/B]")
-                for url in direct_links:
-                    result_lines.append(f"[url]{url}[/url]")
-                result_lines.append("")  # blank line
+            result_lines.append(f"[B]Download From {label}:[/B]")
+            for url in direct_links:
+                result_lines.append(f"[url]{url}[/url]")
+            result_lines.append("")  # blank line
 
         if backup_filtered:
             logging.info("build_links_block filtered %d backup links", backup_filtered)
@@ -5037,43 +5180,20 @@ class ForumBotGUI(QMainWindow):
 
     def handle_upload_complete(self, row, urls_dict):
         try:
+            # 0) أخطاء/ريترى
             if isinstance(urls_dict, dict) and "error" in urls_dict:
                 if getattr(self, "auto_retry_mode", False):
-                    worker_retry = getattr(self, "upload_workers", {}).get(row)
-                    if worker_retry:
-                        QTimer.singleShot(10000, lambda w=worker_retry, r=row: w.retry_failed_uploads(r))
+                    w = getattr(self, "upload_workers", {}).get(row)
+                    if w:
+                        QTimer.singleShot(10000, lambda w=w, r=row: w.retry_failed_uploads(r))
                 return
 
+            # 1) حدّد الصف عن طريق thread_id (fallback = row)
             tid = str(urls_dict.get("thread_id", "")) if isinstance(urls_dict, dict) else ""
-
-            worker = None
-            if tid and hasattr(self, "upload_workers_by_tid"):
-                worker = self.upload_workers_by_tid.get(tid)
-            if not worker:
-                worker = getattr(self, "upload_workers", {}).get(row)
-
-            if worker:
-                meta = {
-                    "row": row,
-                    "folder": str(worker.folder_path),
-                    "thread_id": worker.thread_id,
-                    "hosts": worker.hosts,
-                    "section": worker.section,
-                    "keeplinks_url": worker.keeplinks_url,
-                    "upload_results": worker.upload_results,
-                    "keeplinks_sent": worker.keeplinks_sent,
-                }
-                for f in getattr(worker, "files", []):
-                    key = (worker.section, f.name, OpType.UPLOAD.name)
-                    self.status_widget.update_upload_meta(key, meta)
-
-            if tid:
-                current_row = self._row_for_tid(tid)
-                if current_row < 0:
-                    logging.warning("Thread ID '%s' not found; skipping update", tid)
-                    return
-            else:
-                current_row = row
+            current_row = self._row_for_tid(tid) if tid else row
+            if current_row < 0:
+                logging.warning("Thread ID '%s' not found; skipping update", tid)
+                return
 
             t_item = self.process_threads_table.item(current_row, 0)
             c_item = self.process_threads_table.item(current_row, 1)
@@ -5081,72 +5201,83 @@ class ForumBotGUI(QMainWindow):
                 return
             thread_title = t_item.text()
             category_name = c_item.text()
-            thread_info = self.process_threads.get(category_name, {}).get(thread_title)
+
+            thread_info = (self.process_threads.get(category_name, {}) or {}).get(thread_title)
             if not thread_info:
                 logging.warning("Thread '%s' not found in category '%s' after upload.", thread_title, category_name)
                 return
 
-            rg_links = self._as_list(urls_dict.get("rapidgator")) if isinstance(urls_dict, dict) else []
-            rg_backup_links = []
-            keeplink = ""
-            if isinstance(urls_dict, dict):
-                rg_backup_links = self._as_list(
-                    urls_dict.get("rapidgator_backup")
-                    or urls_dict.get("rapidgator_bak")
-                    or urls_dict.get("rapidgator-backup")
-                )
-                keeplink = str(urls_dict.get("keeplinks", ""))
+            # 2) توحيد القيم إلى list + توحيد المفاتيح
+            def to_list(v):
+                if not v:
+                    return []
+                if isinstance(v, dict):
+                    v = v.get("urls") or v.get("url") or v.get("link") or []
+                if isinstance(v, str):
+                    return [v]
+                return list(v)
 
-                model = self.process_threads_table.model()
-                self.process_threads_table.item(current_row, 3).setText(rg_links[0] if rg_links else "")
-                model.dataChanged.emit(model.index(current_row, 3), model.index(current_row, 3))
-                self.process_threads_table.item(current_row, 4).setText(
-                    "\n".join(rg_backup_links) if rg_backup_links else "")
-                model.dataChanged.emit(model.index(current_row, 4), model.index(current_row, 4))
-                self.process_threads_table.item(current_row, 5).setText(keeplink if keeplink else "")
-                model.dataChanged.emit(model.index(current_row, 5), model.index(current_row, 5))
+            rg_links = to_list(urls_dict.get("rapidgator") or urls_dict.get("rapidgator.net"))
+            rg_backup = to_list(urls_dict.get("rapidgator-backup") or urls_dict.get("rapidgator_backup"))
+            nf_links = to_list(urls_dict.get("nitroflare") or urls_dict.get("nitroflare.com"))
+            dd_links = to_list(urls_dict.get("ddownload") or urls_dict.get("ddownload.com"))
+            kf_links = to_list(urls_dict.get("katfile") or urls_dict.get("katfile.com"))
+            keeplink = (urls_dict.get("keeplinks") or "")
 
-                # Determine where to store link data (support versions format)
-                target_info = thread_info
-                if isinstance(thread_info, dict) and thread_info.get("versions"):
-                    target_info = thread_info["versions"][-1]
+            merged_links = {
+                "rapidgator.net": rg_links,
+                "nitroflare.com": nf_links,
+                "ddownload.com": dd_links,
+                "katfile.com": kf_links,
+                "rapidgator-backup": rg_backup,
+                "keeplinks": keeplink,
+            }
+            # امسح المفاتيح الفارغة
+            merged_links = {
+                k: v for k, v in merged_links.items()
+                if (isinstance(v, str) and v) or (isinstance(v, list) and v)
+            }
 
-                links = target_info.get("links", {})
-                links["rapidgator.net"] = rg_links
-                if rg_backup_links:
-                    links["rapidgator_backup"] = rg_backup_links
-                else:
-                    links.pop("rapidgator_backup", None)
-                if keeplink:
-                    links["keeplinks"] = keeplink
-                else:
-                    links.pop("keeplinks", None)
-                target_info["links"] = links
-                target_info["upload_status"] = True
-                target_info["thread_id"] = tid
-                # Mirror thread_id at root for backwards compatibility
-                thread_info["thread_id"] = tid
+            # 3) تحديث خلايا الجدول (الأولوية: أول RG فقط فى العمود)
+            model = self.process_threads_table.model()
+            self.process_threads_table.item(current_row, 3).setText(rg_links[0] if rg_links else "")
+            model.dataChanged.emit(model.index(current_row, 3), model.index(current_row, 3))
+            self.process_threads_table.item(current_row, 4).setText("\n".join(rg_backup))
+            model.dataChanged.emit(model.index(current_row, 4), model.index(current_row, 4))
+            self.process_threads_table.item(current_row, 5).setText(keeplink if isinstance(keeplink, str) else "")
+            model.dataChanged.emit(model.index(current_row, 5), model.index(current_row, 5))
 
-            self.save_process_threads_data()
+            # 4) تحديث الداتا الداخلية (مهم: الجذر + آخر نسخة)
+            #    علشان View Links و Proceed Template يقروا الروابط الجديدة فعلاً
+            thread_info["links"] = dict(merged_links)  # ← الجذر
+            if thread_info.get("versions"):
+                latest = thread_info["versions"][-1]
+                latest["links"] = dict(merged_links)  # ← آخر نسخة
+                latest["upload_status"] = True
+                latest["thread_id"] = tid
 
-            self.mark_upload_complete(category_name, thread_title)
+            thread_info["upload_status"] = True
+            thread_info["thread_id"] = tid
 
-            if rg_backup_links:
-                backup_info = self.backup_threads.get(thread_title, {}) or {}
-                backup_info["thread_id"] = tid
-                backup_info["rapidgator_links"] = rg_links
-                backup_info["rapidgator_backup_links"] = rg_backup_links
-                backup_info["keeplinks_link"] = keeplink
-                self.backup_threads[thread_title] = backup_info
+            # 5) باك-أب سيكشن
+            if rg_backup:
+                bi = self.backup_threads.get(thread_title, {}) or {}
+                bi["thread_id"] = tid
+                bi["rapidgator_links"] = rg_links
+                bi["rapidgator_backup_links"] = rg_backup
+                bi["keeplinks_link"] = keeplink if isinstance(keeplink, str) else ""
+                self.backup_threads[thread_title] = bi
                 self.save_backup_threads_data()
                 self.populate_backup_threads_table()
+
+            # 6) حفظ وتحديث الحالة
+            self.save_process_threads_data()
+            self.mark_upload_complete(category_name, thread_title)
+
             updated_cols = []
-            if rg_links:
-                updated_cols.append("RG")
-            if rg_backup_links:
-                updated_cols.append("RG_BAK")
-            if keeplink:
-                updated_cols.append("Keeplinks")
+            if rg_links:   updated_cols.append("RG")
+            if rg_backup:  updated_cols.append("RG_BAK")
+            if keeplink:   updated_cols.append("Keeplinks")
             logging.info("POPULATE-LINKS tid=%s row=%s updated=%s", tid, current_row, updated_cols)
         except Exception as e:
             logging.error(f"Error in handle_upload_complete: {e}", exc_info=True)
@@ -5297,35 +5428,95 @@ class ForumBotGUI(QMainWindow):
             category_name = job.category
             thread_title = job.title
             thread_id = job.thread_id
-            urls_dict = job.uploaded_links
-            urls_dict['keeplinks'] = job.keeplinks_url
+            # Extract the canonical upload result from the job
+            urls_dict = job.uploaded_links or {}
+            # Support both legacy and canonical payloads: job may set keeplinks_url separately
+            if isinstance(urls_dict, dict):
+                # If keeplinks exists on the job separately, prioritise it
+                if getattr(job, 'keeplinks_url', None):
+                    urls_dict = dict(urls_dict)
+                    urls_dict['keeplinks'] = getattr(job, 'keeplinks_url')
 
             if category_name in self.process_threads and thread_title in self.process_threads[category_name]:
                 thread_info = self.process_threads[category_name][thread_title]
 
-                # Normalize host lists: support both dict-with-urls and plain list values
-                rapidgator_links = self._as_list(urls_dict.get('rapidgator'))
-                backup_rg_urls = self._as_list(urls_dict.get('rapidgator_backup') or urls_dict.get('rapidgator-backup'))
-                nitroflare_links = self._as_list(urls_dict.get('nitroflare'))
-                ddownload_links = self._as_list(urls_dict.get('ddownload'))
-                katfile_links = self._as_list(urls_dict.get('katfile'))
-                new_keeplinks = urls_dict.get('keeplinks', '')
+                # Build a canonical mapping similar to handle_upload_complete
+                def _to_list(val):
+                    if not val:
+                        return []
+                    if isinstance(val, dict):
+                        v = val.get('urls') or val.get('url') or val.get('link')
+                        return _to_list(v)
+                    if isinstance(val, str):
+                        return [val]
+                    if isinstance(val, (list, tuple, set)):
+                        out = []
+                        for x in val:
+                            out.extend(_to_list(x))
+                        return out
+                    try:
+                        return list(val)
+                    except Exception:
+                        return [str(val)]
 
-                merged_links = {
-                    'rapidgator.net': {'urls': rapidgator_links, 'is_backup': False},
-                    'nitroflare.com': {'urls': nitroflare_links, 'is_backup': False},
-                    'ddownload.com': {'urls': ddownload_links, 'is_backup': False},
-                    'katfile.com': {'urls': katfile_links, 'is_backup': False},
-                    'rapidgator_backup': {'urls': backup_rg_urls, 'is_backup': True},
-                    'keeplinks': new_keeplinks,
-                }
-                thread_info['links'] = merged_links
+                canonical: dict[str, dict] = {}
+
+                # Iterate through provided hosts
+                if isinstance(urls_dict, dict):
+                    for raw_key, raw_val in urls_dict.items():
+                        if raw_key in ('thread_id', 'keeplinks', 'keeplink'):
+                            continue
+                        key_norm = (raw_key or '').lower().replace('_', '').replace('-', '').replace('.', '')
+                        vals = _to_list(raw_val)
+                        if not vals:
+                            continue
+                        if ('rapidgator' in key_norm or key_norm.startswith('rg')) and ('backup' in key_norm or 'bak' in key_norm):
+                            canonical.setdefault('rapidgator-backup', {})
+                            canonical['rapidgator-backup']['urls'] = vals
+                            canonical['rapidgator-backup']['is_backup'] = True
+                            continue
+                        if 'rapidgator' in key_norm or key_norm.startswith('rg'):
+                            canonical.setdefault('rapidgator.net', {})
+                            canonical['rapidgator.net']['urls'] = vals
+                            canonical['rapidgator.net']['is_backup'] = False
+                            continue
+                        if 'ddownload' in key_norm or key_norm.startswith('ddl'):
+                            canonical.setdefault('ddownload.com', {})
+                            canonical['ddownload.com']['urls'] = vals
+                            continue
+                        if 'katfile' in key_norm or key_norm.startswith('kf'):
+                            canonical.setdefault('katfile.com', {})
+                            canonical['katfile.com']['urls'] = vals
+                            continue
+                        if 'nitroflare' in key_norm or key_norm.startswith('nf'):
+                            canonical.setdefault('nitroflare.com', {})
+                            canonical['nitroflare.com']['urls'] = vals
+                            continue
+                        # fallback to raw host key
+                        host_label = raw_key.strip()
+                        if host_label:
+                            canonical.setdefault(host_label, {})
+                            canonical[host_label]['urls'] = vals
+
+                # Keeplinks from urls_dict or job
+                keeplinks_val = ''
+                if isinstance(urls_dict, dict):
+                    k_val = urls_dict.get('keeplinks') or urls_dict.get('keeplink') or ''
+                    if isinstance(k_val, (list, tuple, set, dict)):
+                        keeplinks_val = '\n'.join([str(x) for x in _to_list(k_val) if x])
+                    else:
+                        keeplinks_val = str(k_val) if k_val else ''
+                if keeplinks_val:
+                    canonical['keeplinks'] = keeplinks_val.strip()
+
+                # Write canonical mapping into thread_info and versions
+                thread_info['links'] = canonical.copy()
                 versions_list = thread_info.setdefault('versions', [])
                 if versions_list:
-                    versions_list[-1]['links'] = merged_links
+                    versions_list[-1]['links'] = canonical.copy()
                 else:
                     versions_list.append({
-                        'links': merged_links,
+                        'links': canonical.copy(),
                         'thread_id': thread_id,
                         'bbcode_content': thread_info.get('bbcode_content', ''),
                         'thread_url': thread_info.get('thread_url', ''),
@@ -5337,19 +5528,28 @@ class ForumBotGUI(QMainWindow):
                 row_index = self._row_for_tid(thread_id)
                 if row_index >= 0:
                     # Choose display links: prefer rapidgator, then katfile, then nitroflare/ddownload
-                    display_links = rapidgator_links or katfile_links or nitroflare_links or ddownload_links
-                    self.process_threads_table.item(row_index, 3).setText("\n".join(display_links))
-                    self.process_threads_table.item(row_index, 4).setText("\n".join(backup_rg_urls))
-                    self.process_threads_table.item(row_index, 5).setText(new_keeplinks)
+                    display_links = _to_list(canonical.get('rapidgator.net', {}).get('urls'))
+                    if not display_links:
+                        display_links = _to_list(canonical.get('katfile.com', {}).get('urls'))
+                    if not display_links:
+                        display_links = _to_list(canonical.get('nitroflare.com', {}).get('urls'))
+                    if not display_links:
+                        display_links = _to_list(canonical.get('ddownload.com', {}).get('urls'))
+                    self.process_threads_table.item(row_index, 3).setText('\n'.join(display_links))
+                    self.process_threads_table.item(row_index, 4).setText('\n'.join(_to_list(canonical.get('rapidgator-backup', {}).get('urls'))))
+                    self.process_threads_table.item(row_index, 5).setText(keeplinks_val)
 
+                # Persist process_threads
                 self.save_process_threads_data()
-                if backup_rg_urls:
+                # Update backup data if backup links exist
+                backup_vals = _to_list(canonical.get('rapidgator-backup', {}).get('urls'))
+                if backup_vals:
                     backup_info = self.backup_threads.get(thread_title, {})
                     backup_info['thread_id'] = thread_id
-                    backup_info['rapidgator_links'] = rapidgator_links
-                    backup_info['rapidgator_backup_links'] = backup_rg_urls
-                    backup_info['keeplinks_link'] = new_keeplinks
-                    backup_info['katfile_links'] = katfile_links
+                    backup_info['rapidgator_links'] = _to_list(canonical.get('rapidgator.net', {}).get('urls'))
+                    backup_info['rapidgator_backup_links'] = backup_vals
+                    backup_info['keeplinks_link'] = keeplinks_val
+                    backup_info['katfile_links'] = _to_list(canonical.get('katfile.com', {}).get('urls'))
                     self.backup_threads[thread_title] = backup_info
                     self.save_backup_threads_data()
                     self.populate_backup_threads_table()
@@ -6342,14 +6542,11 @@ class ForumBotGUI(QMainWindow):
             if category_name in self.process_threads:
                 thread_data = self.process_threads[category_name][thread_title]
                 thread_data['links'] = {
-                    'rapidgator.net': {'urls': [url for url in uploaded_urls if 'rapidgator.net' in url],
-                                       'is_backup': False},
-                    'nitroflare.com': {'urls': [url for url in uploaded_urls if 'nitroflare.com' in url],
-                                       'is_backup': False},
-                    'ddownload.com': {'urls': [url for url in uploaded_urls if 'ddownload.com' in url],
-                                      'is_backup': False},
-                    'katfile.com': {'urls': [url for url in uploaded_urls if 'katfile.com' in url], 'is_backup': False},
-                    'rapidgator_backup': {'urls': list(backup_rg_urls) if backup_rg_urls else [], 'is_backup': True},
+                    'rapidgator.net': [url for url in uploaded_urls if 'rapidgator.net' in url],
+                    'nitroflare.com': [url for url in uploaded_urls if 'nitroflare.com' in url],
+                    'ddownload.com': [url for url in uploaded_urls if 'ddownload.com' in url],
+                    'katfile.com': [url for url in uploaded_urls if 'katfile.com' in url],
+                    'rapidgator-backup': list(backup_rg_urls) if backup_rg_urls else [],
                     'keeplinks': keeplinks_url,
                 }
 
@@ -6506,10 +6703,10 @@ class ForumBotGUI(QMainWindow):
                 if thread_title in category:
                     category[thread_title]['links'] = {
                         'keeplinks': keeplinks_url,
-                        'rapidgator.net': {'urls': host_urls['rapidgator'], 'is_backup': False},
-                        'nitroflare.com': {'urls': host_urls['nitroflare'], 'is_backup': False},
-                        'ddownload.com': {'urls': host_urls['ddownload'], 'is_backup': False},
-                        'katfile.com': {'urls': host_urls['katfile'], 'is_backup': False},
+                        'rapidgator.net': host_urls['rapidgator'],
+                        'nitroflare.com': host_urls['nitroflare'],
+                        'ddownload.com': host_urls['ddownload'],
+                        'katfile.com': host_urls['katfile'],
                     }
 
             # Update backup_threads data as lists, not single strings
@@ -7610,11 +7807,10 @@ class ForumBotGUI(QMainWindow):
                     if 'links' in thread_data:
                         links = thread_data['links']
                         if isinstance(links, list):
-                            # Convert old format to new
+                            # Convert old format to new flat structure
                             thread_data['links'] = {
-                                'rapidgator.net': {'urls': [link for link in links if 'rapidgator.net' in link],
-                                                   'is_backup': False},
-                                'rapidgator_backup': {'urls': [], 'is_backup': True},
+                                'rapidgator.net': [link for link in links if 'rapidgator.net' in link],
+                                'rapidgator-backup': [],
                                 'keeplinks': ''
                             }
 
@@ -8079,21 +8275,11 @@ class ForumBotGUI(QMainWindow):
             return
 
         if links_dict:
-            # Flatten nested lists so dialog receives plain list of strings
-            clean_links = {}
-            for host, urls in links_dict.items():
-                if isinstance(urls, (list, tuple)):
-                    flat = []
-                    for u in urls:
-                        if isinstance(u, (list, tuple)):
-                            flat.extend(map(str, u))
-                        else:
-                            flat.append(str(u))
-                    clean_links[host] = flat
-                else:
-                    clean_links[host] = [str(urls)]
-
-            dialog = LinksDialog(thread_title, clean_links, parent=self)
+            # Pass the canonical mapping directly to the dialog.  The dialog
+            # itself will normalise values (handling dicts with ``urls`` and
+            # ``is_backup``) to present a flat view.  Avoid pre-flattening
+            # here so that backup flags and other metadata are preserved.
+            dialog = LinksDialog(thread_title, links_dict, parent=self)
             dialog.exec_()
         else:
             # إضافة خيارات جديدة للـ threads الفاضية
@@ -8271,18 +8457,18 @@ class ForumBotGUI(QMainWindow):
                 affected_hosts = []
 
                 for host, lst in host_to_urls.items():
-                    entry = thread_info['links'].setdefault(host, {'urls': [], 'is_backup': False})
-                    before = len(entry.get('urls', []))
-                    entry['urls'] = _unique_extend(entry.get('urls', []), lst)
-                    after = len(entry['urls'])
+                    entry = thread_info['links'].setdefault(host, [])
+                    before = len(entry)
+                    thread_info['links'][host] = _unique_extend(entry, lst)
+                    after = len(thread_info['links'][host])
                     added = after - before
                     if added > 0:
                         added_total += added
                         affected_hosts.append(host)
 
                     if latest_links is not None:
-                        le = latest_links.setdefault(host, {'urls': [], 'is_backup': False})
-                        le['urls'] = _unique_extend(le.get('urls', []), lst)
+                        le = latest_links.setdefault(host, [])
+                        latest_links[host] = _unique_extend(le, lst)
 
                     # إضافة المضيف لقائمة known_file_hosts و priority لو مش موجود
                     if host != "other":
