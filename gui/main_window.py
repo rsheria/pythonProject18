@@ -2072,13 +2072,15 @@ class ForumBotGUI(QMainWindow):
             # 1) Preserve old Keeplinks if not overridden
             old_keeplinks = thread_info.get('keeplinks_link', '')
 
-            # 2) Extract newly uploaded links
-            rapidgator_links = urls_dict.get('rapidgator', {}).get('urls', [])
-            backup_rg_urls = urls_dict.get('rapidgator_backup', {}).get('urls', [])
-            nitroflare_links = urls_dict.get('nitroflare', {}).get('urls', [])
-            ddownload_links = urls_dict.get('ddownload', {}).get('urls', [])
-            katfile_links = urls_dict.get('katfile', {}).get('urls', [])
-            mega_links = urls_dict.get('mega', {}).get('urls', [])
+
+            # 2) Extract newly uploaded links.  Normalize values into lists to
+            # support both the old nested format and the new list-only format.
+            rapidgator_links = self._as_list(urls_dict.get('rapidgator'))
+            backup_rg_urls = self._as_list(urls_dict.get('rapidgator_backup') or urls_dict.get('rapidgator-backup'))
+            nitroflare_links = self._as_list(urls_dict.get('nitroflare'))
+            ddownload_links = self._as_list(urls_dict.get('ddownload'))
+            katfile_links = self._as_list(urls_dict.get('katfile'))
+            mega_links = self._as_list(urls_dict.get('mega'))
 
             # Combined new links (excluding Rapidgator backup so it remains private)
             new_links = (
@@ -2090,8 +2092,15 @@ class ForumBotGUI(QMainWindow):
             )
 
             # If we already had a Keeplinks link for this thread:
-            keeplinks_url = urls_dict.get('keeplinks', '') or old_keeplinks
-            # So if 'urls_dict' does NOT provide a new keeplinks, we keep the old one.
+            # Normalize keeplinks: convert lists to a single string (use the first element)
+            kl_val = urls_dict.get('keeplinks', '') if isinstance(urls_dict, dict) else ''
+            if isinstance(kl_val, list):
+                keeplinks_url = kl_val[0] if kl_val else ''
+            else:
+                keeplinks_url = kl_val or ''
+            # If no new keeplinks provided, retain the existing one
+            if not keeplinks_url:
+                keeplinks_url = old_keeplinks
 
             if not keeplinks_url:
                 QMessageBox.warning(self, "No Keeplinks URL", f"No Keeplinks link found for '{thread_title}'.")
@@ -4521,13 +4530,28 @@ class ForumBotGUI(QMainWindow):
                 falls back to the current selection from the
                 ``process_threads_table``.
         """
-        # Prevent concurrent download sessions
-        if getattr(self, "_download_in_progress", False):
-            ui_notifier.warn(
-                "Download In Progress",
-                "⚠️ Another download is already running!\n\nPlease wait for the current download to complete or cancel it first.",
-            )
-            return
+        # Normalize rows if a boolean was passed (e.g. from clicked(bool) signal)
+        if isinstance(rows, bool):
+            rows = None
+
+        # Prevent concurrent download sessions.  Prefer checking running worker to
+        # catch stale lock flags.
+        existing_worker = getattr(self, "download_worker", None)
+        try:
+            if existing_worker and existing_worker.isRunning():
+                ui_notifier.warn(
+                    "Download In Progress",
+                    "⚠️ Another download is already running!\n\nPlease wait for the current download to complete or cancel it first.",
+                )
+                return
+        except Exception:
+            # Fallback to using lock if worker check fails
+            if getattr(self, "_download_in_progress", False):
+                ui_notifier.warn(
+                    "Download In Progress",
+                    "⚠️ Another download is already running!\n\nPlease wait for the current download to complete or cancel it first.",
+                )
+                return
 
         # Acquire download lock
         self._download_in_progress = True
@@ -4590,13 +4614,20 @@ class ForumBotGUI(QMainWindow):
             self.statusBar().showMessage("Starting downloads...")
 
         except Exception as e:
+            # 😱 Critical error during download setup
             logging.error(f"⚠️ Critical error in download setup: {e}")
-            ui_notifier.error(
-                "Download Setup Error",
-                f"Failed to start download operation:\n{str(e)}",
-            )
-            # Release lock on critical error
-            self._download_in_progress = False
+            # 🔓 Release download lock on any failure so user can retry
+            try:
+                self._download_in_progress = False
+            except Exception:
+                pass
+            try:
+                self.statusBar().showMessage(
+                    "ERROR: Download Setup Error - Failed to start download operation:\n"
+                    + (f"{e}" if e else "")
+                )
+            except Exception:
+                pass
 
     def pause_downloads(self):
         if self.download_worker:
@@ -4952,7 +4983,13 @@ class ForumBotGUI(QMainWindow):
                     thread_id,
                     upload_hosts=self.active_upload_hosts,
                 )
+                # Store worker keyed by row and also by thread ID to handle
+                # cases where the row index may change due to sorting or filtering.
                 self.upload_workers[row] = upload_worker
+                # Initialise mapping by thread id if needed
+                if not hasattr(self, 'upload_workers_by_tid'):
+                    self.upload_workers_by_tid = {}
+                self.upload_workers_by_tid[thread_id] = upload_worker
                 self.register_worker(upload_worker)
 
                 meta = {
@@ -4989,15 +5026,33 @@ class ForumBotGUI(QMainWindow):
 
     def handle_upload_complete(self, row, urls_dict):
         try:
-            # if an error occurred, optionally retry automatically
-            if 'error' in urls_dict:
+            # If an error occurred, optionally retry automatically and exit
+            if isinstance(urls_dict, dict) and 'error' in urls_dict:
                 if getattr(self, 'auto_retry_mode', False):
-                    worker = getattr(self, 'upload_workers', {}).get(row)
-                    if worker:
-                        QTimer.singleShot(10000, lambda w=worker, r=row: w.retry_failed_uploads(r))
+                    worker_retry = getattr(self, 'upload_workers', {}).get(row)
+                    if worker_retry:
+                        QTimer.singleShot(10000, lambda w=worker_retry, r=row: w.retry_failed_uploads(r))
                 return
 
-            worker = getattr(self, 'upload_workers', {}).get(row)
+            # --------------------------------------------------------------
+            # Normalize and resolve the thread ID from the payload
+            # --------------------------------------------------------------
+            tid = ''
+            if isinstance(urls_dict, dict):
+                try:
+                    tid = str(urls_dict.get('thread_id', '')).strip()
+                except Exception:
+                    tid = ''
+
+            # Attempt to find the associated worker using thread ID mapping
+            worker = None
+            if tid and hasattr(self, 'upload_workers_by_tid'):
+                worker = self.upload_workers_by_tid.get(tid)
+            if not worker:
+                # Fallback to using the worker keyed by the original row
+                worker = getattr(self, 'upload_workers', {}).get(row)
+
+            # Update meta information for any files belonging to this worker
             if worker:
                 meta = {
                     "row": row,
@@ -5013,81 +5068,111 @@ class ForumBotGUI(QMainWindow):
                     key = (worker.section, f.name, OpType.UPLOAD.name)
                     self.status_widget.update_upload_meta(key, meta)
 
-            thread_title = self.process_threads_table.item(row, 0).text()
-            category_name = self.process_threads_table.item(row, 1).text()
-            thread_id = self.process_threads_table.item(row, 2).text()
+            # Locate the real row in the table by scanning the Thread ID column
+            current_row = -1
+            if tid:
+                current_row = self._row_for_thread_id(tid)
+            # If not found, warn and exit gracefully
+            if current_row is None or current_row < 0:
+                logging.warning(f"Thread ID '{tid}' not found in Process Threads table; skipping upload completion handling.")
+                return
 
-            # 1) Retrieve existing thread_info
-            if category_name in self.process_threads and thread_title in self.process_threads[category_name]:
-                thread_info = self.process_threads[category_name][thread_title]
+            # Determine the thread title and category name based on the resolved row
+            thread_title = None
+            category_name = None
+            try:
+                t_item = self.process_threads_table.item(current_row, 0)
+                c_item = self.process_threads_table.item(current_row, 1)
+                if t_item:
+                    thread_title = t_item.text()
+                if c_item:
+                    category_name = c_item.text()
+            except Exception:
+                pass
+            # If either identifier is missing, we cannot proceed with update
+            if not category_name or not thread_title:
+                return
 
-                # 2) Pull out newly-uploaded host links
-                rapidgator_links = urls_dict.get('rapidgator', {}).get('urls', [])
-                backup_rg_urls = urls_dict.get('rapidgator_backup', {}).get('urls', [])
-                nitroflare_links = urls_dict.get('nitroflare', {}).get('urls', [])
-                ddownload_links = urls_dict.get('ddownload', {}).get('urls', [])
-                katfile_links = urls_dict.get('katfile', {}).get('urls', [])
-
-                # 3) Preserve old Keeplinks if not overridden
-                old_links = thread_info.get('links', {})
-                old_keeplinks = old_links.get('keeplinks', '')
-                new_keeplinks = urls_dict.get('keeplinks', '') or old_keeplinks
-
-                # 4) Build merged links
-                merged_links = {
-                    'rapidgator.net': {'urls': rapidgator_links, 'is_backup': False},
-                    'nitroflare.com': {'urls': nitroflare_links, 'is_backup': False},
-                    'ddownload.com': {'urls': ddownload_links, 'is_backup': False},
-                    'katfile.com': {'urls': katfile_links, 'is_backup': False},
-                    'rapidgator_backup': {'urls': backup_rg_urls, 'is_backup': True},
-                    'keeplinks': new_keeplinks,
-                }
-
-                # 5) Save back to thread_info
-                thread_info['links'] = merged_links
-
-                # 5a) Versions logic: update last version or append a new one
-                versions_list = thread_info.setdefault('versions', [])
-                if versions_list:
-                    versions_list[-1]['links'] = merged_links
-                else:
-                    versions_list.append({
-                        'links': merged_links,
-                        'thread_id': thread_id,
-                        'bbcode_content': thread_info.get('bbcode_content', ''),
-                        'thread_url': thread_info.get('thread_url', ''),
-                    })
-
-                # 5b) Mark upload_status = True in both root and latest version
-                thread_info['upload_status'] = True
-                versions_list[-1]['upload_status'] = True
-
-                # 6) Update the Process Threads table columns
-                display_links = rapidgator_links or katfile_links
-                self.process_threads_table.item(row, 3).setText("\n".join(display_links))
-                self.process_threads_table.item(row, 4).setText("\n".join(backup_rg_urls))
-                self.process_threads_table.item(row, 5).setText(new_keeplinks)
-
-                # 7) Persist changes
-                self.save_process_threads_data()
-
-                # 8) Also reflect in backup_threads to keep them in sync
-                if backup_rg_urls:
-                    backup_info = self.backup_threads.get(thread_title, {})
-                    backup_info['thread_id'] = thread_id
-                    backup_info['rapidgator_links'] = rapidgator_links
-                    backup_info['rapidgator_backup_links'] = backup_rg_urls
-                    backup_info['keeplinks_link'] = new_keeplinks
-
-                    backup_info['katfile_links'] = katfile_links
-                    self.backup_threads[thread_title] = backup_info
-                    self.save_backup_threads_data()
-                    self.populate_backup_threads_table()
-                # 9) Trigger UI update so status color is refreshed immediately
-                self.mark_upload_complete(category_name, thread_title)
-
-            else:
+            # Ensure the thread exists in our data structure
+            if category_name not in self.process_threads or thread_title not in self.process_threads[category_name]:
                 logging.warning(f"Thread '{thread_title}' not found in category '{category_name}' after upload.")
+                return
+
+            thread_info = self.process_threads[category_name][thread_title]
+
+            # ------------------------------------------------------------------
+            # Extract and normalize host links from urls_dict.  The upload worker
+            # emits lists directly for each host key.  We use _as_list helper to
+            # coerce any value into a list for uniformity.
+            rg_links = []
+            rg_backup_links = []
+            nf_links = []
+            dd_links = []
+            kf_links = []
+            klinks_list = []
+            if isinstance(urls_dict, dict):
+                rg_links = self._as_list(urls_dict.get('rapidgator'))
+                # handle both rapidgator_backup and rapidgator-backup keys
+                rg_backup_links = self._as_list(urls_dict.get('rapidgator_backup') or urls_dict.get('rapidgator-backup'))
+                nf_links = self._as_list(urls_dict.get('nitroflare'))
+                dd_links = self._as_list(urls_dict.get('ddownload'))
+                kf_links = self._as_list(urls_dict.get('katfile'))
+                klinks_list = self._as_list(urls_dict.get('keeplinks'))
+
+            # Build a consolidated links mapping for the process_threads structure
+            # The mapping uses host domains and stores lists directly.  The
+            # keeplinks entry stores the list of short link(s).
+            new_links = {
+                'rapidgator.net': rg_links,
+                'nitroflare.com': nf_links,
+                'ddownload.com': dd_links,
+                'katfile.com': kf_links,
+                'rapidgator-backup': rg_backup_links,
+                'keeplinks': klinks_list,
+            }
+
+            # Write these links into the latest version if it exists, else on the
+            # root thread info.  Preserve any other version metadata.
+            versions = thread_info.get('versions', [])
+            if versions:
+                versions[-1]['links'] = new_links
+            else:
+                thread_info['links'] = new_links
+
+            # Update the Process Threads table columns with the new links.  For
+            # Rapidgator column, fall back to katfile links if RG is empty (the
+            # previous implementation also fell back to NF or DD but spec
+            # explicitly mentions RG or KF only).
+            display_links = rg_links or kf_links
+            try:
+                self.process_threads_table.item(current_row, 3).setText("\n".join(display_links))
+                self.process_threads_table.item(current_row, 4).setText("\n".join(rg_backup_links))
+                # Join keeplinks list into a single string for display; if empty, set empty string
+                keeplinks_str = "\n".join([str(x) for x in klinks_list]) if klinks_list else ""
+                self.process_threads_table.item(current_row, 5).setText(keeplinks_str)
+            except Exception:
+                pass
+
+            # Persist changes to disk
+            self.save_process_threads_data()
+
+            # Mark upload complete so that UI colors and statuses refresh
+            self.mark_upload_complete(category_name, thread_title)
+
+            # Update backup threads data if backup links exist
+            if rg_backup_links:
+                backup_info = self.backup_threads.get(thread_title, {}) or {}
+                backup_info['thread_id'] = tid
+                backup_info['rapidgator_links'] = rg_links
+                backup_info['rapidgator_backup_links'] = rg_backup_links
+                # Keeplinks link uses the consolidated string, not list
+                keeplinks_str = "\n".join([str(x) for x in klinks_list]) if klinks_list else ""
+                backup_info['keeplinks_link'] = keeplinks_str
+                backup_info['katfile_links'] = kf_links
+                self.backup_threads[thread_title] = backup_info
+                self.save_backup_threads_data()
+                self.populate_backup_threads_table()
+
         except Exception as e:
             logging.error(f"Error in handle_upload_complete: {e}", exc_info=True)
             ui_notifier.error("Upload Error", str(e))
@@ -5243,12 +5328,12 @@ class ForumBotGUI(QMainWindow):
             if category_name in self.process_threads and thread_title in self.process_threads[category_name]:
                 thread_info = self.process_threads[category_name][thread_title]
 
-                rapidgator_links = urls_dict.get('rapidgator', {}).get('urls', [])
-                backup_rg_urls = urls_dict.get('rapidgator_backup', {}).get('urls', [])
-                nitroflare_links = urls_dict.get('nitroflare', {}).get('urls', [])
-                ddownload_links = urls_dict.get('ddownload', {}).get('urls', [])
-                katfile_links = urls_dict.get('katfile', {}).get('urls', [])
-                katfile_links = urls_dict.get('katfile', [])
+                # Normalize host lists: support both dict-with-urls and plain list values
+                rapidgator_links = self._as_list(urls_dict.get('rapidgator'))
+                backup_rg_urls = self._as_list(urls_dict.get('rapidgator_backup') or urls_dict.get('rapidgator-backup'))
+                nitroflare_links = self._as_list(urls_dict.get('nitroflare'))
+                ddownload_links = self._as_list(urls_dict.get('ddownload'))
+                katfile_links = self._as_list(urls_dict.get('katfile'))
                 new_keeplinks = urls_dict.get('keeplinks', '')
 
                 merged_links = {
@@ -5273,14 +5358,11 @@ class ForumBotGUI(QMainWindow):
                 thread_info['upload_status'] = True
                 versions_list[-1]['upload_status'] = True
 
-                # find row index
-                row_index = None
-                for row in range(self.process_threads_table.rowCount()):
-                    if self.process_threads_table.item(row, 2).text() == thread_id:
-                        row_index = row
-                        break
-                if row_index is not None:
-                    display_links = rapidgator_links or katfile_links
+                # find row index using helper to respect sorting/filtering
+                row_index = self._row_for_thread_id(thread_id)
+                if row_index >= 0:
+                    # Choose display links: prefer rapidgator, then katfile, then nitroflare/ddownload
+                    display_links = rapidgator_links or katfile_links or nitroflare_links or ddownload_links
                     self.process_threads_table.item(row_index, 3).setText("\n".join(display_links))
                     self.process_threads_table.item(row_index, 4).setText("\n".join(backup_rg_urls))
                     self.process_threads_table.item(row_index, 5).setText(new_keeplinks)
@@ -5440,6 +5522,35 @@ class ForumBotGUI(QMainWindow):
                 return r
         return -1
 
+    def _as_list(self, value):
+        """Normalize various representations of link collections into a list of strings.
+
+        Args:
+            value: Could be a list, dict with 'urls' key, string, or other.
+
+        Returns:
+            list[str]: A list of URL strings.
+        """
+        if not value:
+            return []
+        # Already a list
+        if isinstance(value, list):
+            return value
+        # Dict containing 'urls'
+        if isinstance(value, dict):
+            urls = value.get('urls')
+            if isinstance(urls, list):
+                return urls
+            return [urls] if urls else []
+        # String or other scalar
+        if isinstance(value, str):
+            return [value]
+        # Iterable but not string/dict
+        try:
+            return list(value)
+        except Exception:
+            return [value]
+
     def _process_next_auto_thread(self):
         """Process the next thread in the auto-process queue.
 
@@ -5478,18 +5589,19 @@ class ForumBotGUI(QMainWindow):
                 self.download_worker.operation_complete.disconnect()
             except Exception:
                 pass
+            # Connect completion to callback using thread_id instead of static row
             self.download_worker.operation_complete.connect(
-                lambda success, msg, r=row: self._auto_after_download(success, msg, r),
+                lambda success, msg, tid=thread_id: self._auto_after_download(success, msg, tid),
                 Qt.QueuedConnection,
             )
 
-    def _auto_after_download(self, success, message, row):
+    def _auto_after_download(self, success, message, thread_id):
         """Handle the completion of a download step in the auto-process sequence.
 
         Args:
             success: Whether the download was successful.
             message: The message from the download worker (ignored here).
-            row: The row index of the thread that just completed download.
+            thread_id: The identifier of the thread that just completed download.
         """
         # Disconnect previous completion signal to avoid multiple triggers
         try:
@@ -5506,7 +5618,18 @@ class ForumBotGUI(QMainWindow):
                     pass
             QTimer.singleShot(100, self._process_next_auto_thread)
             return
-        # Start upload for the same row without relying on current selection
+        # Determine the current row for this thread id just before upload
+        row = self._row_for_thread_id(thread_id)
+        if row < 0:
+            # Cannot locate row, skip this thread and continue
+            if getattr(self, "_auto_process_queue_ids", None):
+                try:
+                    self._auto_process_queue_ids.pop(0)
+                except Exception:
+                    pass
+            QTimer.singleShot(100, self._process_next_auto_thread)
+            return
+        # Start upload for the computed row without relying on current selection
         try:
             self.upload_selected_process_threads(rows={row})
         except TypeError:
@@ -5514,14 +5637,22 @@ class ForumBotGUI(QMainWindow):
             self.process_threads_table.clearSelection()
             self.process_threads_table.selectRow(row)
             self.upload_selected_process_threads()
-        worker = getattr(self, "upload_workers", {}).get(row)
+        # Get the corresponding worker via thread ID or row
+        worker = None
+        # Try by thread id mapping first
+        if hasattr(self, 'upload_workers_by_tid'):
+            worker = self.upload_workers_by_tid.get(thread_id)
+        # Fallback to row mapping
+        if worker is None:
+            worker = getattr(self, "upload_workers", {}).get(row)
         if worker:
             try:
                 worker.upload_complete.disconnect()
             except Exception:
                 pass
-            worker.upload_complete.connect(lambda *_: self._auto_after_upload(row), Qt.QueuedConnection)
+            worker.upload_complete.connect(lambda *_: self._auto_after_upload(thread_id), Qt.QueuedConnection)
         else:
+            # No worker found; pop and move on
             if getattr(self, "_auto_process_queue_ids", None):
                 try:
                     self._auto_process_queue_ids.pop(0)
@@ -5529,19 +5660,35 @@ class ForumBotGUI(QMainWindow):
                     pass
             QTimer.singleShot(100, self._process_next_auto_thread)
 
-    def _auto_after_upload(self, row):
+    def _auto_after_upload(self, thread_id):
         """Handle completion of an upload step in the auto-process sequence.
 
         Args:
-            row: The row index of the thread that just completed upload.
+            thread_id: The identifier of the thread that just completed upload.
         """
-        worker = getattr(self, "upload_workers", {}).get(row)
-        # If auto-retry is enabled and there are failed hosts, wait for retry cycles
+        # Determine current row and worker based on thread id
+        row = self._row_for_thread_id(thread_id)
+        worker = None
+        if hasattr(self, 'upload_workers_by_tid'):
+            worker = self.upload_workers_by_tid.get(thread_id)
+        if worker is None:
+            worker = getattr(self, 'upload_workers', {}).get(row)
+        # If auto-retry is enabled and there are failed hosts, automatically schedule retry
         if (
                 getattr(self, "auto_retry_mode", False)
                 and worker
                 and any(res.get("status") == "failed" for res in worker.upload_results.values())
         ):
+            try:
+                # Provide thread_id to retry_failed_uploads instead of row so that worker uses correct index
+                QTimer.singleShot(
+                    0,
+                    lambda w=worker, tid=thread_id: w.retry_failed_uploads(
+                        max(self._row_for_thread_id(tid), 0)
+                    ),
+                )
+            except Exception:
+                pass
             return
         # Disconnect to avoid duplicate callbacks
         if worker:
@@ -5551,16 +5698,13 @@ class ForumBotGUI(QMainWindow):
                 pass
         # Proceed to template generation; select the row if needed for UI
         try:
-            # Try to re-select the row in case the table has been filtered or sorted
-            tid_item = self.process_threads_table.item(row, 2)
-            tid = tid_item.text() if tid_item else None
-            if tid:
-                r_now = self._row_for_thread_id(tid)
-                if r_now >= 0:
-                    self.process_threads_table.clearSelection()
-                    self.process_threads_table.selectRow(r_now)
+            # Re-determine row in case table has been filtered or sorted
+            if row >= 0:
+                self.process_threads_table.clearSelection()
+                self.process_threads_table.selectRow(row)
         except Exception:
             pass
+        # Generate template and apply result
         self.on_proceed_template_clicked()
         # Remove the processed thread ID from the queue and schedule next
         if getattr(self, "_auto_process_queue_ids", None):

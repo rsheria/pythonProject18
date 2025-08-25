@@ -396,14 +396,27 @@ class DownloadWorker(QThread):
                     except Exception:
                         pass
                     self.executor = None
-                if hasattr(self, "active_link_downloads", None):
-                    self.active_link_downloads.clear()
-                if hasattr(self, "download_queue", None) and self.download_queue:
-                    while not self.download_queue.empty():
-                        try:
-                            self.download_queue.get_nowait()
-                        except Exception:
-                            break
+                # Clear active downloads map if present.  Use getattr
+                # instead of hasattr with an extra argument (which raises TypeError)
+                active_links = getattr(self, "active_link_downloads", None)
+                if active_links is not None:
+                    try:
+                        active_links.clear()
+                    except Exception:
+                        # Ignore if already cleared or invalid
+                        pass
+
+                # Drain the download queue safely
+                queue_obj = getattr(self, "download_queue", None)
+                if queue_obj:
+                    try:
+                        while not queue_obj.empty():
+                            try:
+                                queue_obj.get_nowait()
+                            except Exception:
+                                break
+                    except Exception:
+                        pass
         except Exception as e:
             logging.warning(f"⚠️ Error during download cleanup: {e}")
 

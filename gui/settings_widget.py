@@ -926,9 +926,10 @@ class SettingsWidget(QWidget):
                 'stats_target': {
                     'daily_downloads': self.target_dl_spin.value(),
                     'daily_revenue': float(self.target_rev_spin.value()),
-                    'myjd_email': new_myjd_email,
-                    'myjd_password': new_myjd_password,
-                    'myjd_device': new_myjd_device,
+                    # My.JDownloader credentials are stored separately per user; keep legacy keys empty here
+                    'myjd_email': '',
+                    'myjd_password': '',
+                    'myjd_device': '',
                 },
             }
             
@@ -957,15 +958,30 @@ class SettingsWidget(QWidget):
             
             # Save to user manager if logged in, otherwise to config
             if self.user_manager.get_current_user():
+                # Persist My.JDownloader credentials separately so they survive reloads
+                try:
+                    self.user_manager.set_user_setting('myjd_email', new_myjd_email)
+                    self.user_manager.set_user_setting('myjd_password', new_myjd_password)
+                    self.user_manager.set_user_setting('myjd_device', new_myjd_device)
+                    # Also mirror into config for current session
+                    self.config['myjd_email'] = new_myjd_email
+                    self.config['myjd_password'] = new_myjd_password
+                    self.config['myjd_device'] = new_myjd_device
+                except Exception as e:
+                    logging.error(f"Error saving My.JDownloader credentials: {e}", exc_info=True)
 
                 for key, value in new_settings.items():
                     self.user_manager.set_user_setting(key, value)
                     self.config[key] = value
                 logging.info("✅ Settings saved to user settings")
             else:
-
+                # No user logged in: update config directly and include MyJD credentials
                 for key, value in new_settings.items():
                     self.config[key] = value
+                # Persist My.JDownloader credentials in config
+                self.config['myjd_email'] = new_myjd_email
+                self.config['myjd_password'] = new_myjd_password
+                self.config['myjd_device'] = new_myjd_device
                 from config.config import save_configuration
                 save_configuration(self.config)
                 logging.info("✅ Settings saved to config")
