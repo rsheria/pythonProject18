@@ -28,7 +28,7 @@ from PyQt5.QtWidgets import (
 from core.user_manager import get_user_manager
 from integrations.jd_client import hard_cancel
 from models.operation_status import OperationStatus, OpStage, OpType
-
+from utils.utils import _normalize_links
 
 class ProgressBarDelegate(QStyledItemDelegate):
     """ProgressBar يحترم الـPalette الحالية ويرفع التباين تلقائيًا فى الدارك."""
@@ -285,6 +285,7 @@ class StatusWidget(QWidget):
         layout.addWidget(self.btn_cancel)
 
         self._row_by_key = {}
+        self._row_by_tid: dict[str, int] = {}
         self._row_last_stage = {}
         self._jd_links = {}
         self._upload_meta = {}
@@ -473,6 +474,11 @@ class StatusWidget(QWidget):
                     del self._row_by_key[key]
                 elif r > row:
                     self._row_by_key[key] = r - 1
+            for tid, r in list(self._row_by_tid.items()):
+                if r == row:
+                    del self._row_by_tid[tid]
+                elif r > row:
+                    self._row_by_tid[tid] = r - 1
             for r in list(self._row_last_stage.keys()):
                 if r == row:
                     del self._row_last_stage[r]
@@ -875,6 +881,13 @@ class StatusWidget(QWidget):
             "key": list(key_tuple) if key_tuple else None,  # (section,item,op_type)
             "jd_link": self._jd_links.get(tuple(key_tuple)) if key_tuple else "",
         }
+        tid = ""
+        for t, r in self._row_by_tid.items():
+            if r == row:
+                tid = t
+                break
+        if tid:
+            snap["thread_id"] = tid
         meta = self._upload_meta.get(tuple(key_tuple)) if key_tuple else None
         if meta:
             meta = dict(meta)
@@ -975,6 +988,7 @@ class StatusWidget(QWidget):
             # تفريغ الجداول/الخرائط
             self.table.setRowCount(0)
             self._row_by_key.clear()
+            self._row_by_tid.clear()
             self._jd_links.clear()
             self._upload_meta.clear()
             self._thread_steps.clear()
@@ -1041,7 +1055,9 @@ class StatusWidget(QWidget):
                     meta = rdata.get("upload_meta") or {}
                     if meta:
                         self._upload_meta[key] = dict(meta)
-
+                tid = rdata.get("thread_id")
+                if tid:
+                    self._row_by_tid[tid] = r
                 # تلوين الصف
                 stage = self._stage_from_text(stage_text)
                 self._color_row(r, stage)
@@ -1297,14 +1313,20 @@ class StatusWidget(QWidget):
     def _update_row_from_status(self, st: OperationStatus):
         sec = st.section or ("Uploads" if st.op_type == OpType.UPLOAD else "Downloads")
         key = (sec, st.item, st.op_type.name)
-
-        row = self._row_by_key.get(key)
+        tid = st.thread_id or f"{sec}:{st.item}"
+        row = self._row_by_tid.get(tid)
+        if row is None:
+            row = self._row_by_key.get(key)
+        if row is None and st.links:
+            log.info("POPULATE-LINKS tid=%s row=? updated=[] keeplinks=%s", tid, st.keeplinks_url)
+            return
         if row is None:
             row = self.table.rowCount()
             self.table.insertRow(row)
             for col in range(self.table.columnCount()):
                 self._ensure_item(row, col)
             self._row_by_key[key] = row
+            self._row_by_tid.setdefault(tid, row)
 
         self._ensure_section_option(sec)
 
@@ -1383,19 +1405,50 @@ class StatusWidget(QWidget):
                         hp = 0
                     (self._set_progress_cell(row, host_col, hp) if hp > 0 else self._clear_progress_cell(row, host_col))
 
+        if st.stage == OpStage.FINISHED and st.op_type == OpType.UPLOAD and st.links:
+            model = self.table.model()
+            updated_hosts: list[str] = []
+            for host, header in HOST_COLS.items():
+                col = self._host_col_index.get(host)
+                if col is None:
+                    continue
+                lnks = _normalize_links(st.links.get(host))
+                if lnks:
+                    self._ensure_item(row, col).setText("\n".join(lnks))
+                    self._set_progress_cell(row, col, 100)
+                    idx = model.index(row, col)
+                    model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
+                    updated_hosts.append(header)
+            if updated_hosts:
+                log.info(
+                    "POPULATE-LINKS tid=%s row=%s updated=%s keeplinks=%s",
+                    tid,
+                    row,
+                    updated_hosts,
+                    st.keeplinks_url or "",
+                )
+                link_col = self._col_map.get("Links")
+                if link_col is not None:
+                    rg = _normalize_links(st.links.get("rapidgator"))
+                    self._ensure_item(row, link_col).setText(rg[0] if rg else "")
+                    idx = model.index(row, link_col)
+                    model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
         changed = False
         if self._row_last_stage.get(row) != stage:
             self._color_row(row, stage, st.op_type)
             self._row_last_stage[row] = stage
             changed = True
         model = self.table.model()
-        tl = model.index(row, 0)
-        br = model.index(row, self.table.columnCount() - 1)
-        model.dataChanged.emit(tl, br, [Qt.BackgroundRole, Qt.DisplayRole])
         roles = [Qt.DisplayRole]
         if changed:
+            tl = model.index(row, 0)
+            br = model.index(row, self.table.columnCount() - 1)
+            model.dataChanged.emit(tl, br, [Qt.BackgroundRole])
             roles.append(Qt.BackgroundRole)
+        tl = model.index(row, 0)
+        br = model.index(row, self.table.columnCount() - 1)
         model.dataChanged.emit(tl, br, roles)
+        self.table.viewport().update()
         return key
 
     def handle_status(self, st: OperationStatus):

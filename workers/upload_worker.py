@@ -11,6 +11,7 @@ from typing import Any, List, Optional
 from PyQt5.QtCore import QThread, pyqtSignal, pyqtSlot
 from integrations.jd_client import hard_cancel
 from models.operation_status import OperationStatus, OpStage, OpType
+from utils.utils import _normalize_links
 from uploaders.ddownload_upload_handler import DDownloadUploadHandler
 from uploaders.katfile_upload_handler import KatfileUploadHandler
 from uploaders.nitroflare_upload_handler import NitroflareUploadHandler
@@ -185,105 +186,26 @@ class UploadWorker(QThread):
             # تحضير القاموس النهائي مع Keeplinks
             final = self._prepare_final_urls()
 
-            # If an error occurred, propagate the error payload without normalization
             if "error" in final:
-                # Emit upload_error and complete signals with the raw error dict
                 self.upload_error.emit(self.row, final["error"])
                 self.upload_complete.emit(self.row, final)
                 return
 
-            # ------------------------------------------------------------------
-            # Normalize the final payload to a consistent schema prior to emitting.
-            # The consumer expects a dictionary with the following keys:
-            #   thread_id: str
-            #   rapidgator, rapidgator_backup, nitroflare, ddownload, katfile: list
-            #   keeplinks: str (empty string if absent)
-            # Any nested forms or aliases are flattened here.  None or boolean
-            # values are converted to empty lists or empty strings.
-            payload: dict[str, Any] = {}
-            # Always include thread_id as a string
-            try:
-                payload["thread_id"] = str(self.thread_id) if self.thread_id is not None else ""
-            except Exception:
-                payload["thread_id"] = ""
-
-            # Helper to extract a list of URLs from various representations
-            def _extract_list(value: Any) -> list:
-                """Coerce arbitrary values into a list of strings.
-
-                Any ``None`` or boolean value is treated as empty.  Dictionaries
-                may carry a ``urls`` key, which will be flattened.  Strings are
-                wrapped in a single-item list.  Other iterables are converted
-                via ``list()`` with a final fallback to wrapping the value.
-                """
-                if value is None or isinstance(value, bool):
-                    return []
-                if not value:
-                    return []
-                # If it's a dict with 'urls' key, use that
-                if isinstance(value, dict):
-                    urls = value.get("urls")
-                    if isinstance(urls, list):
-                        return urls
-                    return [urls] if urls else []
-                # If already a list
-                if isinstance(value, list):
-                    return value
-                # If it's a string, wrap in list
-                if isinstance(value, str):
-                    return [value]
-                # Other iterables (tuple, set, etc.)
-                try:
-                    return list(value)
-                except Exception:
-                    return [value]
-
-            # Map of canonical keys we want in the payload
-            host_keys = {
-                "rapidgator": ["rapidgator"],
-                "rapidgator_backup": ["rapidgator_backup", "rapidgator-backup"],
-                "nitroflare": ["nitroflare"],
-                "ddownload": ["ddownload"],
-                "katfile": ["katfile"],
-            }
-            # Initialize lists for all hosts
-            for canon_key in host_keys:
-                payload[canon_key] = []
-
-            # Populate lists from final dict
-            for canon_key, aliases in host_keys.items():
-                found = []
-                for alias in aliases:
-                    if alias in final:
-                        found = _extract_list(final.get(alias))
-                        break
-                # Ensure the value is a list
-                if found and isinstance(found, list):
-                    payload[canon_key] = found
-                else:
-                    payload[canon_key] = []
-
-            # Normalize keeplinks: convert to a simple string
-            keeplink_val = final.get("keeplinks", "")
-            # If the keeplinks value is a dict with 'urls', flatten it
-            if isinstance(keeplink_val, dict):
-                urls = keeplink_val.get("urls")
-                if isinstance(urls, list):
-                    keeplink_val = "\n".join([str(u) for u in urls])
-                else:
-                    keeplink_val = str(urls) if urls else ""
-            elif isinstance(keeplink_val, list):
-                # Join multiple keeplink strings with newlines
-                keeplink_val = "\n".join([str(u) for u in keeplink_val])
-            elif keeplink_val is None or isinstance(keeplink_val, bool):
-                keeplink_val = ""
-            else:
-                keeplink_val = str(keeplink_val)
-            payload["keeplinks"] = keeplink_val or ""
-
-            # Emit success and normalized complete payload
+            self._emit_final_statuses(self.row)
+            status = OperationStatus(
+                section=self.section,
+                item=self.files[0].name if self.files else "",
+                op_type=OpType.UPLOAD,
+                stage=OpStage.FINISHED,
+                message="Complete",
+                progress=100,
+                thread_id=final.get("thread_id", ""),
+                links=final.get("links", {}),
+                keeplinks_url=final.get("keeplinks_url", ""),
+            )
+            self.progress_update.emit(status)
             self.upload_success.emit(self.row)
-            self.upload_complete.emit(self.row, payload)
+            self.upload_complete.emit(self.row, final)
 
         except Exception as e:
             msg = str(e)
@@ -442,58 +364,50 @@ class UploadWorker(QThread):
             return None
 
     def _prepare_final_urls(self) -> dict:
-        """Combine per-host URLs into one dict and optionally add Keeplinks."""
+        """Normalize collected upload URLs into a stable payload."""
         self._check_control()
-
-        # إذا أي مستضيف غير mega فشل → نرجع خطأ
         failed = any(
             self.upload_results[i]["status"] == "failed" for i in range(len(self.hosts))
         )
         if failed:
             return {"error": "بعض مواقع الرفع فشلت، يرجى المحاولة مرة أخرى."}
 
-        # Build result dictionary where each host key maps directly to a list of URLs.
-        final: dict[str, Any] = {}
+        links: dict[str, list[str]] = {
+            "rapidgator": [],
+            "ddownload": [],
+            "katfile": [],
+            "nitroflare": [],
+            "rapidgator_bak": [],
+        }
         all_urls: list[str] = []
-        # Pattern to detect rapidgator backup hosts (e.g., rapidgator-backup, rg_backup)
         backup_pattern = re.compile(r"(bak|backup)$", re.IGNORECASE)
 
         for i, host in enumerate(self.hosts):
-            urls = self.upload_results[i]["urls"]
-            # Normalize the host name to detect backups
+            urls = _normalize_links(self.upload_results[i]["urls"])
             norm = host.lower().replace("-", "").replace("_", "")
             is_rg_backup = "rapidgator" in norm and bool(backup_pattern.search(norm))
-            # Map any rapidgator backup alias (e.g., rapidgator-backup) to a consistent key
-            key = "rapidgator_backup" if is_rg_backup else host
-            # Assign the list of URLs directly for each host
-            final[key] = list(urls) if urls else []
-            # For Keeplinks we only include non-backup hosts
+            key = "rapidgator_bak" if is_rg_backup else host.lower().replace("-", "_")
+            if key in links:
+                links[key] = urls
             if not is_rg_backup:
                 all_urls.extend(urls)
 
-        # Determine if all uploads were successful
+        keeplink = self.keeplinks_url or ""
         all_success = all(res["status"] == "success" for res in self.upload_results.values())
-        # Add Keeplinks if we have any URLs and all hosts succeeded
         if all_urls and all_success and not self.keeplinks_sent:
-            if self.keeplinks_url:
-                final["keeplinks"] = self.keeplinks_url
-            else:
+            if not keeplink:
                 logging.debug("Sending %d links to Keeplinks", len(all_urls))
-                keeplink = self.bot.send_to_keeplinks(all_urls)
-                if keeplink:
-                    final["keeplinks"] = keeplink
-                    self.keeplinks_url = keeplink
+                k = self.bot.send_to_keeplinks(all_urls)
+                if k:
+                    keeplink = k
+                    self.keeplinks_url = k
             self.keeplinks_sent = True
-        elif self.keeplinks_url:
-            final["keeplinks"] = self.keeplinks_url
 
-        # If Keeplinks was previously sent but not included in this batch, reuse stored link
-        if self.keeplinks_sent and "keeplinks" not in final and self.keeplinks_url:
-            final["keeplinks"] = self.keeplinks_url
-
-        # Always include the thread_id so GUI can map to the correct row
-        final["thread_id"] = getattr(self, "thread_id", None)
-        return final
+        return {
+            "thread_id": getattr(self, "thread_id", ""),
+            "links": links,
+            "keeplinks_url": keeplink,
+        }
 
     def _emit_final_statuses(self, row: int) -> None:
         """Emit final OperationStatus for each host so the UI recolors."""
@@ -548,6 +462,19 @@ class UploadWorker(QThread):
             if not to_retry:
                 final = self._prepare_final_urls()
                 self._emit_final_statuses(row)
+                if "error" not in final:
+                    status = OperationStatus(
+                        section=self.section,
+                        item=self.files[0].name if self.files else "",
+                        op_type=OpType.UPLOAD,
+                        stage=OpStage.FINISHED,
+                        message="Complete",
+                        progress=100,
+                        thread_id=final.get("thread_id", ""),
+                        links=final.get("links", {}),
+                        keeplinks_url=final.get("keeplinks_url", ""),
+                    )
+                    self.progress_update.emit(status)
                 self.upload_complete.emit(row, final)
                 return
 
@@ -579,6 +506,19 @@ class UploadWorker(QThread):
 
             final = self._prepare_final_urls()
             self._emit_final_statuses(row)
+            if "error" not in final:
+                status = OperationStatus(
+                    section=self.section,
+                    item=self.files[0].name if self.files else "",
+                    op_type=OpType.UPLOAD,
+                    stage=OpStage.FINISHED,
+                    message="Complete",
+                    progress=100,
+                    thread_id=final.get("thread_id", ""),
+                    links=final.get("links", {}),
+                    keeplinks_url=final.get("keeplinks_url", ""),
+                )
+                self.progress_update.emit(status)
             self.upload_complete.emit(row, final)
         except Exception as e:
             logging.error("retry_failed_uploads crashed: %s", e, exc_info=True)
@@ -594,6 +534,19 @@ class UploadWorker(QThread):
             if not to_retry:
                 final = self._prepare_final_urls()
                 self._emit_final_statuses(row)
+                if "error" not in final:
+                    status = OperationStatus(
+                        section=self.section,
+                        item=self.files[0].name if self.files else "",
+                        op_type=OpType.UPLOAD,
+                        stage=OpStage.FINISHED,
+                        message="Complete",
+                        progress=100,
+                        thread_id=final.get("thread_id", ""),
+                        links=final.get("links", {}),
+                        keeplinks_url=final.get("keeplinks_url", ""),
+                    )
+                    self.progress_update.emit(status)
                 self.upload_complete.emit(row, final)
                 return
             for i in to_retry:
@@ -622,6 +575,19 @@ class UploadWorker(QThread):
                     self.upload_results[i]["status"] = "failed"
             final = self._prepare_final_urls()
             self._emit_final_statuses(row)
+            if "error" not in final:
+                status = OperationStatus(
+                    section=self.section,
+                    item=self.files[0].name if self.files else "",
+                    op_type=OpType.UPLOAD,
+                    stage=OpStage.FINISHED,
+                    message="Complete",
+                    progress=100,
+                    thread_id=final.get("thread_id", ""),
+                    links=final.get("links", {}),
+                    keeplinks_url=final.get("keeplinks_url", ""),
+                )
+                self.progress_update.emit(status)
             self.upload_complete.emit(row, final)
         except Exception as e:
             logging.error("resume_pending_uploads crashed: %s", e, exc_info=True)
@@ -657,6 +623,19 @@ class UploadWorker(QThread):
                     self.upload_results[i]["status"] = "failed"
             final = self._prepare_final_urls()
             self._emit_final_statuses(row)
+            if "error" not in final:
+                status = OperationStatus(
+                    section=self.section,
+                    item=self.files[0].name if self.files else "",
+                    op_type=OpType.UPLOAD,
+                    stage=OpStage.FINISHED,
+                    message="Complete",
+                    progress=100,
+                    thread_id=final.get("thread_id", ""),
+                    links=final.get("links", {}),
+                    keeplinks_url=final.get("keeplinks_url", ""),
+                )
+                self.progress_update.emit(status)
             self.upload_complete.emit(row, final)
         except Exception as e:
             logging.error("reupload_all crashed: %s", e, exc_info=True)

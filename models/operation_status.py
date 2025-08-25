@@ -30,3 +30,6 @@ class OperationStatus:
     eta: float = 0.0
     host: str = "-"
     errors: int = 0
+    thread_id: str = ""
+    links: dict[str, list[str]] = field(default_factory=dict)
+    keeplinks_url: str = ""

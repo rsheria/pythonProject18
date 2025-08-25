@@ -34,3 +34,19 @@ def sanitize_filename(filename):
     logging.debug(f"Sanitized filename/category: '{filename}'")
 
     return filename
+def _normalize_links(payload):
+    """Return a list of link strings for arbitrary payloads.
+
+    Any ``None`` or boolean payload yields an empty list.  Strings are wrapped
+    in a list, while existing iterables are converted to a list of strings.
+    """
+    if not payload or isinstance(payload, bool):
+        return []
+    if isinstance(payload, (list, tuple, set)):
+        return [str(x) for x in payload if x]
+    if isinstance(payload, str):
+        return [payload]
+    try:
+        return [str(payload)]
+    except Exception:
+        return []
