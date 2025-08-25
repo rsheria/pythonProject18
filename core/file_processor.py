@@ -64,13 +64,55 @@ class FileProcessor:
             self.split_bytes = int(split_bytes)
         if recompress_mode is not None:
             self.recompress_mode = recompress_mode
+
+    def ensure_single_root(self, content_dir: Path, root_name: str) -> Path:
+        """Ensure ``content_dir`` contains exactly one sanitized root folder.
+
+        The folder will be named after ``root_name`` (sanitized and trimmed),
+        with any temporary/UUID suffixes removed.  If ``content_dir`` already
+        contains a single directory, it is renamed to ``root_name``.  Otherwise
+        a new directory is created and all top-level items are moved inside it.
+
+        Parameters
+        ----------
+        content_dir: Path
+            Directory holding extracted items.
+        root_name: str
+            Desired name of the final root directory.
+
+        Returns
+        -------
+        Path
+            The path to the normalized root directory.
+        """
+        # Strip temporary/uuid suffixes then sanitize
+        root_name = re.sub(r'_temp_[0-9a-fA-F]+$', '', root_name)
+        root_name = re.sub(r'[-_][0-9a-fA-F]{8,}$', '', root_name)
+        root_name = self._sanitize_and_shorten_title(root_name)
+
+        entries = [p for p in content_dir.iterdir() if p.name.lower() != 'desktop.ini']
+        if len(entries) == 1 and entries[0].is_dir():
+            root_folder = entries[0]
+            if root_folder.name != root_name:
+                target = content_dir / root_name
+                if target.exists():
+                    self._safely_remove_directory(target)
+                root_folder.rename(target)
+                root_folder = target
+        else:
+            root_folder = content_dir / root_name
+            root_folder.mkdir(exist_ok=True)
+            for item in entries:
+                shutil.move(str(item), root_folder / item.name)
+
+        return root_folder
     def process_downloads(
         self,
         thread_dir: Path,
         downloaded_files: List[str],
         thread_title: str,
         password: str | None = None,
-    ) -> Optional[List[str]]:
+    ) -> Optional[List[str] | tuple[str, List[str]]]:
         """
         Process downloaded files and return list of processed file paths.
         1) Move the downloaded files to the thread_dir.
@@ -100,7 +142,35 @@ class FileProcessor:
 
             # Decide processing path based on recompress_mode
             if self.recompress_mode == "never":
-                processed_files = [str(p) for p in moved_files]
+                root_folder: Path | None = None
+                all_files: List[Path] = []
+                for f in moved_files:
+                    if self._is_archive_file(f):
+                        root_folder, files = self.handle_archive_file(
+                            f, thread_dir, cleaned_thread_title, password
+                        )
+                        if root_folder:
+                            all_files = files
+                    else:
+                        if root_folder is None:
+                            root_folder = self.ensure_single_root(
+                                thread_dir, cleaned_thread_title
+                            )
+                        dest = root_folder / f.name
+                        if f != dest:
+                            shutil.move(str(f), dest)
+                        all_files.append(dest)
+
+                if root_folder is None:
+                    root_folder = self.ensure_single_root(
+                        thread_dir, cleaned_thread_title
+                    )
+                logging.info(
+                    "Normalized root %s with %d files",
+                    root_folder,
+                    len(all_files),
+                )
+                return str(root_folder), [str(p) for p in all_files]
             elif (
                 self.recompress_mode == "if_needed"
                 and len(moved_files) == 1
@@ -250,9 +320,15 @@ class FileProcessor:
         download_folder: Path,
         thread_title: str,
         password: str | None = None,
-    ) -> List[str]:
-        """Handle archive processing with format preservation, splitting,
-           and final rename to thread_title for single-item or per-file scenarios."""
+    ) -> List[str] | tuple[Path, List[Path]]:
+        """Handle archive processing with format preservation and splitting.
+
+        When ``recompress_mode`` is set to ``"never"`` the archive is extracted
+        and normalized but not recompressed.  The method then returns a tuple of
+        ``(root_folder, files)`` where ``files`` is a list of all extracted
+        file paths.  In other modes it returns a list of paths to newly created
+        archives.
+        """
         extract_dir = None
         try:
             original_format = archive_path.suffix.lower()
@@ -317,6 +393,31 @@ class FileProcessor:
             )
             logging.info(f"Total size of extracted files: {total_size / self.GIGABYTE:.2f} GB")
 
+            # Ensure a clean single root folder
+            root_folder = self.ensure_single_root(extract_dir, thread_title)
+
+            if self.recompress_mode == "never":
+                final_root = download_folder / root_folder.name
+                if final_root.exists():
+                    for item in root_folder.iterdir():
+                        shutil.move(str(item), final_root / item.name)
+                else:
+                    shutil.move(str(root_folder), final_root)
+
+                if is_multipart and all_parts:
+                    self._safely_remove_original_archives(archive_path, all_parts)
+                else:
+                    self._safely_remove_original_archives(archive_path, None)
+
+                if extract_dir.exists():
+                    self._safely_remove_directory(extract_dir)
+
+                files = [p for p in final_root.rglob('*') if p.is_file()]
+                logging.info(
+                    "Normalized root %s with %d files", final_root, len(files)
+                )
+                return final_root, files
+
             # Re-archive everything => final name based on thread_title
             unique_id = uuid.uuid4().hex
             temp_suffix = f"_temp_{unique_id}"
@@ -326,11 +427,11 @@ class FileProcessor:
             for attempt in range(max_retries):
                 if is_zip:
                     success = self._create_zip_archive(
-                        extract_dir, temp_archive_base, thread_title
+                        root_folder, temp_archive_base, thread_title
                     )
                 else:
                     success = self._create_rar_archive(
-                        extract_dir, temp_archive_base, thread_title
+                        root_folder, temp_archive_base, thread_title
                     )
                 if success:
                     break

@@ -207,6 +207,7 @@ class SettingsWidget(QWidget):
         mode_layout = QHBoxLayout()
         mode_layout.addWidget(QLabel("Recompress Mode:"))
         self.recompress_combo = QComboBox()
+        # "Never" mode skips re-archiving and uploads extracted files directly
         self.recompress_combo.addItems(["Always", "If Needed", "Never"])
         mode_layout.addWidget(self.recompress_combo)
         winrar_layout.addLayout(mode_layout)

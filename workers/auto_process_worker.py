@@ -29,11 +29,18 @@ class AutoProcessWorker(QRunnable):
     not influence the running pipeline.
     """
 
-    def __init__(self, job: AutoProcessJob, snapshot: SelectedRowSnapshot, jd_client):
+    def __init__(
+        self,
+        job: AutoProcessJob,
+        snapshot: SelectedRowSnapshot,
+        jd_client,
+        files_to_upload: list[str] | None = None,
+    ):
         super().__init__()
         self.job = job
         self.snapshot = snapshot
         self.jd_client = jd_client
+        self.files_to_upload = files_to_upload or []
         self.signals = AutoProcessWorkerSignals()
 
     # ------------------------------------------------------------------
@@ -77,6 +84,11 @@ class AutoProcessWorker(QRunnable):
                 time.sleep(0.1)  # simulate work
 
             # Upload stage ---------------------------------------------------
+            logging.info(
+                "AutoProcessWorker uploading from %s with %d files",
+                self.snapshot.working_dir,
+                len(self.files_to_upload),
+            )
             hosts = ["RG", "DDL", "KF", "NF", "RG_BAK"]
             for host in hosts:
                 self._emit(OpType.UPLOAD, OpStage.RUNNING, f"Uploading to {host}", host=host)
@@ -124,6 +136,9 @@ class AutoProcessWorker(QRunnable):
             self.signals.result_ready.emit(self.job.job_id, payload)
             self._emit(OpType.POST, OpStage.FINISHED, "Finished")
             self.signals.finished.emit(self.job.job_id)
+            logging.info(
+                "AutoProcessWorker finished job %s", self.job.job_id
+            )
         except Exception as e:  # pragma: no cover - best effort
             logging.error("AutoProcessWorker error: %s", e)
             self._emit(OpType.POST, OpStage.ERROR, str(e))

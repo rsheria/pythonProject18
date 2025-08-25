@@ -41,6 +41,7 @@ class UploadWorker(QThread):
             section: str = "Uploads",
             keeplinks_url: Optional[str] = None,
             cancel_event=None,
+            files: Optional[List[str]] = None,
     ):
         super().__init__()  # QThread init
         self.bot = bot
@@ -79,7 +80,8 @@ class UploadWorker(QThread):
         # ملاحظة: Rapidgator handler سيُنشأ لكل ملف على حدة داخل ‎_upload_single
 
         # جمع الملفات
-        self.files = self._get_files()
+        self.explicit_files = [Path(f) for f in files] if files else None
+        self.files = self.explicit_files or self._get_files()
         self.total_files = len(self.files)
         if not self.files:
             logging.warning("UploadWorker: لا توجد ملفات في المجلد %s", folder_path)
@@ -151,6 +153,9 @@ class UploadWorker(QThread):
 
     def run(self):
         try:
+            logging.info(
+                "Uploading from %s with %d files", self.folder_path, self.total_files
+            )
             if not self.files:
                 msg = "لا توجد ملفات للرفع."
                 self.upload_error.emit(self.row, msg)
@@ -223,7 +228,11 @@ class UploadWorker(QThread):
             self.upload_success.emit(self.row)
             # Emit canonical final result
             self.upload_complete.emit(self.row, final)
-
+            logging.info(
+                "Finished uploading from %s with %d files",
+                self.folder_path,
+                self.total_files,
+            )
         except Exception as e:
             msg = str(e)
             if "cancelled" in msg.lower():

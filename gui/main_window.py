@@ -2061,6 +2061,11 @@ class ForumBotGUI(QMainWindow):
             StatusBarMessageBox.warning(self, "Processing Failed", "Failed to process downloaded files.")
             return
 
+        if isinstance(processed_files, tuple):
+            root_folder, files = processed_files
+        else:
+            root_folder, files = reupload_folder, processed_files
+
         # Upload only to main hosts (exclude backup RG account)
         process_status.stage = OpStage.FINISHED
         process_status.message = "Processing complete"
@@ -2073,11 +2078,12 @@ class ForumBotGUI(QMainWindow):
         self.current_upload_worker = UploadWorker(
             bot=self.bot,
             row=row,
-            folder_path=reupload_folder,
+            folder_path=root_folder,
             thread_id=thread_id,
             upload_hosts=hosts,
             section="Backup Upload",
             keeplinks_url=thread_info.get('keeplinks_link'),
+            files=[str(f) for f in files] if isinstance(processed_files, tuple) else None,
         )
         self.register_worker(self.current_upload_worker)
         self.current_upload_worker.upload_complete.connect(
@@ -5348,6 +5354,7 @@ class ForumBotGUI(QMainWindow):
             upload_hosts=hosts,
             section=str(meta.get("section", "Uploads")),
             keeplinks_url=meta.get("keeplinks_url"),
+            files=meta.get("files"),
         )
         # نفس الربط القياسى بتاعك
         self.register_worker(worker)  # يوصل progress_update/host_progress...
