@@ -4928,11 +4928,20 @@ class ForumBotGUI(QMainWindow):
         """Start uploads for the specified rows (or current selection) with pause/resume/cancel control.
 
         Args:
-            rows: Optional set of row indices to upload.  If None,
-                uses the currently selected rows from the
-                ``process_threads_table``.
+          rows: Optional set of row indices to upload.  If ``None``, uses the
+                currently selected rows from the ``process_threads_table``.
+
+        Note:
+            When this method is connected directly to a Qt ``clicked`` signal,
+            the ``clicked`` state (a boolean) is passed as the first argument.
+            Such a boolean is treated the same as ``None`` so the current
+            selection is used.
         """
         try:
+            # Qt's clicked signal passes a boolean ``checked`` value; treat it
+            # as ``None`` so the current selection is used.
+            if isinstance(rows, bool):
+                rows = None
             # Determine which rows to upload
             if rows is None:
                 selected_items = self.process_threads_table.selectedItems()
