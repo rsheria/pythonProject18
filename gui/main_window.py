@@ -5088,13 +5088,14 @@ class ForumBotGUI(QMainWindow):
 
             rg_links = self._as_list(urls_dict.get("rapidgator")) if isinstance(urls_dict, dict) else []
             rg_backup_links = []
+            keeplink = ""
             if isinstance(urls_dict, dict):
                 rg_backup_links = self._as_list(
                     urls_dict.get("rapidgator_backup")
                     or urls_dict.get("rapidgator_bak")
                     or urls_dict.get("rapidgator-backup")
                 )
-                keeplink = str(urls_dict.get("keeplinks", "")) if isinstance(urls_dict, dict) else ""
+                keeplink = str(urls_dict.get("keeplinks", ""))
 
                 model = self.process_threads_table.model()
                 self.process_threads_table.item(current_row, 3).setText(rg_links[0] if rg_links else "")
@@ -5105,18 +5106,25 @@ class ForumBotGUI(QMainWindow):
                 self.process_threads_table.item(current_row, 5).setText(keeplink if keeplink else "")
                 model.dataChanged.emit(model.index(current_row, 5), model.index(current_row, 5))
 
-                links = thread_info.get("links", {})
+                # Determine where to store link data (support versions format)
+                target_info = thread_info
+                if isinstance(thread_info, dict) and thread_info.get("versions"):
+                    target_info = thread_info["versions"][-1]
+
+                links = target_info.get("links", {})
                 links["rapidgator.net"] = rg_links
                 if rg_backup_links:
-                    links["rapidgator-backup"] = rg_backup_links
+                    links["rapidgator_backup"] = rg_backup_links
                 else:
-                    links.pop("rapidgator-backup", None)
+                    links.pop("rapidgator_backup", None)
                 if keeplink:
                     links["keeplinks"] = keeplink
                 else:
                     links.pop("keeplinks", None)
-                thread_info["links"] = links
-                thread_info["upload_status"] = True
+                target_info["links"] = links
+                target_info["upload_status"] = True
+                target_info["thread_id"] = tid
+                # Mirror thread_id at root for backwards compatibility
                 thread_info["thread_id"] = tid
 
             self.save_process_threads_data()
@@ -5607,10 +5615,31 @@ class ForumBotGUI(QMainWindow):
             worker = getattr(self, "upload_workers", {}).get(row)
         if worker:
             try:
+                # Disconnect any existing upload_complete handlers to avoid duplicate callbacks
                 worker.upload_complete.disconnect()
             except Exception:
                 pass
-            worker.upload_complete.connect(lambda *_: self._auto_after_upload(thread_id), Qt.QueuedConnection)
+            # When running in auto‑process mode, ensure we still update the Process Threads grid
+            # by forwarding the upload_complete signal to handle_upload_complete before proceeding
+            # with the remaining auto‑process logic.  The upload_complete signal provides two
+            # positional arguments: the row index and the final URLs dictionary.  We capture
+            # these arguments and call handle_upload_complete with them, then invoke the
+            # _auto_after_upload method with the current thread_id to continue the auto flow.
+            # This preserves the same state updates as manual uploads (populating RG, RG_BAK and
+            # Keeplinks columns) while still driving the auto‑process pipeline.
+            worker.upload_complete.connect(
+                # Capture row and URL payload; update the Process Threads grid via
+                # handle_upload_complete, track completion counters, re‑enable the
+                # upload button, and then continue with the auto‑process flow.
+                lambda row_arg, urls_dict, tid=thread_id: (
+                    self.handle_upload_complete(row_arg, urls_dict),
+                    self._on_upload_worker_complete(),
+                    # Ensure the Upload button reflects completion for auto mode
+                    self.process_upload_button.setEnabled(True),
+                    self._auto_after_upload(tid)
+                ),
+                Qt.QueuedConnection,
+            )
         else:
             # No worker found; pop and move on
             if getattr(self, "_auto_process_queue_ids", None):
@@ -7491,9 +7520,17 @@ class ForumBotGUI(QMainWindow):
                     if hid:
                         self.row_index_by_hostid[hid] = row_position
 
-            # Rapidgator Backup Link
-            rg_backup_info = links.get('rapidgator_backup', {})
-            rg_backup_links = rg_backup_info.get('urls', []) if isinstance(rg_backup_info, dict) else rg_backup_info
+            # Rapidgator Backup Link (handle both legacy key styles)
+            rg_backup_info = (
+                links.get('rapidgator_backup')
+                or links.get('rapidgator-backup')
+                or {}
+            )
+            rg_backup_links = (
+                rg_backup_info.get('urls', [])
+                if isinstance(rg_backup_info, dict)
+                else rg_backup_info
+            )
             flat_backup = []
             for link in rg_backup_links:
                 if isinstance(link, list):

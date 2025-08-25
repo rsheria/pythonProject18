@@ -638,6 +638,183 @@ class StatusWidget(QWidget):
             cur.update(meta)
         self._schedule_status_save()
 
+    # ------------------------------------------------------------------
+    def populate_links_by_tid(self, tid: str, links: dict, keeplinks: str, meta: dict) -> None:
+        """Populate host and Keeplinks columns for a given thread.
+
+        This helper locates the row associated with ``tid`` and updates
+        the Rapidgator (RG), rapidgator backup (RG_BAK), ddownload (DDL),
+        katfile (KF) and nitroflare (NF) columns based on the provided
+        ``links`` mapping.  It also writes the protected URL into a
+        Keeplinks/Links column when present.  Nested link structures and
+        boolean placeholders are normalised to lists of strings.  Only
+        modified cells are updated, and a snapshot save is scheduled
+        afterwards.  Upload metadata is persisted when provided.
+
+        Args:
+            tid: The thread identifier mapping to ``_row_by_tid``.  If
+                missing, a fallback lookup by section and item will be
+                attempted (splitting ``tid`` on the first ``:``).
+            links: Mapping of host names to one or more URLs.  Supported
+                keys include ``rapidgator``, ``rapidgator_bak``,
+                ``ddownload``, ``katfile`` and ``nitroflare``.  Values may
+                be strings, lists, dicts with ``urls``/``url`` keys, or
+                nested combinations thereof.  Any boolean values are
+                ignored.
+            keeplinks: A single protected URL to be written into the
+                Keeplinks column (or ``Links`` column if Keeplinks is not
+                defined).
+            meta: Optional metadata associated with the upload; if
+                provided, it is merged into the internal upload_meta
+                mapping for the matching key (section,item,op_type).
+        """
+        # Resolve the row by thread identifier
+        row = self._row_by_tid.get(tid)
+        if row is None:
+            # Fallback: split tid into section and item.  The tid may be
+            # formatted as "Section:Item" when thread_id is absent.
+            sec = None
+            itm = None
+            if isinstance(tid, str) and ":" in tid:
+                parts = tid.split(":", 1)
+                sec = parts[0]
+                itm = parts[1]
+            # Find matching row by section and item (any op_type)
+            if sec is not None and itm is not None:
+                for key, r in self._row_by_key.items():
+                    if key[0] == sec and key[1] == itm:
+                        row = r
+                        break
+        # If still no row, nothing to populate
+        if row is None:
+            return
+
+        def _flatten(value) -> list[str]:
+            """Flatten arbitrary link structures into a list of strings.
+
+            Accepts strings, lists, tuples, sets, and dicts with ``urls`` or
+            ``url`` keys.  Ignores booleans and None.  Recurses into nested
+            containers.
+            """
+            results: list[str] = []
+            def _inner(v):
+                if v is None:
+                    return
+                # Boolean flags are not links
+                if isinstance(v, bool):
+                    return
+                # Strings become single-element lists
+                if isinstance(v, str):
+                    if v:
+                        results.append(v)
+                    return
+                # Dictionaries may wrap URLs under specific keys
+                if isinstance(v, dict):
+                    # Common keys: 'urls' (list) or 'url' (single)
+                    if 'urls' in v:
+                        _inner(v['urls'])
+                        return
+                    if 'url' in v:
+                        _inner(v['url'])
+                        return
+                    # Otherwise, recurse into all values
+                    for vv in v.values():
+                        _inner(vv)
+                    return
+                # Iterable containers (lists, tuples, sets)
+                if isinstance(v, (list, tuple, set)):
+                    for elem in v:
+                        _inner(elem)
+                    return
+                # Fallback: convert to string
+                results.append(str(v))
+            _inner(value)
+            return results
+
+        model = self.table.model()
+        changed = False
+        # Collect values for logging for RG and RG_BAK
+        log_vals: dict[str, str] = {}
+        # Iterate through hosts in the fixed order defined by HOST_COLS
+        for host, header in HOST_COLS.items():
+            col = self._host_col_index.get(host)
+            if col is None:
+                continue
+            raw_val = None
+            if isinstance(links, dict):
+                raw_val = links.get(host)
+            flattened = _flatten(raw_val) if raw_val else []
+            new_text = "\n".join(flattened) if flattened else ""
+            it = self.table.item(row, col)
+            old_text = it.text() if it else ""
+            if old_text != new_text:
+                self._ensure_item(row, col).setText(new_text)
+                # Set progress to 100% when a link is present, else clear
+                if flattened:
+                    self._set_progress_cell(row, col, 100)
+                else:
+                    self._clear_progress_cell(row, col)
+                idx = model.index(row, col)
+                model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
+                changed = True
+            # Record values for RG and RG_BAK for debugging
+            if header in ("RG", "RG_BAK"):
+                log_vals[header] = new_text
+
+        # Handle Keeplinks/Links column
+        if keeplinks:
+            # Prefer a dedicated 'Keeplinks' column if present; otherwise fall back
+            # to a 'Links' column.  If neither exist, skip quietly.
+            updated_kl = False
+            for col_name in ("Keeplinks", "Links"):
+                kl_col = self._col_map.get(col_name)
+                if kl_col is None:
+                    continue
+                it = self.table.item(row, kl_col)
+                old_txt = it.text() if it else ""
+                if old_txt != keeplinks:
+                    self._ensure_item(row, kl_col).setText(keeplinks)
+                    idx = model.index(row, kl_col)
+                    model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
+                    changed = True
+                updated_kl = True
+                break
+            # For logging, treat absence of column as still logged
+            log_vals.setdefault("KEEP", keeplinks)
+        else:
+            # Still include empty keeplinks in log
+            log_vals.setdefault("KEEP", "")
+
+        # Emit a debug/info log summarising the changes.  Use .info so it's always visible.
+        try:
+            rg_val = log_vals.get("RG", "")
+            rg_bak_val = log_vals.get("RG_BAK", "")
+            keep_val = log_vals.get("KEEP", "")
+            log.info("POPULATE-LINKS tid=%s row=%s set RG=%s, RG_BAK=%s, KEEP=%s", tid, row, rg_val, rg_bak_val, keep_val)
+        except Exception:
+            pass
+
+        # Persist upload metadata, if provided and there is a matching key
+        if meta:
+            # Identify the key tuple (section,item,op_type) for this row
+            key_tuple = None
+            for k, r in self._row_by_key.items():
+                if r == row:
+                    key_tuple = k
+                    break
+            if key_tuple:
+                try:
+                    self.update_upload_meta(key_tuple, meta)
+                except Exception:
+                    pass
+
+        # Schedule a snapshot save if anything changed or metadata was updated
+        if changed or meta:
+            try:
+                self._schedule_status_save()
+            except Exception:
+                pass
+
     def get_upload_meta(self, key) -> dict:
         return dict(self._upload_meta.get(tuple(key), {}))
     def _populate_sections(self) -> None:
@@ -1596,6 +1773,37 @@ class StatusWidget(QWidget):
                 enqueuer(op)
             else:
                 self.handle_status(op)
+            # After handling the status update, if this is a completed upload
+            # operation then populate the host and keeplinks columns for the
+            # corresponding thread.  This ensures that newly generated links
+            # (Rapidgator, backup, ddownload, katfile, nitroflare) and the
+            # protected Keeplinks URL are written into the table once an
+            # upload finishes.  Keep this call inside the queued slot so
+            # that UI changes occur on the main thread.
+            try:
+                from models.operation_status import OpStage, OpType  # local import to avoid circular
+                if getattr(op, "stage", None) == OpStage.FINISHED and getattr(op, "op_type", None) == OpType.UPLOAD:
+                    # Determine a thread identifier.  Fallback to section:item if none provided.
+                    tid = getattr(op, "thread_id", None)
+                    if not tid:
+                        # Section defaults to Uploads or Downloads based on the operation type
+                        sec = op.section or ("Uploads" if getattr(op, "op_type", None) == OpType.UPLOAD else "Downloads")
+                        tid = f"{sec}:{op.item}"
+                    links = getattr(op, "links", {}) or {}
+                    keeplinks = getattr(op, "keeplinks_url", None) or ""
+                    # Some workers may embed meta information in different attributes
+                    # (upload_meta, meta, payload).  Prefer the first present.
+                    meta = {}
+                    for attr in ("upload_meta", "meta", "payload"):
+                        maybe = getattr(op, attr, None)
+                        if isinstance(maybe, dict):
+                            meta = maybe
+                            break
+                    self.populate_links_by_tid(tid, links, keeplinks, meta)
+            except Exception:
+                # Do not propagate errors from our helper; the main status
+                # handling should proceed regardless of link population.
+                pass
         except Exception as exc:
             log.error("[StatusWidget] on_progress_update error: %s", exc)
 
