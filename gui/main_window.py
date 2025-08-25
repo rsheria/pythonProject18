@@ -5068,14 +5068,15 @@ class ForumBotGUI(QMainWindow):
                     key = (worker.section, f.name, OpType.UPLOAD.name)
                     self.status_widget.update_upload_meta(key, meta)
 
-            # Locate the real row in the table by scanning the Thread ID column
-            current_row = -1
-            if tid:
-                current_row = self._row_for_thread_id(tid)
-            # If not found, warn and exit gracefully
-            if current_row is None or current_row < 0:
-                logging.warning(f"Thread ID '{tid}' not found in Process Threads table; skipping upload completion handling.")
-                return
+            # Locate the real row in the table by scanning the Thread ID column.
+            # If not found (due to sorting/filtering), fall back to the provided
+            # row index but log a warning for visibility.
+            current_row = self._row_for_tid(tid) if tid else -1
+            if current_row < 0:
+                logging.warning(
+                    "Thread ID '%s' not found; falling back to row %s", tid, row
+                )
+                current_row = row
 
             # Determine the thread title and category name based on the resolved row
             thread_title = None
@@ -5101,78 +5102,82 @@ class ForumBotGUI(QMainWindow):
             thread_info = self.process_threads[category_name][thread_title]
 
             # ------------------------------------------------------------------
-            # Extract and normalize host links from urls_dict.  The upload worker
-            # emits lists directly for each host key.  We use _as_list helper to
-            # coerce any value into a list for uniformity.
+            # Extract and normalise host links from ``urls_dict`` using the
+            # ``_as_list`` helper.  Keeplinks is converted to a single string.
             rg_links = []
             rg_backup_links = []
             nf_links = []
             dd_links = []
             kf_links = []
-            klinks_list = []
+            klinks_str = ""
             if isinstance(urls_dict, dict):
                 rg_links = self._as_list(urls_dict.get('rapidgator'))
-                # handle both rapidgator_backup and rapidgator-backup keys
-                rg_backup_links = self._as_list(urls_dict.get('rapidgator_backup') or urls_dict.get('rapidgator-backup'))
+                rg_backup_links = self._as_list(
+                    urls_dict.get('rapidgator_backup') or urls_dict.get('rapidgator-backup')
+                )
                 nf_links = self._as_list(urls_dict.get('nitroflare'))
                 dd_links = self._as_list(urls_dict.get('ddownload'))
                 kf_links = self._as_list(urls_dict.get('katfile'))
                 klinks_list = self._as_list(urls_dict.get('keeplinks'))
+                if klinks_list:
+                    klinks_str = "\n".join([str(x) for x in klinks_list])
 
-            # Build a consolidated links mapping for the process_threads structure
-            # The mapping uses host domains and stores lists directly.  The
-            # keeplinks entry stores the list of short link(s).
+            # Consolidated links mapping stored on ``process_threads``
             new_links = {
                 'rapidgator.net': rg_links,
                 'nitroflare.com': nf_links,
                 'ddownload.com': dd_links,
                 'katfile.com': kf_links,
                 'rapidgator-backup': rg_backup_links,
-                'keeplinks': klinks_list,
+                'keeplinks': klinks_str,
             }
 
-            # Write these links into the latest version if it exists, else on the
-            # root thread info.  Preserve any other version metadata.
             versions = thread_info.get('versions', [])
             if versions:
                 versions[-1]['links'] = new_links
-            else:
-                thread_info['links'] = new_links
+                versions[-1]['upload_status'] = True
+                versions[-1]['thread_id'] = tid
+            thread_info['links'] = new_links
+            thread_info['upload_status'] = True
+            thread_info['thread_id'] = tid
 
-            # Update the Process Threads table columns with the new links.  For
-            # Rapidgator column, fall back to katfile links if RG is empty (the
-            # previous implementation also fell back to NF or DD but spec
-            # explicitly mentions RG or KF only).
-            display_links = rg_links or kf_links
+            # Update table cells for Rapidgator, RG_BAK and Keeplinks columns
             try:
-                self.process_threads_table.item(current_row, 3).setText("\n".join(display_links))
+                self.process_threads_table.item(current_row, 3).setText("\n".join(rg_links))
                 self.process_threads_table.item(current_row, 4).setText("\n".join(rg_backup_links))
-                # Join keeplinks list into a single string for display; if empty, set empty string
-                keeplinks_str = "\n".join([str(x) for x in klinks_list]) if klinks_list else ""
+                self.process_threads_table.item(current_row, 5).setText(klinks_str)
+                model = self.process_threads_table.model()
+                top_left = model.index(current_row, 3)
+                bottom_right = model.index(current_row, 5)
+                model.dataChanged.emit(top_left, bottom_right)
                 self.process_threads_table.item(current_row, 5).setText(keeplinks_str)
             except Exception:
                 pass
 
-            # Persist changes to disk
+            # Persist changes and refresh status
             self.save_process_threads_data()
 
-            # Mark upload complete so that UI colors and statuses refresh
             self.mark_upload_complete(category_name, thread_title)
 
-            # Update backup threads data if backup links exist
+            # Backup threads update
             if rg_backup_links:
                 backup_info = self.backup_threads.get(thread_title, {}) or {}
                 backup_info['thread_id'] = tid
                 backup_info['rapidgator_links'] = rg_links
                 backup_info['rapidgator_backup_links'] = rg_backup_links
-                # Keeplinks link uses the consolidated string, not list
-                keeplinks_str = "\n".join([str(x) for x in klinks_list]) if klinks_list else ""
-                backup_info['keeplinks_link'] = keeplinks_str
+                backup_info['keeplinks_link'] = klinks_str
                 backup_info['katfile_links'] = kf_links
                 self.backup_threads[thread_title] = backup_info
                 self.save_backup_threads_data()
                 self.populate_backup_threads_table()
-
+            logging.info(
+                "Upload complete tid=%s row=%s cols updated RG:%d RG_BAK:%d Keeplinks:%s",
+                tid,
+                current_row,
+                len(rg_links),
+                len(rg_backup_links),
+                "yes" if klinks_str else "no",
+            )
         except Exception as e:
             logging.error(f"Error in handle_upload_complete: {e}", exc_info=True)
             ui_notifier.error("Upload Error", str(e))
@@ -5359,7 +5364,7 @@ class ForumBotGUI(QMainWindow):
                 versions_list[-1]['upload_status'] = True
 
                 # find row index using helper to respect sorting/filtering
-                row_index = self._row_for_thread_id(thread_id)
+                row_index = self._row_for_tid(thread_id)
                 if row_index >= 0:
                     # Choose display links: prefer rapidgator, then katfile, then nitroflare/ddownload
                     display_links = rapidgator_links or katfile_links or nitroflare_links or ddownload_links
@@ -5506,19 +5511,12 @@ class ForumBotGUI(QMainWindow):
         finally:
             ui_notifier.set_sink(None)
 
-    def _row_for_thread_id(self, thread_id: str) -> int:
-        """Locate the current row for a given thread ID regardless of filtering or sorting.
-
-        Args:
-            thread_id: The thread identifier to look up.
-
-        Returns:
-            The row index if found, otherwise -1.
-        """
+    def _row_for_tid(self, tid: str) -> int:
+        """Locate the current row for a given thread ID regardless of sorting or filtering."""
         tbl = self.process_threads_table
         for r in range(tbl.rowCount()):
             it = tbl.item(r, 2)
-            if it and it.text() == str(thread_id):
+            if it and it.text() == str(tid):
                 return r
         return -1
 
@@ -5569,7 +5567,7 @@ class ForumBotGUI(QMainWindow):
             return
         # Peek at the next thread ID
         thread_id = q[0]
-        row = self._row_for_thread_id(thread_id)
+        row = self._row_for_tid(thread_id)
         if row < 0:
             # Missing or filtered out: skip this ID
             self._auto_process_queue_ids.pop(0)
@@ -5619,7 +5617,7 @@ class ForumBotGUI(QMainWindow):
             QTimer.singleShot(100, self._process_next_auto_thread)
             return
         # Determine the current row for this thread id just before upload
-        row = self._row_for_thread_id(thread_id)
+        row = self._row_for_tid(thread_id)
         if row < 0:
             # Cannot locate row, skip this thread and continue
             if getattr(self, "_auto_process_queue_ids", None):
@@ -5667,7 +5665,7 @@ class ForumBotGUI(QMainWindow):
             thread_id: The identifier of the thread that just completed upload.
         """
         # Determine current row and worker based on thread id
-        row = self._row_for_thread_id(thread_id)
+        row = self._row_for_tid(thread_id)
         worker = None
         if hasattr(self, 'upload_workers_by_tid'):
             worker = self.upload_workers_by_tid.get(thread_id)
@@ -5684,7 +5682,7 @@ class ForumBotGUI(QMainWindow):
                 QTimer.singleShot(
                     0,
                     lambda w=worker, tid=thread_id: w.retry_failed_uploads(
-                        max(self._row_for_thread_id(tid), 0)
+                        max(self._row_for_tid(tid), 0)
                     ),
                 )
             except Exception:

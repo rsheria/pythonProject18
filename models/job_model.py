@@ -16,7 +16,13 @@ class AutoProcessJob:
     download_folder: str = ""
     keeplinks_url: str = ""
     uploaded_links: Dict[str, Any] = field(default_factory=dict)
+    """Normalized links generated during the upload step.
 
+    Keys mirror the canonical hostnames used within ``process_threads``, for
+    example ``"rapidgator.net"``, ``"rapidgator-backup"``,
+    ``"nitroflare.com"``, ``"ddownload.com"``, ``"katfile.com"`` and a
+    ``"keeplinks"`` entry containing the short-link string.
+    """
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
         data["uploaded_links"] = dict(self.uploaded_links)

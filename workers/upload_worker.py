@@ -209,6 +209,15 @@ class UploadWorker(QThread):
 
             # Helper to extract a list of URLs from various representations
             def _extract_list(value: Any) -> list:
+                """Coerce arbitrary values into a list of strings.
+
+                Any ``None`` or boolean value is treated as empty.  Dictionaries
+                may carry a ``urls`` key, which will be flattened.  Strings are
+                wrapped in a single-item list.  Other iterables are converted
+                via ``list()`` with a final fallback to wrapping the value.
+                """
+                if value is None or isinstance(value, bool):
+                    return []
                 if not value:
                     return []
                 # If it's a dict with 'urls' key, use that

@@ -119,12 +119,38 @@ class StatusTableModel(QAbstractTableModel):
         key = (op.section, op.item, op.op_type, op.host)
         for row, existing in enumerate(self._rows):
             if (existing.section, existing.item, existing.op_type, existing.host) == key:
+                # Determine which columns have changed compared to the existing
+                # OperationStatus.  We update only those indices to minimise
+                # view refresh work.
+                changed: list[int] = []
+                if existing.section != op.section:
+                    changed.append(0)
+                if existing.item != op.item:
+                    changed.append(1)
+                if existing.op_type != op.op_type:
+                    changed.append(2)
+                if existing.added != op.added:
+                    changed.append(3)
+                if existing.stage != op.stage:
+                    changed.append(4)
+                if existing.message != op.message:
+                    changed.append(5)
+                if existing.errors != op.errors:
+                    changed.append(6)
+                if existing.host != op.host:
+                    changed.append(7)
+                if existing.speed != op.speed:
+                    changed.append(8)
+                if existing.eta != op.eta:
+                    changed.append(9)
+                if existing.progress != op.progress:
+                    changed.append(10)
                 self._rows[row] = op
-                top_left = self.index(row, 0)
-                bottom_right = self.index(row, self.columnCount() - 1)
-                self.dataChanged.emit(
-                    top_left, bottom_right, [Qt.DisplayRole, Qt.BackgroundRole]
-                )
+                for col in changed:
+                    idx = self.index(row, col)
+                    self.dataChanged.emit(
+                        idx, idx, [Qt.DisplayRole, Qt.BackgroundRole]
+                    )
                 return
         self.beginInsertRows(QModelIndex(), len(self._rows), len(self._rows))
         self._rows.append(op)

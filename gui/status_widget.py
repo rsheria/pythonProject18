@@ -1528,12 +1528,13 @@ class StatusWidget(QWidget):
     def on_progress_update(self, op: OperationStatus) -> None:
         """Main-thread slot to handle progress updates from workers.
 
-        This slot forwards the received ``OperationStatus`` to the
-        appropriate handler so that the QTableWidget is updated on
-        the GUI thread.  If a batching method (``_enqueue_status``)
-        exists, it will be used; otherwise it falls back to
-        ``handle_status``.  Errors are logged rather than propagated
-        to avoid crashing the GUI thread.
+        The connection to this slot **must** use ``Qt.QueuedConnection`` so
+        that all GUI mutations occur on the main thread.  The received
+        ``OperationStatus`` is forwarded to the appropriate handler so that the
+        QTableWidget reflects the latest state.  If a batching method
+        (``_enqueue_status``) exists, it will be used; otherwise it falls back
+        to ``handle_status``.  Errors are logged rather than propagated to
+        avoid crashing the GUI thread.
 
         Args:
             op: The OperationStatus instance emitted by a worker.
