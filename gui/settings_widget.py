@@ -62,7 +62,8 @@ class SettingsWidget(QWidget):
     hosts_updated = pyqtSignal(list)
     # Signal emitted when Rapidgator backup option toggled
     use_backup_rg_changed = pyqtSignal(bool)
-
+    # Signal emitted when WinRAR settings are updated
+    settings_updated = pyqtSignal(dict)
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -166,16 +167,54 @@ class SettingsWidget(QWidget):
 
         # WinRAR selection
         winrar_group = QGroupBox("WinRAR")
-        winrar_layout = QHBoxLayout(winrar_group)
+        winrar_layout = QVBoxLayout(winrar_group)
+        exe_layout = QHBoxLayout()
         self.select_winrar_exe_button = QPushButton("Select WinRAR Executable")
         self.select_winrar_exe_button.clicked.connect(
             lambda: self.window().select_winrar_executable()
         )
-        winrar_layout.addWidget(self.select_winrar_exe_button)
+        exe_layout.addWidget(self.select_winrar_exe_button)
         self.winrar_exe_label = QLabel(
             f"WinRAR Executable: {self.config.get('winrar_exe_path', os.environ.get('WINRAR_PATH', 'winrar'))}"
         )
-        winrar_layout.addWidget(self.winrar_exe_label)
+        exe_layout.addWidget(self.winrar_exe_label)
+        winrar_layout.addLayout(exe_layout)
+
+        comp_layout = QHBoxLayout()
+        comp_layout.addWidget(QLabel("Compression:"))
+        self.comp_level_combo = QComboBox()
+        self.comp_level_combo.addItems([
+            "Store (m0)",
+            "Fastest (m1)",
+            "Fast (m2)",
+            "Normal (m3)",
+            "Good (m4)",
+            "Best (m5)",
+        ])
+        comp_layout.addWidget(self.comp_level_combo)
+        winrar_layout.addLayout(comp_layout)
+
+        split_layout = QHBoxLayout()
+        split_layout.addWidget(QLabel("Split Size:"))
+        self.split_size_spin = QSpinBox()
+        self.split_size_spin.setRange(0, 99999)
+        split_layout.addWidget(self.split_size_spin)
+        self.split_unit_combo = QComboBox()
+        self.split_unit_combo.addItems(["MB", "GB"])
+        split_layout.addWidget(self.split_unit_combo)
+        winrar_layout.addLayout(split_layout)
+
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("Recompress Mode:"))
+        self.recompress_combo = QComboBox()
+        self.recompress_combo.addItems(["Always", "If Needed", "Never"])
+        mode_layout.addWidget(self.recompress_combo)
+        winrar_layout.addLayout(mode_layout)
+
+        self.comp_level_combo.currentIndexChanged.connect(self._on_rar_settings_changed)
+        self.split_size_spin.valueChanged.connect(self._on_rar_settings_changed)
+        self.split_unit_combo.currentIndexChanged.connect(self._on_rar_settings_changed)
+        self.recompress_combo.currentIndexChanged.connect(self._on_rar_settings_changed)
         general_layout.addWidget(winrar_group)
 
         # My.JDownloader credentials
@@ -720,6 +759,31 @@ class SettingsWidget(QWidget):
                     download_dir = self.config.get("download_dir", "")
                 self.download_path_label.setText(download_dir)
 
+            # --- WinRAR settings ---
+            comp = int(settings_source.get("rar_comp_level", 0))
+            split_bytes = int(settings_source.get("rar_split_bytes", 1024 * 1024 * 1024))
+            mode = settings_source.get("rar_recompress_mode", "always")
+            self.comp_level_combo.blockSignals(True)
+            self.comp_level_combo.setCurrentIndex(comp if 0 <= comp <= 5 else 0)
+            self.comp_level_combo.blockSignals(False)
+            self.split_size_spin.blockSignals(True)
+            if split_bytes == 0:
+                value = 0
+                unit_index = 0
+            elif split_bytes % (1024 * 1024 * 1024) == 0:
+                value = split_bytes // (1024 * 1024 * 1024)
+                unit_index = 1
+            else:
+                value = split_bytes // (1024 * 1024)
+                unit_index = 0
+            self.split_size_spin.setValue(value)
+            self.split_unit_combo.setCurrentIndex(unit_index)
+            self.split_size_spin.blockSignals(False)
+            self.split_unit_combo.blockSignals(False)
+            mode_index = {"always": 0, "if_needed": 1, "never": 2}.get(str(mode).lower(), 0)
+            self.recompress_combo.blockSignals(True)
+            self.recompress_combo.setCurrentIndex(mode_index)
+            self.recompress_combo.blockSignals(False)
             # --- upload hosts ---
             self.upload_hosts_list.clear()
             if current_user:
@@ -824,6 +888,31 @@ class SettingsWidget(QWidget):
             if hasattr(self, "isVisible") and self.isVisible():
                 QMessageBox.critical(self, "Error", f"Failed to load settings: {e}")
 
+    def _collect_rar_settings(self) -> dict:
+        comp_level = self.comp_level_combo.currentIndex()
+        split_value = self.split_size_spin.value()
+        unit = self.split_unit_combo.currentText()
+        split_bytes = split_value * (1024 * 1024 if unit == "MB" else 1024 * 1024 * 1024)
+        if split_value == 0:
+            split_bytes = 0
+        mode_map = {0: "always", 1: "if_needed", 2: "never"}
+        recompress_mode = mode_map.get(self.recompress_combo.currentIndex(), "always")
+        return {
+            "comp_level": comp_level,
+            "split_bytes": split_bytes,
+            "recompress_mode": recompress_mode,
+        }
+
+    def get_rar_settings(self) -> dict:
+        return self._collect_rar_settings()
+
+    def _on_rar_settings_changed(self, *args):
+        settings = self._collect_rar_settings()
+        if self.user_manager.get_current_user():
+            self.user_manager.set_user_setting('rar_comp_level', settings['comp_level'])
+            self.user_manager.set_user_setting('rar_split_bytes', settings['split_bytes'])
+            self.user_manager.set_user_setting('rar_recompress_mode', settings['recompress_mode'])
+        self.settings_updated.emit(settings)
     def _on_rapidgator_token_changed(self, text):
         """Handle changes to the Rapidgator token input"""
         # Enable validate button when there's text, disable when empty

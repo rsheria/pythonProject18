@@ -507,6 +507,13 @@ class ForumBotGUI(QMainWindow):
         # Connect Rapidgator backup toggle
         self.settings_tab.use_backup_rg_changed.connect(self.on_use_backup_rg_changed)
 
+        # Apply WinRAR settings changes
+        self.settings_tab.settings_updated.connect(
+            self.on_settings_updated, Qt.QueuedConnection
+        )
+
+        # Apply current settings to FileProcessor
+        self.on_settings_updated(self.settings_tab.get_rar_settings())
         # إضافته لمنطقة المحتوى
         self.content_area.addWidget(self.settings_tab)
 
@@ -727,6 +734,18 @@ class ForumBotGUI(QMainWindow):
         except Exception as e:
             logging.error(f"Error updating Rapidgator backup preference: {e}")
 
+    def on_settings_updated(self, settings: dict):
+        """Apply WinRAR-related settings to FileProcessor."""
+        try:
+            if hasattr(self, 'file_processor') and self.file_processor:
+                self.file_processor.update_settings(
+                    comp_level=settings.get('comp_level'),
+                    split_bytes=settings.get('split_bytes'),
+                    recompress_mode=settings.get('recompress_mode'),
+                )
+                logging.info(f"🔄 FileProcessor settings updated: {settings}")
+        except Exception as e:
+            logging.error(f"Error applying settings: {e}")
     def populate_megathreads_category_tree(self):
         self.megathreads_category_model.clear()
         self.megathreads_category_model.setHorizontalHeaderLabels(['Megathread Category'])

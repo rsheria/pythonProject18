@@ -13,12 +13,24 @@ from config.config import DATA_DIR    # ← استيراد DATA_DIR
 
 
 class FileProcessor:
-    def __init__(self, download_dir: str, winrar_path: str):
-        """Initialize FileProcessor with necessary paths and settings."""
+    def __init__(
+        self,
+        download_dir: str,
+        winrar_path: str,
+        comp_level: int = 0,
+        split_bytes: int = 1024 * 1024 * 1024,
+        recompress_mode: str = "always",
+    ):
+        """Initialize FileProcessor with paths and runtime options."""
         # تأكد من وجود DATA_DIR
         os.makedirs(DATA_DIR, exist_ok=True)
         self.download_dir = Path(download_dir)  # Base download directory
         self.winrar_path = Path(winrar_path)
+
+        # Runtime options
+        self.comp_level = int(comp_level)
+        self.split_bytes = int(split_bytes)
+        self.recompress_mode = recompress_mode
 
         # Get the actual project path
         self.project_path = Path(__file__).parent
@@ -39,6 +51,19 @@ class FileProcessor:
         self.GIGABYTE = 1024 * 1024 * 1024
         self.ARCHIVE_EXTENSIONS = {'.rar', '.zip', '.7z'}
 
+    def update_settings(
+        self,
+        comp_level: Optional[int] = None,
+        split_bytes: Optional[int] = None,
+        recompress_mode: Optional[str] = None,
+    ) -> None:
+        """Update runtime options."""
+        if comp_level is not None:
+            self.comp_level = int(comp_level)
+        if split_bytes is not None:
+            self.split_bytes = int(split_bytes)
+        if recompress_mode is not None:
+            self.recompress_mode = recompress_mode
     def process_downloads(
         self,
         thread_dir: Path,
@@ -65,8 +90,25 @@ class FileProcessor:
                 logging.error("No files were moved to the thread directory.")
                 return None
 
-            # Detect if we have a single item or multiple distinct items
-            if self._detect_if_single_item(moved_files):
+            logging.info(
+                "Processing '%s' with settings: m%s split=%sB mode=%s",
+                thread_title,
+                self.comp_level,
+                self.split_bytes,
+                self.recompress_mode,
+            )
+
+            # Decide processing path based on recompress_mode
+            if self.recompress_mode == "never":
+                processed_files = [str(p) for p in moved_files]
+            elif (
+                self.recompress_mode == "if_needed"
+                and len(moved_files) == 1
+                and self._is_archive_file(moved_files[0])
+                and self.split_bytes == 0
+            ):
+                processed_files = [str(moved_files[0])]
+            elif self._detect_if_single_item(moved_files):
                 # Single item => rename final archived output to cleaned_thread_title
                 processed_files = self._process_as_single_item(
                     moved_files, thread_dir, cleaned_thread_title, password
@@ -215,6 +257,7 @@ class FileProcessor:
         try:
             original_format = archive_path.suffix.lower()
             is_zip = (original_format == '.zip')
+            thread_title = self._sanitize_and_shorten_title(thread_title)
 
             # Check if multi-part .partX.rar
             is_multipart = False
@@ -282,9 +325,13 @@ class FileProcessor:
             success = False
             for attempt in range(max_retries):
                 if is_zip:
-                    success = self._create_zip_archive(extract_dir, temp_archive_base)
+                    success = self._create_zip_archive(
+                        extract_dir, temp_archive_base, thread_title
+                    )
                 else:
-                    success = self._create_rar_archive(extract_dir, temp_archive_base)
+                    success = self._create_rar_archive(
+                        extract_dir, temp_archive_base, thread_title
+                    )
                 if success:
                     break
                 if attempt < max_retries - 1:
@@ -353,18 +400,20 @@ class FileProcessor:
                 except Exception as e:
                     logging.warning(f"Could not modify file hash for {file_path}: {str(e)}")
 
-            cmd = [
-                str(self.winrar_path),
-                'a',
+            cmd = [str(self.winrar_path), 'a']
+            if self.split_bytes > 0:
+                cmd.append(f'-v{self.split_bytes // (1024 * 1024)}m')
+            cmd.extend([
+                f'-m{self.comp_level}',
                 '-ep1',
-                '-m0',
                 '-ma5',
                 '-rr3p',
                 '-y',
                 '-x*.ini',
+                f'-ap"{thread_title}"',
                 str(archive_path),
-                str(file_path)
-            ]
+                str(file_path),
+            ])
 
             max_retries = 3
             for attempt in range(max_retries):
@@ -497,17 +546,16 @@ class FileProcessor:
             logging.error(f"Extraction error: {str(e)}")
             return False
 
-    def _create_rar_archive(self, source_dir: Path, output_base: Path) -> bool:
-        """Create a RAR archive with store method, volume=1GB, RAR5 format, and put contents under a root folder inside the archive."""
+    def _create_rar_archive(self, source_dir: Path, output_base: Path, root_name: str) -> bool:
+        """Create a RAR archive using current settings and clean root folder."""
         try:
-            # نستخدم اسم الملف النهائي كفولدر جذري داخل الأرشيف
-            folder_prefix = output_base.name
+            folder_prefix = root_name
 
-            cmd = [
-                str(self.winrar_path),
-                'a',
-                '-v1024m',
-                '-m0',
+            cmd = [str(self.winrar_path), 'a']
+            if self.split_bytes > 0:
+                cmd.append(f'-v{self.split_bytes // (1024 * 1024)}m')
+            cmd.extend([
+                f'-m{self.comp_level}',
                 '-ep1',
                 '-r',
                 '-y',
@@ -517,7 +565,7 @@ class FileProcessor:
                 f'-ap"{folder_prefix}"',  # <- فولدر داخلي في الأرشيف
                 str(output_base) + '.rar',
                 str(source_dir / "*")  # Include contents, not directory itself
-            ]
+            ])
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -544,8 +592,8 @@ class FileProcessor:
             logging.error(f"RAR creation error: {str(e)}")
             return False
 
-    def _create_zip_archive(self, source_dir: Path, output_base: Path) -> bool:
-        """Create a ZIP archive with store method, volume=1GB, and put contents under a root folder inside the archive."""
+    def _create_zip_archive(self, source_dir: Path, output_base: Path, root_name: str) -> bool:
+        """Create a ZIP archive using current settings and clean root folder."""
         try:
             file_list = [
                 f for f in source_dir.rglob('*')
@@ -555,23 +603,23 @@ class FileProcessor:
                 logging.error("No files to archive after filtering for ZIP.")
                 return False
 
-            # نستخدم اسم الملف النهائي كفولدر جذري داخل الأرشيف
-            folder_prefix = output_base.name
+            folder_prefix = root_name
 
-            cmd = [
-                str(self.winrar_path),
-                'a',
-                '-v1024m',
-                '-m0',
+            cmd = [str(self.winrar_path), 'a']
+            if self.split_bytes > 0:
+                cmd.append(f'-v{self.split_bytes // (1024 * 1024)}m')
+            cmd.extend([
+                f'-m{self.comp_level}',
                 '-ep1',
                 '-r',
                 '-y',
                 '-afzip',
                 '-x*.ini',
-                f'-ap"{folder_prefix}"',  # <- فولدر داخلي في الأرشيف
+                f'-ap"{folder_prefix}"',
                 str(output_base) + '.zip',
-                str(source_dir / "*"),  # Include contents, not directory itself
-            ]
+                str(source_dir / "*"),
+            ])
+
             result = subprocess.run(
                 cmd,
                 capture_output=True,
