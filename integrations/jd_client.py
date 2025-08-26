@@ -144,60 +144,44 @@ class JDClient:
         except Exception:
             return False
 
-    def post(self, path: str, payload=None, _retry: bool = False):
+    def post(self, path: str, params=None, _retried=False):
         """
-        استدعاء موحّد لواجهات My.JDownloader مع إعادة مصادقة تلقائية لو التوكن باظ.
-        - path: ممكن يبدأ بـ "/" أو بدونه.
-        - payload: list أو None.
-        - يعيد المحاولة مرة واحدة فقط بعد re-login.
+        Wrapper موحّد لطلبات JD:
+          - يفضّل الاتصال المباشر (Direct)
+          - على 403/TOKEN_INVALID: يعمل reconnect() ويعيد المحاولة
+          - لو فشل المباشر تانى: يفولبَك إلى MyJD (سحابى) ويعيد المحاولة النهائية
         """
-        if not path:
-            raise ValueError("Empty JD API path")
-        ep = path if path.startswith("/") else f"/{path}"
-        body = [] if payload is None else payload
+        path = "/" + path if not path.startswith("/") else path
+        payload = [] if params is None else params
+
+        def _try_device():
+            # myjdapi بيدير directconnect تلقائياً لو متاح
+            return self.device.action(path, payload)
 
         try:
-            # myjdapi: device.action(endpoint, [payload])
-            return self.device.action(ep, body)
-        except Exception as e:
-            msg = str(e) or ""
-            # حالات الـ 403 / TOKEN_INVALID
-            if (("TOKEN_INVALID" in msg) or ("403" in msg)) and not _retry:
-                log.warning("MYJD token invalid; attempting re-login…")
-                # حاول إعادة الاتصال بنفس الإعدادات
+            return _try_device()
+        except Exception as e1:
+            msg = str(e1) if e1 else ""
+            token_err = "TOKEN_INVALID" in msg or "403" in msg
+            if token_err and not _retried:
+                self.logger.warning("⚠️ DEVICE token invalid; reconnecting & retrying…")
                 try:
-                    self.api.disconnect()
-                except Exception:
-                    pass
-                try:
-                    self.api.set_app_key(self.app_key)
-                except Exception:
-                    pass
-                try:
-                    self.api.connect(self.email, self.password)
-                    try:
-                        self.api.update_devices()
-                    except Exception:
-                        pass
-                    sel = None
-                    if self.device_name:
-                        try:
-                            sel = self.api.get_device(self.device_name)
-                        except Exception:
-                            sel = None
-                    if not sel:
-                        devices = getattr(self.api, "devices", {}) or {}
-                        if devices:
-                            sel = list(devices.values())[0]
-                    if not sel:
-                        raise RuntimeError("No JD device after re-login")
-                    self.device = sel
-                    log.info("MYJD re-login succeeded; retrying request…")
-                    return self.post(path, payload, _retry=True)
+                    # يجدد الجلسة + directconnect
+                    self.connect(force=True)
                 except Exception as re:
-                    log.error("MYJD re-login failed: %s", re, exc_info=True)
-                    raise
-            # أى خطأ تانى: سيبه للـcaller
+                    self.logger.debug(f"Reconnect failed softly: {re}")
+                # جرّب الجهاز المحلى تانى
+                try:
+                    return _try_device()
+                except Exception as e2:
+                    self.logger.debug(f"Direct retry failed: {e2}; falling back to MyJD…")
+                    # فولباك للسحابة كمحاولة أخيرة
+                    try:
+                        return self.api.call_device(self.device, path, payload)
+                    except Exception as e3:
+                        # فشل نهائى
+                        raise e3
+            # أخطاء أخرى أو أعدنا المحاولة بالفعل: ارمِ الاستثناء للأعلى
             raise
 
     def add_links_to_linkgrabber(self, urls: List[str], start_check: bool = True) -> bool:

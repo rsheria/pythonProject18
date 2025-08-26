@@ -1729,21 +1729,22 @@ class StatusWidget(QWidget):
                 or "PyForumBot"
             ).strip()
             if email and password:
+                # status_widget.py  (_jd_full_cancel_cleanup)  — استبدل البلوك الداخلى للفولباك
                 from integrations.jd_client import JDClient
 
                 jd = JDClient(email, password, device_name, app_key)
                 if jd.connect():
+                    # ✅ استخدم الـwrapper الذكى اللى بيعيد الاتصال تلقائى
                     def _jd_post(path, payload=None):
-                        return jd.device.action(
-                            "/" + path if not path.startswith("/") else path,
-                            [] if payload is None else payload,
-                        )
+                        return jd.post("/" + path if not path.startswith("/") else path,
+                                       [] if payload is None else payload)
 
                     if hard_cancel(_jd_post, logger=log):
                         log.info("✅ JD cancel cleanup via new session done")
                         return
                     else:
                         log.warning("❌ JD cancel cleanup via new session failed")
+
             else:
                 log.warning("⚠️ Missing JD credentials for cancel cleanup")
         except Exception as e:
