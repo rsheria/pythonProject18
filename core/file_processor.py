@@ -106,6 +106,68 @@ class FileProcessor:
                 shutil.move(str(item), root_folder / item.name)
 
         return root_folder
+
+    def extract_and_normalize(self, src_archive: Path, work_dir: Path, thread_id: str) -> tuple[Path, list[Path]]:
+        """Extract ``src_archive`` and flatten all files into a single root folder.
+
+        Parameters
+        ----------
+        src_archive: Path
+            Archive file to extract.
+        work_dir: Path
+            Directory that will contain the final root folder.
+        thread_id: str
+            Name of the root directory to create/ensure.
+
+        Returns
+        -------
+        tuple(Path, list[Path])
+            The root directory and list of files directly under it.
+        """
+
+        src_archive = Path(src_archive)
+        work_dir = Path(work_dir)
+
+        # Temporary extraction directory
+        temp_dir = work_dir / f"{uuid.uuid4().hex}_extract"
+        if temp_dir.exists():
+            self._safely_remove_directory(temp_dir)
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
+        # Extract archive
+        if not self._extract_archive(src_archive, temp_dir, None):
+            return work_dir, []
+
+        # Modify hashes and remove banned files before moving
+        self._modify_files_for_hash_safely(temp_dir)
+        self._remove_banned_files_safely(temp_dir)
+
+        # Determine root directory (avoid duplicate nesting)
+        root_dir = work_dir if work_dir.name == thread_id else work_dir / thread_id
+        root_dir.mkdir(parents=True, exist_ok=True)
+
+        # Move all files from extracted tree into root_dir
+        for file_path in temp_dir.rglob("*"):
+            if not file_path.is_file():
+                continue
+            dest = root_dir / file_path.name
+            counter = 1
+            while dest.exists():
+                dest = root_dir / f"{file_path.stem}_{counter}{file_path.suffix}"
+                counter += 1
+            shutil.move(str(file_path), dest)
+
+        # Remove temporary extraction directory and other subfolders under work_dir
+        if src_archive.exists():
+            self._safely_remove_file(src_archive)
+        if temp_dir.exists():
+            self._safely_remove_directory(temp_dir)
+        for item in work_dir.iterdir():
+            if item.is_dir() and item != root_dir:
+                self._safely_remove_directory(item)
+
+        files = sorted([p for p in root_dir.glob("*") if p.is_file()])
+        return root_dir, files
     def process_downloads(
         self,
         thread_dir: Path,
@@ -142,35 +204,37 @@ class FileProcessor:
 
             # Decide processing path based on recompress_mode
             if self.recompress_mode == "never":
-                root_folder: Path | None = None
-                all_files: List[Path] = []
+                thread_id = thread_dir.name
+                root_dir = thread_dir
+                produced: List[Path] = []
                 for f in moved_files:
                     if self._is_archive_file(f):
-                        root_folder, files = self.handle_archive_file(
-                            f, thread_dir, cleaned_thread_title, password
+                        root_dir, files = self.extract_and_normalize(
+                            f, thread_dir, thread_id
                         )
-                        if root_folder:
-                            all_files = files
+                        produced.extend(files)
                     else:
-                        if root_folder is None:
-                            root_folder = self.ensure_single_root(
-                                thread_dir, cleaned_thread_title
-                            )
-                        dest = root_folder / f.name
-                        if f != dest:
-                            shutil.move(str(f), dest)
-                        all_files.append(dest)
+                        root_dir.mkdir(parents=True, exist_ok=True)
+                        dest = root_dir / f.name
+                        counter = 1
+                        while dest.exists():
+                            dest = root_dir / f"{f.stem}_{counter}{f.suffix}"
+                            counter += 1
+                        shutil.move(str(f), dest)
+                        produced.append(dest)
 
-                if root_folder is None:
-                    root_folder = self.ensure_single_root(
-                        thread_dir, cleaned_thread_title
-                    )
-                logging.info(
-                    "Normalized root %s with %d files",
-                    root_folder,
-                    len(all_files),
-                )
-                return str(root_folder), [str(p) for p in all_files]
+                    root_dir.mkdir(parents=True, exist_ok=True)
+
+                    keep = {root_dir.resolve()} | {p.resolve() for p in produced}
+                    for item in list(thread_dir.iterdir()):
+                        if item.resolve() not in keep:
+                            if item.is_dir():
+                                self._safely_remove_directory(item)
+                            else:
+                                self._safely_remove_file(item)
+
+                    logging.info("ROOT=%s, FILES=%d", root_dir, len(produced))
+                    return str(root_dir), [str(p) for p in produced]
             elif (
                 self.recompress_mode == "if_needed"
                 and len(moved_files) == 1
@@ -335,6 +399,25 @@ class FileProcessor:
             is_zip = (original_format == '.zip')
             thread_title = self._sanitize_and_shorten_title(thread_title)
 
+            if self.recompress_mode == "never":
+                is_multipart = False
+                all_parts = []
+                if (not is_zip) and re.search(r"\.part\d+\.rar$", archive_path.name, re.IGNORECASE):
+                    base_name = re.sub(r"\.part\d+\.rar$", "", archive_path.name, flags=re.IGNORECASE)
+                    part1_path = download_folder / f"{base_name}.part1.rar"
+                    if part1_path.exists():
+                        archive_path = part1_path
+                        is_multipart = True
+                        all_parts = sorted(download_folder.glob(f"{base_name}.part*.rar"))
+                root, files = self.extract_and_normalize(
+                    archive_path, download_folder, download_folder.name
+                )
+                if is_multipart and all_parts:
+                    self._safely_remove_original_archives(archive_path, all_parts)
+                else:
+                    self._safely_remove_original_archives(archive_path, None)
+                return root, files
+
             # Check if multi-part .partX.rar
             is_multipart = False
             all_parts = []
@@ -347,12 +430,9 @@ class FileProcessor:
                     all_parts = sorted(download_folder.glob(f"{base_name}.part*.rar"))
                     logging.info(f"Detected multi-part archive with {len(all_parts)} parts")
 
-            # Create extraction dir with original file name + "_extracted"
             if is_multipart:
-                # Use base name from multi-part detection
                 original_name = base_name
             else:
-                # Use original file stem (without extension)
                 original_name = archive_path.stem
             
             extract_dir_name = f"{original_name}_extracted"
@@ -361,7 +441,6 @@ class FileProcessor:
                 self._safely_remove_directory(extract_dir)
             extract_dir.mkdir(exist_ok=True)
 
-            # Extract with retries
             max_retries = 3
             extract_success = False
             for attempt in range(max_retries):
@@ -372,7 +451,6 @@ class FileProcessor:
                     archive_path, extract_dir, password
                 )
                 if extract_success:
-                    # 📁 Flatten directory structure - move all files to root level
                     self._flatten_extracted_directory(extract_dir)
                     break
                 if attempt < max_retries - 1:
@@ -381,11 +459,9 @@ class FileProcessor:
             if not extract_success:
                 raise Exception("Archive extraction failed after all attempts")
 
-            # Modify files (hash) + remove banned
             self._modify_files_for_hash_safely(extract_dir)
             self._remove_banned_files_safely(extract_dir)
 
-            # Summation
             total_size = sum(
                 f.stat().st_size
                 for f in extract_dir.rglob('*')
@@ -393,30 +469,8 @@ class FileProcessor:
             )
             logging.info(f"Total size of extracted files: {total_size / self.GIGABYTE:.2f} GB")
 
-            # Ensure a clean single root folder
             root_folder = self.ensure_single_root(extract_dir, thread_title)
 
-            if self.recompress_mode == "never":
-                final_root = download_folder / root_folder.name
-                if final_root.exists():
-                    for item in root_folder.iterdir():
-                        shutil.move(str(item), final_root / item.name)
-                else:
-                    shutil.move(str(root_folder), final_root)
-
-                if is_multipart and all_parts:
-                    self._safely_remove_original_archives(archive_path, all_parts)
-                else:
-                    self._safely_remove_original_archives(archive_path, None)
-
-                if extract_dir.exists():
-                    self._safely_remove_directory(extract_dir)
-
-                files = [p for p in final_root.rglob('*') if p.is_file()]
-                logging.info(
-                    "Normalized root %s with %d files", final_root, len(files)
-                )
-                return final_root, files
 
             # Re-archive everything => final name based on thread_title
             unique_id = uuid.uuid4().hex

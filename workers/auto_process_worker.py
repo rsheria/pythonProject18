@@ -85,7 +85,7 @@ class AutoProcessWorker(QRunnable):
 
             # Upload stage ---------------------------------------------------
             logging.info(
-                "AutoProcessWorker uploading from %s with %d files",
+                "ROOT=%s, FILES=%d",
                 self.snapshot.working_dir,
                 len(self.files_to_upload),
             )

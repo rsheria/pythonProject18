@@ -26,6 +26,7 @@ from downloaders.rapidgator import RapidgatorDownloader
 from models.operation_status import OperationStatus, OpStage, OpType
 
 from .worker_thread import WorkerThread
+from .upload_worker import UploadWorker
 from integrations.jd_client import hard_cancel
 
 
@@ -816,18 +817,40 @@ class DownloadWorker(QThread):
             )
 
             if processed:
+                if isinstance(processed, tuple):
+                    root_dir, produced_files = processed
+                    produced_files = [str(p) for p in produced_files]
+                    main = produced_files[0] if produced_files else None
+                else:
+                    root_dir = td
+                    produced_files = processed
+                    main = max(produced_files, key=lambda p: os.path.getsize(p))
                 self.file_progress.emit(row, 100)
-                main = max(processed, key=lambda p: os.path.getsize(p))
                 entry = self.gui.process_threads[info["category_name"]][
                     info["thread_title"]
                 ]
-                entry.update(
-                    {"file_name": os.path.basename(main), "file_path": str(main)}
-                )
+                if main:
+                    entry.update({"file_name": os.path.basename(main), "file_path": str(main)})
                 self.gui.save_process_threads_data()
                 logging.info(
                     "Processed main file for '%s': %s", info["thread_title"], main
                 )
+                if isinstance(processed, tuple):
+                    logging.info("ROOT=%s, FILES=%d", root_dir, len(produced_files))
+                    try:
+                        hosts = getattr(self.gui, "active_upload_hosts", [])
+                        upload_worker = UploadWorker(
+                            self.bot,
+                            row,
+                            root_dir,
+                            thread_id,
+                            upload_hosts=hosts,
+                            files=produced_files,
+                        )
+                        self.gui.register_worker(upload_worker)
+                        upload_worker.start()
+                    except Exception as e:
+                        logging.error("Failed to enqueue upload: %s", e)
                 proc_status.stage = OpStage.FINISHED
                 proc_status.message = "Processing complete"
                 proc_status.progress = 100
