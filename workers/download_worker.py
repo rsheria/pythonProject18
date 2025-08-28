@@ -3,7 +3,6 @@ import logging
 import os
 import re
 import time
-import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -28,7 +27,7 @@ from models.operation_status import OperationStatus, OpStage, OpType
 from .worker_thread import WorkerThread
 from .upload_worker import UploadWorker
 from integrations.jd_client import hard_cancel
-
+from utils.sanitize import sanitize_filename
 
 def get_downloader_for(url: str, bot):
     """
@@ -510,7 +509,7 @@ class DownloadWorker(QThread):
                 "total_links": len(primary),
                 "done_count": 0,
             }
-            thread_dir = self.create_thread_dir(category_name, thread_id)
+            thread_dir = Path(self._save_to_for(category_name, thread_id))
 
             for link in primary:
                 link_id = str(uuid.uuid4())
@@ -803,7 +802,7 @@ class DownloadWorker(QThread):
         )
         self.progress_update.emit(proc_status)
         try:
-            td = self.create_thread_dir(info["category_name"], thread_id)
+            td = Path(self._save_to_for(info["category_name"], thread_id))
             password = (
                 self.gui.process_threads.get(info["category_name"], {})
                 .get(info["thread_title"], {})
@@ -871,16 +870,10 @@ class DownloadWorker(QThread):
             self.progress_update.emit(proc_status)
             self.download_error.emit(row, err)
 
-    def create_thread_dir(self, category_name, thread_id):
-        cat = self.sanitize_path(category_name)
-        tid = self.sanitize_path(thread_id)
+    def _save_to_for(self, category_name: str, thread_id: str) -> str:
+        """Return the sanitized download path for a thread and ensure it exists."""
+        cat = sanitize_filename(category_name)
+        tid = sanitize_filename(thread_id)
         folder = self.base_download_dir / cat / tid
         folder.mkdir(parents=True, exist_ok=True)
-        return folder
-
-    @staticmethod
-    def sanitize_path(text):
-        nf = unicodedata.normalize("NFKD", text)
-        b = nf.encode("ascii", "ignore")
-        s = b.decode("ascii", "ignore")
-        return re.sub(r'[<>:"/\\|?*]', "", s).replace(" ", "_").strip()
+        return str(folder)

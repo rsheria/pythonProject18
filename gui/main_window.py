@@ -4741,15 +4741,25 @@ class ForumBotGUI(QMainWindow):
             for row in selected_rows:
                 try:
                     title_item = self.process_threads_table.item(row, 0)
-                    category_item = self.process_threads_table.item(row, 1)
-                    if title_item and category_item:
+                    category_name_item = self.process_threads_table.item(row, 1)
+                    thread_id_item = self.process_threads_table.item(row, 2)
+                    if title_item and category_name_item and thread_id_item:
                         thread_title = title_item.text()
-                        category_name = category_item.text()
-                        self._current_download_threads.append((category_name, thread_title))
-                        logging.info(f"📝 Tracking download for: {category_name}/{thread_title}")
+                        category_name = category_name_item.text()
+                        thread_id = thread_id_item.text()
+                        self._current_download_threads.append({
+                            "category_name": category_name,
+                            "thread_title": thread_title,
+                            "thread_id": thread_id,
+                        })
+                        logging.info(
+                            f"📝 Tracking download for: {category_name}/{thread_title} ({thread_id})"
+                        )
                 except Exception as e:
                     logging.warning(f"Could not track thread for row {row}: {e}")
-            logging.info(f"📋 Tracking {len(self._current_download_threads)} threads for download completion")
+            logging.info(
+                f"📋 Tracking {len(self._current_download_threads)} threads for download completion"
+            )
 
             # Clean up any existing download worker
             if getattr(self, 'download_worker', None):
@@ -4841,9 +4851,14 @@ class ForumBotGUI(QMainWindow):
 
             # 🎯 Update thread status for completed downloads
             if hasattr(self, '_current_download_threads') and self._current_download_threads:
-                for category_name, thread_title in self._current_download_threads:
+                for job in self._current_download_threads:
+                    category_name = job.get("category_name")
+                    thread_title = job.get("thread_title")
+                    thread_id = job.get("thread_id")
                     self.mark_download_complete(category_name, thread_title)
-                    logging.info(f"✅ Marked download complete for: {category_name}/{thread_title}")
+                    logging.info(
+                        f"✅ Marked download complete for: {category_name}/{thread_title} ({thread_id})"
+                    )
                 # Clear the tracking list
                 self._current_download_threads = []
                 # 🔄 Refresh the table to show color changes
