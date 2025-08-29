@@ -52,7 +52,7 @@ class Definition:
             "start": self.start,
             "end": self.end,
             "reason": "unused",
-            "references": [],
+            "xrefs": [],
             "confidence": 0.5,
         }
 
@@ -71,7 +71,7 @@ class Unreachable:
             "start": self.start,
             "end": self.end,
             "reason": "unreachable",
-            "references": [],
+            "xrefs": [],
             "confidence": 0.9,
         }
 
@@ -217,6 +217,14 @@ def collect_definitions(path: str, root: str,
                         fname = get_name(value.func)
                         if fname and fname.split(".")[-1] == "pyqtSignal":
                             definitions[qname].used = True
+                    if t.id == "__all__":
+                        definitions[qname].used = True
+                        if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+                            for elt in value.elts:
+                                if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                                    exported = f"{module}.{elt.value}"
+                                    if exported in definitions:
+                                        definitions[exported].used = True
 
 # Usage analysis ------------------------------------------------------------
 
@@ -246,7 +254,9 @@ def gather_names(nodes: List[ast.stmt]) -> List[object]:
 class UsageVisitor(ast.NodeVisitor):
     def __init__(self, module: str, rel: str, definitions: Dict[str, Definition],
                  local_defs: Dict[str, str],
-                 class_members: Dict[str, Dict[str, str]]):
+                 class_members: Dict[str, Dict[str, str]],
+                 selenium_classes: Optional[Iterable[str]] = None,
+                 selenium_name_map: Optional[Dict[str, List[str]]] = None):
         self.module = module
         self.rel = rel
         self.definitions = definitions
@@ -254,6 +264,9 @@ class UsageVisitor(ast.NodeVisitor):
         self.class_members = class_members
         self.imports: Dict[str, str] = {}
         self.current_class: Optional[str] = None
+        self.selenium_classes = set(selenium_classes or [])
+        self.selenium_name_map = selenium_name_map or {}
+        self.selenium_vars: set[str] = set()
 
     def mark(self, name: str) -> None:
         if name in self.definitions:
@@ -302,6 +315,28 @@ class UsageVisitor(ast.NodeVisitor):
         self.current_class = node.name
         self.generic_visit(node)
         self.current_class = prev
+    def visit_Assign(self, node: ast.Assign) -> None:
+        value = node.value
+        targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if isinstance(value, ast.Call):
+            fname = get_name(value.func) or ""
+            if fname.split(".")[-1] in self.selenium_classes:
+                self.selenium_vars.update(targets)
+        elif isinstance(value, ast.Attribute):
+            if get_name(value) == "self.bot":
+                self.selenium_vars.update(targets)
+        self.generic_visit(node)
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        target = node.target
+        value = node.value
+        if isinstance(target, ast.Name) and value is not None:
+            if isinstance(value, ast.Call):
+                fname = get_name(value.func) or ""
+                if fname.split(".")[-1] in self.selenium_classes:
+                    self.selenium_vars.add(target.id)
+            elif isinstance(value, ast.Attribute) and get_name(value) == "self.bot":
+                self.selenium_vars.add(target.id)
+        self.generic_visit(node)
     def visit_Name(self, node: ast.Name) -> None:
         self.mark_name(node.id)
     def visit_Attribute(self, node: ast.Attribute) -> None:
@@ -335,6 +370,36 @@ class UsageVisitor(ast.NodeVisitor):
                     member_map = self.class_members.get(self.current_class, {})
                     if arg.value in member_map:
                         self.mark(member_map[arg.value])
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "singleShot":
+            for arg in node.args[1:]:
+                if isinstance(arg, ast.Name):
+                    self.mark_name(arg.id)
+                elif isinstance(arg, ast.Attribute):
+                    qname = self.resolve_attr(arg)
+                    if qname:
+                        self.mark(qname)
+                elif isinstance(arg, ast.Constant) and isinstance(arg.value, str) and self.current_class:
+                    member_map = self.class_members.get(self.current_class, {})
+                    if arg.value in member_map:
+                        self.mark(member_map[arg.value])
+        if fname.endswith("invokeMethod"):
+            for arg in node.args:
+                if isinstance(arg, ast.Name):
+                    self.mark_name(arg.id)
+                elif isinstance(arg, ast.Attribute):
+                    qname = self.resolve_attr(arg)
+                    if qname:
+                        self.mark(qname)
+                elif isinstance(arg, ast.Constant) and isinstance(arg.value, str) and self.current_class:
+                    member_map = self.class_members.get(self.current_class, {})
+                    if arg.value in member_map:
+                        self.mark(member_map[arg.value])
+        if isinstance(node.func, ast.Attribute):
+            base = get_name(node.func.value)
+            if base in self.selenium_vars or base == "self.bot":
+                attr = node.func.attr
+                for qname in self.selenium_name_map.get(attr, []):
+                    self.mark(qname)
         self.generic_visit(node)
     def visit_If(self, node: ast.If) -> None:
         if is_main_check(node.test):
@@ -389,6 +454,8 @@ def main() -> int:
     parser.add_argument("paths", nargs="*", default=["."], help="Root paths to scan")
     parser.add_argument("--strict", action="store_true", help="Exit with 1 if dead code found")
     parser.add_argument("--allowlist", default=None, help="Path to allowlist YAML")
+    parser.add_argument("--json", default="dead_code.json", help="Output JSON path")
+    parser.add_argument("--md", default="dead_code_report.md", help="Output Markdown path")
     parser.add_argument("--include-tests", action="store_true", help="Include test files")
     args = parser.parse_args()
 
@@ -401,13 +468,23 @@ def main() -> int:
     for root in roots:
         for path in iter_py_files(root, args.include_tests):
             collect_definitions(path, root, definitions, local_defs, class_members, unreachables)
+    selenium_classes: set[str] = set()
+    selenium_name_map: Dict[str, List[str]] = {}
+    for name, info in definitions.items():
+        if info.file.endswith("selenium_bot.py"):
+            if info.kind == "class":
+                selenium_classes.add(name.split(".")[-1])
+            if info.kind in {"function", "method"}:
+                selenium_name_map.setdefault(name.split(".")[-1], []).append(name)
     for root in roots:
         for path in iter_py_files(root, args.include_tests):
             rel = os.path.relpath(path, root)
             module = path_to_module(path, root)
             visitor = UsageVisitor(module, rel, definitions,
                                    local_defs.get(rel, {}),
-                                   class_members.get(rel, {}))
+                                   class_members.get(rel, {}),
+                                   selenium_classes,
+                                   selenium_name_map)
             with open(path, "r", encoding="utf-8") as f:
                 try:
                     tree = ast.parse(f.read(), filename=path)
@@ -416,25 +493,41 @@ def main() -> int:
             visitor.visit(tree)
 
     allow = load_allowlist(args.allowlist)
+    target_files = {"gui/main_window.py", "core/selenium_bot.py"}
     dead_items = []
     for name, info in definitions.items():
-        if not info.used and not allowlisted(name, allow):
+        if info.used or allowlisted(name, allow):
+            continue
+        if info.file.startswith("config/") or info.kind == "module":
+            continue
+        if info.file in target_files:
             dead_items.append(info.to_dead_item())
     for ur in unreachables:
-        if not allowlisted(ur.name, allow):
-            dead_items.append(ur.to_dead_item())
+        if allowlisted(ur.name, allow) or ur.file not in target_files:
+            continue
+        dead_items.append(ur.to_dead_item())
 
-    with open("dead_code.json", "w", encoding="utf-8") as f:
+    dead_items.sort(key=lambda x: x["confidence"], reverse=True)
+    with open(args.json, "w", encoding="utf-8") as f:
         json.dump(dead_items, f, indent=2)
-    with open("dead_code_report.md", "w", encoding="utf-8") as f:
+
+    grouped: Dict[str, List[Dict[str, object]]] = {f: [] for f in target_files}
+    for item in dead_items:
+        grouped.setdefault(item["file"], []).append(item)
+    with open(args.md, "w", encoding="utf-8") as f:
         f.write("# Dead Code Report\n\n")
-        if not dead_items:
-            f.write("No dead code found.\n")
-        else:
-            for item in dead_items:
+        for file in ["gui/main_window.py", "core/selenium_bot.py"]:
+            f.write(f"## {file}\n")
+            items = grouped.get(file) or []
+            if not items:
+                f.write("No dead code found.\n\n")
+                continue
+            for item in items:
+                refs = ", ".join(item.get("xrefs", [])) or "None"
                 f.write(
-                    f"- {item['file']}:{item['start']}-{item['end']} {item['kind']} {item['name']} ({item['reason']})\n"
+                    f"- {item['start']}-{item['end']} {item['kind']} {item['name']} reason: {item['reason']} xrefs: {refs}\n"
                 )
+            f.write("\n")
 
     if args.strict and dead_items:
         return 1
