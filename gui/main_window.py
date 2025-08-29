@@ -92,6 +92,26 @@ TB_RE = re.compile(r"^/([A-Za-z0-9]+)(?:\.html)?(?:/.*)?$")
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 
 
+# Logging noise fragments to suppress unless explicitly enabled
+_UI_NOISE_FRAGMENTS = [
+    "COLOR DEBUG",
+    "Status Values - Download:",
+    "APPLYING status-",
+    "COLOR SYSTEM:",
+    "FORCE STYLING:",
+    "Refreshing process threads table from main thread",
+]
+
+
+class _UiNoiseFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:  # pragma: no cover - simple filter
+        """Drop noisy UI colour/status logs unless NOISE_LOGS=1."""
+        if os.getenv("NOISE_LOGS") == "1":
+            return True
+        msg = record.getMessage()
+        return not any(fragment in msg for fragment in _UI_NOISE_FRAGMENTS)
+
+
 def _clean_host(host: str) -> str:
     host = (host or "").lower()
     return host[4:] if host.startswith("www.") else host
@@ -292,6 +312,9 @@ class ForumBotGUI(QMainWindow):
         self.config = config
         self.user_manager = get_user_manager()
         self.log = logging.getLogger(__name__)
+        self._ui_noise_filter = _UiNoiseFilter()
+        for handler in logging.getLogger().handlers:
+            handler.addFilter(self._ui_noise_filter)
         # Ensure no previously restored session leaks into the new UI
         if self.user_manager.get_current_user():
             logging.info(
@@ -7662,7 +7685,7 @@ class ForumBotGUI(QMainWindow):
                 print(f"⚪ APPLYING status-pending CSS class for {thread_title}")
 
             # Force logging to ensure it's visible
-            logging.info(f"🎨 COLOR SYSTEM: {thread_title} -> CSS Class: {status_class} | Tooltip: {status_tooltip}")
+            logging.debug(f"🎨 COLOR SYSTEM: {thread_title} -> CSS Class: {status_class} | Tooltip: {status_tooltip}")
 
             # Determine status string for filtering (without 'status-' prefix)
             status_str = status_class.replace('status-', '') if status_class else 'pending'
@@ -7711,7 +7734,7 @@ class ForumBotGUI(QMainWindow):
                 title_item.setForeground(text_brush)
 
                 print(f"🎨 FORCE APPLIED: {status_class} -> BG: {bg_color}, Text: {text_color} on row {row_position}")
-                logging.info(f"🎨 FORCE STYLING: {thread_title} -> {status_class} -> BG: {bg_color}")
+                logging.debug(f"🎨 FORCE STYLING: {thread_title} -> {status_class} -> BG: {bg_color}")
 
             links = thread['links']
             # Determine primary host links based on user priority
@@ -9642,7 +9665,7 @@ class ForumBotGUI(QMainWindow):
         This method is connected to the thread_status_updated signal.
         """
         try:
-            logging.info(f"🔄 Refreshing process threads table from main thread")
+            logging.debug(f"🔄 Refreshing process threads table from main thread")
             self.populate_process_threads_table(self.process_threads)
 
             self._restore_proc_filter_state()
