@@ -1,11 +1,9 @@
 # tracking_worker.py
 import logging
 from PyQt5.QtCore import QThread, pyqtSignal, QMutex, QMutexLocker
-from datetime import datetime
 
 class WorkerThread(QThread):
     update_threads = pyqtSignal(str, dict)
-    users_updated = pyqtSignal(object)
     finished = pyqtSignal(str)
 
     def __init__(self, bot, bot_lock, category_manager, category_name, date_filter, page_from, page_to, mode):
@@ -58,12 +56,9 @@ class WorkerThread(QThread):
 
     def track_once(self):
         logging.info(f"WorkerThread: Tracking once for category '{self.category_name}'.")
-            new_threads = self.navigate_to_category(self.page_from, self.page_to)
-            if new_threads:
-                self.update_threads.emit(self.category_name, new_threads)
-                delta = self._build_user_delta(new_threads)
-                if delta:
-                    self.users_updated.emit(delta)
+        new_threads = self.navigate_to_category(self.page_from, self.page_to)
+        if new_threads:
+            self.update_threads.emit(self.category_name, new_threads)
 
     def keep_tracking(self):
         logging.info(f"WorkerThread: Keeping track for category '{self.category_name}'.")
@@ -71,33 +66,7 @@ class WorkerThread(QThread):
             new_threads = self.navigate_to_category(1, 1)
             if new_threads:
                 self.update_threads.emit(self.category_name, new_threads)
-                delta = self._build_user_delta(new_threads)
-                if delta:
-                    self.users_updated.emit(delta)
             self.sleep(60)
 
     def stop(self):
         self._is_running = False
-
-    # ------------------------------------------------------------------
-    def _build_user_delta(self, threads: dict) -> dict:
-        """Return a templab-compatible delta for ``threads``."""
-        delta = {}
-        for info in threads.values():
-            username = info.get("author")
-            if not username:
-                continue
-            thread_obj = {
-                "id": info.get("thread_id"),
-                "url": info.get("thread_url"),
-                "title": info.get("thread_title") or info.get("title"),
-                "date": info.get("thread_date", ""),
-            }
-            cat = self.category_name
-            cat_map = delta.setdefault(cat, {})
-            user_entry = cat_map.setdefault(
-                username,
-                {"threads": [], "last_seen": datetime.utcnow().isoformat()},
-            )
-            user_entry["threads"].append(thread_obj)
-        return delta

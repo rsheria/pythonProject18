@@ -1,7 +1,7 @@
 import logging
 from PyQt5.QtCore import QMutexLocker, pyqtSignal
 from .worker_thread import WorkerThread
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 
 def build_date_filter_list(days: int) -> list[str]:
@@ -34,7 +34,6 @@ class MegaThreadsWorkerThread(WorkerThread):
     يرث من WorkerThread عشان يدعم pause/cancel.
     """
     update_megathreads = pyqtSignal(str, dict)
-    users_updated = pyqtSignal(object)
 
     def __init__(self,
                  bot,
@@ -115,7 +114,7 @@ class MegaThreadsWorkerThread(WorkerThread):
             # نبعت الإصدارات الجديدة إذا وجدت
             if isinstance(new_versions, dict) and new_versions:
                 logging.info(f"✅ Found {len(new_versions)} new/updated versions for '{self.category_name}'")
-
+                
                 # Log details about each version found
                 for title, version_data in new_versions.items():
                     if version_data.get('has_rapidgator'):
@@ -126,31 +125,7 @@ class MegaThreadsWorkerThread(WorkerThread):
                         logging.info(f"🥉 KNOWN HOST VERSION: '{title}' - Standard update")
                     else:
                         logging.info(f"📝 MANUAL REVIEW VERSION: '{title}' - Needs attention")
-
+                
                 self.update_megathreads.emit(self.category_name, new_versions)
-                delta = self._build_user_delta(new_versions)
-                if delta:
-                    self.users_updated.emit(delta)
             else:
                 logging.info(f"ℹ️ No new/updated versions found for '{self.category_name}' since last check")
-
-    # ------------------------------------------------------------------
-    def _build_user_delta(self, versions: dict) -> dict:
-        """Create a templab-style delta from megathread versions."""
-        delta = {}
-        for info in versions.values():
-            username = info.get("author") or info.get("username")
-            if not username:
-                continue
-            thread_obj = {
-                "id": info.get("thread_id"),
-                "url": info.get("thread_url"),
-                "title": info.get("version_title") or info.get("thread_title"),
-                "date": info.get("thread_date") or info.get("post_date", ""),
-            }
-            cat_map = delta.setdefault(self.category_name, {})
-            user_entry = cat_map.setdefault(
-                username, {"threads": [], "last_seen": datetime.utcnow().isoformat()}
-            )
-            user_entry["threads"].append(thread_obj)
-        return delta
