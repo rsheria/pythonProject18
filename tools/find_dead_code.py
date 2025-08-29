@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Dead code detector for the repository.
 
-Recursively scans Python files, builds a very small symbol table and
-usage index and reports unused definitions and unreachable code.
+"""Simple dead code detector with PyQt and dynamic heuristics.
 
-The implementation uses only the Python standard library.
+This script indexes definitions and usages across a project and reports
+potentially unused symbols.  It is a best-effort static analysis tool and
+is not perfect, but it aims to reduce false positives for common patterns
+used in this repository such as Qt signals/slots and cross module calls.
 """
+
+from __future__ import annotations
 
 import argparse
 import ast
@@ -13,431 +16,429 @@ import json
 import os
 import re
 import sys
-from collections import defaultdict
-from typing import Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Iterable
+
+try:
+    import yaml  # type: ignore
+except Exception:  # pragma: no cover - PyYAML may not be installed
+    yaml = None  # fallback, allow running without allowlist support
 
 EXCLUDE_DIRS = {"venv", "__pycache__", "data", "dist", "build"}
-PYQT_BASES = {"QThread", "QObject", "QAbstractItemModel"}
-TEMPLATE_EXTS = {".tmpl", ".template", ".tpl", ".j2"}
-TERMINATORS = (ast.Return, ast.Raise, ast.Break, ast.Continue)
+EXCLUDE_PATTERN = re.compile(r".*(old|legacy|bak).*", re.IGNORECASE)
 
+PYQT_BASES = {
+    "QObject",
+    "QThread",
+    "QAbstractItemModel",
+    "QAbstractListModel",
+    "QAbstractTableModel",
+}
 
-def repo_root() -> str:
-    """Return repository root (parent of tools directory)."""
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+@dataclass
+class Definition:
+    name: str
+    kind: str
+    file: str
+    start: int
+    end: int
+    used: bool = False
 
+    def to_dead_item(self) -> Dict[str, object]:
+        return {
+            "file": self.file,
+            "kind": self.kind,
+            "name": self.name,
+            "start": self.start,
+            "end": self.end,
+            "reason": "unused",
+            "references": [],
+            "confidence": 0.5,
+        }
 
-def scan_py_files(root: str) -> List[str]:
-    files: List[str] = []
+@dataclass
+class Unreachable:
+    file: str
+    name: str
+    start: int
+    end: int
+
+    def to_dead_item(self) -> Dict[str, object]:
+        return {
+            "file": self.file,
+            "kind": "code",
+            "name": self.name,
+            "start": self.start,
+            "end": self.end,
+            "reason": "unreachable",
+            "references": [],
+            "confidence": 0.9,
+        }
+
+# Helpers ------------------------------------------------------------------
+
+def path_to_module(path: str, root: str) -> str:
+    rel = os.path.relpath(path, root)
+    rel = rel.replace(os.sep, "/")
+    parts = rel.split("/")
+    if parts[-1] == "__init__.py":
+        parts = parts[:-1]
+    else:
+        parts[-1] = parts[-1][:-3]  # strip .py
+    return ".".join(p for p in parts if p)
+
+def iter_py_files(root: str, include_tests: bool) -> Iterable[str]:
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS]
-        for fn in filenames:
-            if fn.endswith('.py'):
-                files.append(os.path.join(dirpath, fn))
-    return files
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in EXCLUDE_DIRS and not EXCLUDE_PATTERN.match(d)
+        ]
+        if not include_tests and "tests" in dirpath.split(os.sep):
+            continue
+        for filename in filenames:
+            if not filename.endswith(".py"):
+                continue
+            if EXCLUDE_PATTERN.match(filename):
+                continue
+            yield os.path.join(dirpath, filename)
 
-
-def collect_template_names(root: str) -> Set[str]:
-    names: Set[str] = set()
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS]
-        for fn in filenames:
-            if any(fn.endswith(ext) for ext in TEMPLATE_EXTS):
-                path = os.path.join(dirpath, fn)
-                try:
-                    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                        content = f.read()
-                except Exception:
-                    continue
-                names.update(re.findall(r'[A-Za-z_][A-Za-z0-9_]*', content))
-    return names
-
-
-def load_allowlist(path: str) -> Set[Tuple[Optional[str], Optional[str]]]:
-    allow: Set[Tuple[Optional[str], Optional[str]]] = set()
-    if not os.path.exists(path):
-        return allow
-    entries: List[Dict[str, Optional[str]]] = []
-    current: Optional[Dict[str, Optional[str]]] = None
-    try:
-        with open(path, 'r', encoding='utf-8') as fh:
-            for line in fh:
-                stripped = line.strip()
-                if not stripped or stripped.startswith('#'):
-                    continue
-                if stripped.startswith('allowlist'):
-                    continue
-                if stripped.startswith('-'):
-                    if current:
-                        entries.append(current)
-                    current = {}
-                    stripped = stripped[1:].strip()
-                    if stripped:
-                        if ':' in stripped:
-                            k, v = stripped.split(':', 1)
-                            current[k.strip()] = v.strip().strip('"\'')
-                    continue
-                if current is not None and ':' in stripped:
-                    k, v = stripped.split(':', 1)
-                    current[k.strip()] = v.strip().strip('"\'')
-            if current:
-                entries.append(current)
-    except Exception:
-        return allow
-    for item in entries:
-        allow.add((item.get('file'), item.get('name')))
-    return allow
-
-
-def get_attr_chain(node: ast.AST) -> str:
-    parts: List[str] = []
-    while isinstance(node, ast.Attribute):
-        parts.append(node.attr)
-        node = node.value
+def get_name(node: ast.AST) -> Optional[str]:
     if isinstance(node, ast.Name):
-        parts.append(node.id)
-    parts.reverse()
-    return '.'.join(parts)
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = get_name(node.value)
+        if base:
+            return f"{base}.{node.attr}"
+        return node.attr
+    return None
 
+# Definition collection -----------------------------------------------------
 
-def get_call_name(call: ast.Call) -> str:
-    func = call.func
-    if isinstance(func, ast.Name):
-        return func.id
-    elif isinstance(func, ast.Attribute):
-        return get_attr_chain(func)
-    return ''
-
-
-def extract_callable_names(arg: ast.AST) -> List[str]:
-    names: List[str] = []
-    if isinstance(arg, ast.Name):
-        names.append(arg.id)
-    elif isinstance(arg, ast.Attribute):
-        names.append(get_attr_chain(arg).split('.')[-1])
-    elif isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-        names.append(arg.value.split('.')[-1])
-    return names
-
-
-class UsageCollector(ast.NodeVisitor):
-    def __init__(self):
-        self.usage: Dict[str, List[int]] = defaultdict(list)
-
-    # Basic names and attribute chains
-    def visit_Name(self, node: ast.Name) -> None:
-        self.usage[node.id].append(node.lineno)
-
-    def visit_Attribute(self, node: ast.Attribute) -> None:
-        chain = get_attr_chain(node)
-        self.usage[chain].append(node.lineno)
-        self.generic_visit(node)
-
-    def visit_Call(self, node: ast.Call) -> None:
-        # Handle .connect
-        if isinstance(node.func, ast.Attribute) and node.func.attr == 'connect':
-            if node.args:
-                for name in extract_callable_names(node.args[0]):
-                    self.usage[name].append(node.args[0].lineno)
-        # getattr/setattr/hasattr/delattr
-        if isinstance(node.func, ast.Name) and node.func.id in {'getattr', 'setattr', 'hasattr', 'delattr'}:
-            if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str):
-                self.usage[node.args[1].value].append(node.args[1].lineno)
-        # importlib.import_module and __import__
-        func_name = get_call_name(node)
-        if func_name in {'importlib.import_module', '__import__'}:
-            if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
-                mod = node.args[0].value.split('.')[-1]
-                self.usage[mod].append(node.args[0].lineno)
-        self.generic_visit(node)
-
-
-class DefCollector(ast.NodeVisitor):
-    def __init__(self):
-        self.defs: List[Dict[str, object]] = []
-        self.class_stack: List[str] = []
-        self.dataclass_classes: Set[str] = set()
-
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        bases = [get_attr_chain(b) for b in node.bases]
-        entry = {
-            'name': node.name,
-            'kind': 'class',
-            'line': node.lineno,
-            'bases': bases,
-            'node': node,
-            'used': False,
-        }
-        self.defs.append(entry)
-        # dataclass decorator?
-        for dec in node.decorator_list:
-            if get_attr_chain(dec) == 'dataclass':
-                self.dataclass_classes.add(node.name)
-        self.class_stack.append(node.name)
-        for stmt in node.body:
-            self.visit(stmt)
-        self.class_stack.pop()
-
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # includes methods
-        if self.class_stack:
-            name = f"{self.class_stack[-1]}.{node.name}"
-            kind = 'method'
-        else:
-            name = node.name
-            kind = 'function'
-        entry = {
-            'name': name,
-            'kind': kind,
-            'line': node.lineno,
-            'node': node,
-            'used': False,
-        }
-        # @pyqtSlot decorator => used
-        for dec in node.decorator_list:
-            if get_attr_chain(dec) == 'pyqtSlot':
-                entry['used'] = True
-        self.defs.append(entry)
-        for stmt in node.body:
-            self.visit(stmt)
-
-    visit_AsyncFunctionDef = visit_FunctionDef
-
-    def visit_Assign(self, node: ast.Assign) -> None:
-        if self.class_stack:
-            class_name = self.class_stack[-1]
-            # class attributes: mark pyqtSignal fields as used
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    attr_name = f"{class_name}.{target.id}"
-                    used = False
-                    if isinstance(node.value, ast.Call):
-                        if get_call_name(node.value) == 'pyqtSignal':
-                            used = True
-                    entry = {
-                        'name': attr_name,
-                        'kind': 'attribute',
-                        'line': node.lineno,
-                        'node': node,
-                        'used': used,
-                    }
-                    self.defs.append(entry)
-        else:
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    name = target.id
-                    if name.startswith('__') or name == '__all__':
-                        continue
-                    entry = {
-                        'name': name,
-                        'kind': 'var',
-                        'line': node.lineno,
-                        'node': node,
-                        'used': False,
-                    }
-                    self.defs.append(entry)
-
-    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-        if self.class_stack:
-            class_name = self.class_stack[-1]
-            if class_name in self.dataclass_classes:
-                return  # dataclass field
-            if isinstance(node.target, ast.Name):
-                attr_name = f"{class_name}.{node.target.id}"
-                used = False
-                if isinstance(node.value, ast.Call) and get_call_name(node.value) == 'pyqtSignal':
-                    used = True
-                entry = {
-                    'name': attr_name,
-                    'kind': 'attribute',
-                    'line': node.lineno,
-                    'node': node,
-                    'used': used,
-                }
-                self.defs.append(entry)
-        else:
-            if isinstance(node.target, ast.Name):
-                name = node.target.id
-                if name.startswith('__') or name == '__all__':
-                    return
-                entry = {
-                    'name': name,
-                    'kind': 'var',
-                    'line': node.lineno,
-                    'node': node,
-                    'used': False,
-                }
-                self.defs.append(entry)
-
-
-def collect_defs(tree: ast.AST) -> List[Dict[str, object]]:
-    collector = DefCollector()
-    collector.visit(tree)
-    return collector.defs
-
-
-def collect_usage(tree: ast.AST) -> Dict[str, List[int]]:
-    uc = UsageCollector()
-    uc.visit(tree)
-    # Collect names from CLI entrypoints
-    for node in ast.walk(tree):
-        if isinstance(node, ast.If):
-            if (
-                isinstance(node.test, ast.Compare)
-                and isinstance(node.test.left, ast.Name)
-                and node.test.left.id == '__name__'
-                and len(node.test.comparators) == 1
-                and isinstance(node.test.comparators[0], ast.Constant)
-                and node.test.comparators[0].value == '__main__'
-            ):
-                inner = UsageCollector()
-                for stmt in node.body:
-                    inner.visit(stmt)
-                for k, v in inner.usage.items():
-                    uc.usage[k].extend(v)
-    return uc.usage
-
-
-def find_unreachable(tree: ast.AST) -> List[Tuple[int, int]]:
-    unreachable: List[Tuple[int, int]] = []
-
-    def check(stmts: List[ast.stmt]) -> None:
-        terminated = False
-        for stmt in stmts:
-            if terminated:
-                start = stmt.lineno
-                end = getattr(stmt, 'end_lineno', start)
-                unreachable.append((start, end))
-            else:
-                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    check(stmt.body)
-                elif isinstance(stmt, ast.ClassDef):
-                    for s in stmt.body:
-                        if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.With, ast.AsyncWith, ast.Match)):
-                            check([s])
-                elif isinstance(stmt, ast.If):
-                    check(stmt.body)
-                    check(stmt.orelse)
-                elif isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
-                    check(stmt.body)
-                    check(stmt.orelse)
-                elif isinstance(stmt, ast.Try):
-                    check(stmt.body)
-                    for h in stmt.handlers:
-                        check(h.body)
-                    check(stmt.orelse)
-                    check(stmt.finalbody)
-                elif isinstance(stmt, (ast.With, ast.AsyncWith)):
-                    check(stmt.body)
-                elif isinstance(stmt, ast.Match):
-                    for case in stmt.cases:
-                        check(case.body)
-                if isinstance(stmt, TERMINATORS):
-                    terminated = True
-    check(tree.body)
+def find_unreachable(body: List[ast.stmt]) -> List[ast.stmt]:
+    unreachable: List[ast.stmt] = []
+    reachable = True
+    for stmt in body:
+        if not reachable:
+            unreachable.append(stmt)
+        if isinstance(stmt, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+            reachable = False
     return unreachable
 
-
-def analyze_file(path: str, template_names: Set[str]) -> Tuple[List[Dict[str, object]], List[Tuple[int, int]]]:
+def collect_definitions(path: str, root: str,
+                        definitions: Dict[str, Definition],
+                        local_defs: Dict[str, Dict[str, str]],
+                        class_members: Dict[str, Dict[str, Dict[str, str]]],
+                        unreachables: List[Unreachable]) -> None:
+    with open(path, "r", encoding="utf-8") as f:
+        source = f.read()
     try:
-        with open(path, 'r', encoding='utf-8') as fh:
-            source = fh.read()
         tree = ast.parse(source, filename=path)
     except SyntaxError:
-        return [], []
-    defs = collect_defs(tree)
-    usage = collect_usage(tree)
-    # Merge template names
-    for name in template_names:
-        usage.setdefault(name, []).append(0)
-    # Mark used based on usage
-    used_names = set(usage.keys())
-    for d in defs:
-        base_name = d['name'].split('.')[-1]
-        if d['name'] in used_names or base_name in used_names:
-            d['used'] = True
-        if d['kind'] == 'class' and any(b.split('.')[-1] in PYQT_BASES for b in d.get('bases', [])):
-            d['used'] = True
-    # config.py constants
-    if os.path.basename(path) == 'config.py':
-        for d in defs:
-            if d['kind'] == 'var' and d['name'].isupper():
-                d['used'] = True
-    unreachable = find_unreachable(tree)
-    return defs, unreachable
+        return
+    module = path_to_module(path, root)
+    rel = os.path.relpath(path, root)
+    definitions[module] = Definition(module, "module", rel, 1, len(source.splitlines()))
+    local_defs[rel] = {}
+    class_members[rel] = {}
 
+    def register(name: str, kind: str, node: ast.AST) -> None:
+        definitions[name] = Definition(
+            name=name,
+            kind=kind,
+            file=rel,
+            start=getattr(node, "lineno", 1),
+            end=getattr(node, "end_lineno", getattr(node, "lineno", 1)),
+        )
 
-def is_allowed(entry: Dict[str, object], allow: Set[Tuple[Optional[str], Optional[str]]]) -> bool:
-    for f, n in allow:
-        if (f is None or f == entry['file']) and (n is None or n == entry.get('name')):
-            return True
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            qname = f"{module}.{node.name}"
+            register(qname, "function", node)
+            local_defs[rel][node.name] = qname
+            if any((get_name(d) or "").split(".")[-1] == "pyqtSlot" for d in node.decorator_list):
+                definitions[qname].used = True
+            for stmt in find_unreachable(node.body):
+                unreachables.append(
+                    Unreachable(rel, qname, stmt.lineno, getattr(stmt, "end_lineno", stmt.lineno))
+                )
+        elif isinstance(node, ast.ClassDef):
+            qclass = f"{module}.{node.name}"
+            register(qclass, "class", node)
+            local_defs[rel][node.name] = qclass
+            class_members[rel][node.name] = {}
+            for base in node.bases:
+                base_name = get_name(base)
+                if base_name:
+                    base_name = base_name.split(".")[-1]
+                    if base_name in PYQT_BASES or base_name.endswith("Model"):
+                        definitions[qclass].used = True
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    mname = f"{qclass}.{item.name}"
+                    register(mname, "method", item)
+                    class_members[rel][node.name][item.name] = mname
+                    if any((get_name(d) or "").split(".")[-1] == "pyqtSlot" for d in item.decorator_list):
+                        definitions[mname].used = True
+                    for stmt in find_unreachable(item.body):
+                        unreachables.append(
+                            Unreachable(rel, mname, stmt.lineno, getattr(stmt, "end_lineno", stmt.lineno))
+                        )
+                elif isinstance(item, (ast.Assign, ast.AnnAssign)):
+                    targets: List[ast.expr] = []
+                    if isinstance(item, ast.Assign):
+                        targets = item.targets
+                        value = item.value
+                    else:
+                        targets = [item.target]
+                        value = item.value
+                    for t in targets:
+                        if isinstance(t, ast.Name):
+                            attr_qname = f"{qclass}.{t.id}"
+                            register(attr_qname, "attribute", item)
+                            class_members[rel][node.name][t.id] = attr_qname
+                            if isinstance(value, ast.Call):
+                                fname = get_name(value.func)
+                                if fname and fname.split(".")[-1] == "pyqtSignal":
+                                    definitions[attr_qname].used = True
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets: List[ast.expr] = []
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+                value = node.value
+            else:
+                targets = [node.target]
+                value = node.value
+            for t in targets:
+                if isinstance(t, ast.Name):
+                    qname = f"{module}.{t.id}"
+                    register(qname, "variable", node)
+                    local_defs[rel][t.id] = qname
+                    if isinstance(value, ast.Call):
+                        fname = get_name(value.func)
+                        if fname and fname.split(".")[-1] == "pyqtSignal":
+                            definitions[qname].used = True
+
+# Usage analysis ------------------------------------------------------------
+
+def is_main_check(test: ast.AST) -> bool:
+    if isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq):
+        left, right = test.left, test.comparators[0]
+        if isinstance(left, ast.Name) and left.id == "__name__" and isinstance(right, ast.Constant):
+            return str(right.value) == "__main__"
+        if isinstance(right, ast.Name) and right.id == "__name__" and isinstance(left, ast.Constant):
+            return str(left.value) == "__main__"
     return False
 
+def gather_names(nodes: List[ast.stmt]) -> List[object]:
+    items: List[object] = []
+    class NV(ast.NodeVisitor):
+        def visit_Name(self, n: ast.Name) -> None:
+            items.append(n.id)
+        def visit_Attribute(self, n: ast.Attribute) -> None:
+            if isinstance(n.value, ast.Name):
+                items.append((n.value.id, n.attr))
+            self.generic_visit(n)
+    v = NV()
+    for n in nodes:
+        v.visit(n)
+    return items
 
-def generate_reports(results: List[Dict[str, object]], root: str) -> None:
-    md_path = os.path.join(root, 'dead_code_report.md')
-    json_path = os.path.join(root, 'dead_code.json')
-    # Markdown
-    lines = ["# Dead Code Report", "", "| File | Line | Kind | Name | Reason |", "| --- | --- | --- | --- | --- |"]
-    for r in results:
-        line = f"| {r['file']} | {r['line']}{('-'+str(r['end_line'])) if r.get('end_line') else ''} | {r['kind']} | {r.get('name','')} | {r['reason']} |"
-        lines.append(line)
-    with open(md_path, 'w', encoding='utf-8') as fh:
-        fh.write('\n'.join(lines) + '\n')
-    # JSON
-    with open(json_path, 'w', encoding='utf-8') as fh:
-        json.dump(results, fh, indent=2)
+class UsageVisitor(ast.NodeVisitor):
+    def __init__(self, module: str, rel: str, definitions: Dict[str, Definition],
+                 local_defs: Dict[str, str],
+                 class_members: Dict[str, Dict[str, str]]):
+        self.module = module
+        self.rel = rel
+        self.definitions = definitions
+        self.local_defs = local_defs
+        self.class_members = class_members
+        self.imports: Dict[str, str] = {}
+        self.current_class: Optional[str] = None
 
+    def mark(self, name: str) -> None:
+        if name in self.definitions:
+            self.definitions[name].used = True
+    def mark_name(self, name: str) -> None:
+        if name in self.imports:
+            self.mark(self.imports[name])
+        elif self.current_class and name in self.class_members.get(self.current_class, {}):
+            self.mark(self.class_members[self.current_class][name])
+        elif name in self.local_defs:
+            self.mark(self.local_defs[name])
+        else:
+            for n in self.definitions:
+                if n.split(".")[-1] == name:
+                    self.definitions[n].used = True
+    def resolve_attr(self, node: ast.Attribute) -> Optional[str]:
+        if isinstance(node.value, ast.Name):
+            base = node.value.id
+            if base in ("self", "cls") and self.current_class:
+                return f"{self.module}.{self.current_class}.{node.attr}"
+            if base in self.imports:
+                return f"{self.imports[base]}.{node.attr}"
+            if base in self.local_defs:
+                return f"{self.local_defs[base]}.{node.attr}"
+        elif isinstance(node.value, ast.Attribute):
+            base = self.resolve_attr(node.value)
+            if base:
+                return f"{base}.{node.attr}"
+        return None
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            self.imports[alias.asname or alias.name.split(".")[-1]] = alias.name
+            self.mark(alias.name)
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        module = node.module or ""
+        for alias in node.names:
+            if alias.name == "*":
+                self.mark(module)
+                continue
+            full = f"{module}.{alias.name}" if module else alias.name
+            self.imports[alias.asname or alias.name] = full
+            self.mark(module)
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        prev = self.current_class
+        self.current_class = node.name
+        self.generic_visit(node)
+        self.current_class = prev
+    def visit_Name(self, node: ast.Name) -> None:
+        self.mark_name(node.id)
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        qname = self.resolve_attr(node)
+        if qname:
+            self.mark(qname)
+        self.generic_visit(node)
+    def visit_Call(self, node: ast.Call) -> None:
+        fname = get_name(node.func) or ""
+        if fname.endswith("getattr") and len(node.args) >= 2:
+            arg = node.args[1]
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                target = arg.value
+                if self.current_class and target in self.class_members.get(self.current_class, {}):
+                    self.mark(self.class_members[self.current_class][target])
+                else:
+                    self.mark(f"{self.module}.{target}")
+        if fname.endswith("import_module") and node.args:
+            arg = node.args[0]
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                self.mark(arg.value)
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "connect":
+            for arg in node.args:
+                if isinstance(arg, ast.Name):
+                    self.mark_name(arg.id)
+                elif isinstance(arg, ast.Attribute):
+                    qname = self.resolve_attr(arg)
+                    if qname:
+                        self.mark(qname)
+                elif isinstance(arg, ast.Constant) and isinstance(arg.value, str) and self.current_class:
+                    member_map = self.class_members.get(self.current_class, {})
+                    if arg.value in member_map:
+                        self.mark(member_map[arg.value])
+        self.generic_visit(node)
+    def visit_If(self, node: ast.If) -> None:
+        if is_main_check(node.test):
+            for ref in gather_names(node.body):
+                if isinstance(ref, tuple):
+                    base, attr = ref
+                    if base in ("self", "cls") and self.current_class:
+                        self.mark(f"{self.module}.{self.current_class}.{attr}")
+                    elif base in self.imports:
+                        self.mark(f"{self.imports[base]}.{attr}")
+                    elif base in self.local_defs:
+                        self.mark(f"{self.local_defs[base]}.{attr}")
+                    else:
+                        for n in self.definitions:
+                            if n.split(".")[-1] == attr:
+                                self.definitions[n].used = True
+                else:
+                    self.mark_name(ref)
+        self.generic_visit(node)
+
+# Allowlist -----------------------------------------------------------------
+
+def load_allowlist(path: Optional[str]) -> Dict[str, List[str]]:
+    data = {"names": [], "regex": []}
+    if not path or not os.path.exists(path) or not yaml:
+        return data
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        if isinstance(raw, dict):
+            data["names"] = list(raw.get("names", []))
+            data["regex"] = list(raw.get("regex", []))
+    except Exception:
+        pass
+    return data
+
+def allowlisted(name: str, allow: Dict[str, List[str]]) -> bool:
+    if name in allow.get("names", []):
+        return True
+    for pattern in allow.get("regex", []):
+        try:
+            if re.search(pattern, name):
+                return True
+        except re.error:
+            continue
+    return False
+
+# Main ----------------------------------------------------------------------
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Detect dead code")
-    parser.add_argument('--strict', action='store_true', help='Fail if dead code found')
+    parser = argparse.ArgumentParser(description="Find dead code")
+    parser.add_argument("paths", nargs="*", default=["."], help="Root paths to scan")
+    parser.add_argument("--strict", action="store_true", help="Exit with 1 if dead code found")
+    parser.add_argument("--allowlist", default=None, help="Path to allowlist YAML")
+    parser.add_argument("--include-tests", action="store_true", help="Include test files")
     args = parser.parse_args()
 
-    root = repo_root()
-    allowlist_path = os.path.join(root, 'tools', 'deadcode_allowlist.yml')
-    allow = load_allowlist(allowlist_path)
-    template_names = collect_template_names(root)
+    roots = [os.path.abspath(p) for p in args.paths]
+    definitions: Dict[str, Definition] = {}
+    local_defs: Dict[str, Dict[str, str]] = {}
+    class_members: Dict[str, Dict[str, Dict[str, str]]] = {}
+    unreachables: List[Unreachable] = []
 
-    results: List[Dict[str, object]] = []
-    for file_path in scan_py_files(root):
-        rel = os.path.relpath(file_path, root)
-        defs, unreachable = analyze_file(file_path, template_names)
-        for d in defs:
-            if d['used']:
-                continue
-            entry = {
-                'file': rel,
-                'line': d['line'],
-                'kind': d['kind'],
-                'name': d['name'],
-                'reason': 'unused',
-                'references': [],
-            }
-            if not is_allowed(entry, allow):
-                results.append(entry)
-        for start, end in unreachable:
-            entry = {
-                'file': rel,
-                'line': start,
-                'end_line': end,
-                'kind': 'unreachable',
-                'name': '',
-                'reason': 'unreachable code',
-                'references': [],
-            }
-            if not is_allowed(entry, allow):
-                results.append(entry)
-    generate_reports(results, root)
-    # Print table summary
-    if results:
-        print(f"Found {len(results)} dead code items. See dead_code_report.md for details.")
-    else:
-        print("No dead code detected.")
-    if args.strict and results:
+    for root in roots:
+        for path in iter_py_files(root, args.include_tests):
+            collect_definitions(path, root, definitions, local_defs, class_members, unreachables)
+    for root in roots:
+        for path in iter_py_files(root, args.include_tests):
+            rel = os.path.relpath(path, root)
+            module = path_to_module(path, root)
+            visitor = UsageVisitor(module, rel, definitions,
+                                   local_defs.get(rel, {}),
+                                   class_members.get(rel, {}))
+            with open(path, "r", encoding="utf-8") as f:
+                try:
+                    tree = ast.parse(f.read(), filename=path)
+                except SyntaxError:
+                    continue
+            visitor.visit(tree)
+
+    allow = load_allowlist(args.allowlist)
+    dead_items = []
+    for name, info in definitions.items():
+        if not info.used and not allowlisted(name, allow):
+            dead_items.append(info.to_dead_item())
+    for ur in unreachables:
+        if not allowlisted(ur.name, allow):
+            dead_items.append(ur.to_dead_item())
+
+    with open("dead_code.json", "w", encoding="utf-8") as f:
+        json.dump(dead_items, f, indent=2)
+    with open("dead_code_report.md", "w", encoding="utf-8") as f:
+        f.write("# Dead Code Report\n\n")
+        if not dead_items:
+            f.write("No dead code found.\n")
+        else:
+            for item in dead_items:
+                f.write(
+                    f"- {item['file']}:{item['start']}-{item['end']} {item['kind']} {item['name']} ({item['reason']})\n"
+                )
+
+    if args.strict and dead_items:
         return 1
     return 0
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":  # pragma: no cover
     sys.exit(main())
-
