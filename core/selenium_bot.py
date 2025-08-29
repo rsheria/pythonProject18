@@ -3627,7 +3627,28 @@ class ForumBotSelenium:
         
         # Always select the LAST POST (latest reply)
         last_post = all_posts[-1]
-        
+
+        # Try to grab the author from the same reply row
+        author = ''
+        try:
+            post_tr = last_post.find_parent('tr') if last_post else None
+            author_el = None
+            if post_tr:
+                author_el = (post_tr.select_one('a.bigusername span')
+                             or post_tr.select_one('a.bigusername')
+                             or post_tr.select_one('a.username, a[class*="author"], a[href*="member.php"]'))
+            if not author_el:
+                table = last_post.find_parent('table') if last_post else None
+                if table:
+                    author_el = (table.select_one('a.bigusername span')
+                                  or table.select_one('a.bigusername'))
+            if not author_el:
+                author_el = (soup.select_one('td.alt2 a.bigusername span')
+                              or soup.select_one('td.alt2 a.bigusername'))
+            author = author_el.get_text(strip=True) if author_el else ''
+        except Exception:
+            author = ''
+
         # Get post date for continuous monitoring
         post_date = self.get_megathread_post_date(last_post)
         
@@ -3693,7 +3714,7 @@ class ForumBotSelenium:
             'has_any_links': has_any_links,
             'priority_score': priority_score,
             'html_content': str(last_post),
-            'author': author if 'author' in locals() and author else self._safe_extract_author(last_post)
+            'author': author or self._safe_extract_author(last_post)
         }
 
         # Log the selection decision for the last post
@@ -3722,7 +3743,7 @@ class ForumBotSelenium:
             'has_any_links': has_any_links,
             'priority_score': priority_score,
             'html_content': str(last_post),
-            'author': author if 'author' in locals() and author else self._safe_extract_author(last_post)
+            'author': author or self._safe_extract_author(last_post)
         }
 
     def calculate_version_priority_score(self, has_rapidgator, has_katfile, has_other_known_hosts, has_any_links, post_date):

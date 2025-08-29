@@ -8018,7 +8018,8 @@ class ForumBotGUI(QMainWindow):
                     'post_date': post_date,
                     'has_rapidgator': version_info.get('has_rapidgator', False),
                     'has_katfile': version_info.get('has_katfile', False),
-                    'has_other_known_hosts': version_info.get('has_other_known_hosts', False)
+                    'has_other_known_hosts': version_info.get('has_other_known_hosts', False),
+                    'author': version_info.get('author', '')
                 }
 
                 # Append to megathreads_process_threads
@@ -8073,6 +8074,8 @@ class ForumBotGUI(QMainWindow):
                                                                                                                 {})
                 self.process_threads[proceed_category_name][actual_version_title]['thread_url'] = latest_version.get(
                     'thread_url', '')
+                self.process_threads[proceed_category_name][actual_version_title]['author'] = latest_version.get(
+                    'author', '')
                 # If you need any other fields at top-level do the same here
 
             # Save updated data immediately so it's visible without restart
