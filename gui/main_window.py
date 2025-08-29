@@ -8022,6 +8022,26 @@ class ForumBotGUI(QMainWindow):
                     'author': version_info.get('author', '')
                 }
 
+                author = version_info.get('author', '')
+                td = version_info.get('thread_date') or version_info.get('post_date')
+                thread_date = td.strftime('%d.%m.%Y') if hasattr(td, 'strftime') else (td or '')
+                version_data = {
+                    'thread_url': new_version_data.get('thread_url', ''),
+                    'thread_date': thread_date,
+                    'thread_id': new_version_data.get('thread_id', ''),
+                    'file_hosts': list(new_version_data.get('file_hosts', [])),
+                    'links': dict(new_version_data.get('links', {})),
+                    'bbcode_content': new_version_data.get('bbcode_content', ''),
+                    'bbcode_original': new_version_data.get('bbcode_content', ''),
+                    'author': author,
+                    'title': actual_version_title,
+                    'category': proceed_category_name,
+                }
+                try:
+                    templab_manager.store_post(author, proceed_category_name, version_data)
+                except Exception as exc:
+                    logging.error(f"Failed to store post for templab: {exc}")
+
                 # Append to megathreads_process_threads
                 if main_thread_title not in self.megathreads_process_threads[proceed_category_name]:
                     self.megathreads_process_threads[proceed_category_name][main_thread_title] = {'versions': []}
@@ -8074,8 +8094,7 @@ class ForumBotGUI(QMainWindow):
                                                                                                                 {})
                 self.process_threads[proceed_category_name][actual_version_title]['thread_url'] = latest_version.get(
                     'thread_url', '')
-                self.process_threads[proceed_category_name][actual_version_title]['author'] = latest_version.get(
-                    'author', '')
+                self.process_threads[proceed_category_name][actual_version_title]['author'] = author
                 # If you need any other fields at top-level do the same here
 
             # Save updated data immediately so it's visible without restart

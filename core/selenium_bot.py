@@ -3382,59 +3382,76 @@ class ForumBotSelenium:
 
     def navigate_to_actual_last_page(self, thread_url):
         """
-        Navigate to the actual last page of a megathread.
-        Some threads have multiple pages, we need to find the real last page.
+        Return the true last-page URL of a megathread, without ever stepping back.
+        Keeps current logic minimal; no selector changes.
         """
         try:
-            # First, navigate to the thread (might be first page)
+            # Normalize URL
             if thread_url.startswith('/'):
                 thread_url = self.forum_url.rstrip('/') + thread_url
             elif not thread_url.startswith('http'):
                 thread_url = self.forum_url.rstrip('/') + '/' + thread_url.lstrip('/')
-            
+
+            current_page_num = self._extract_page_num(thread_url)
+
+            # Load current (might already be last page)
             self.driver.get(thread_url)
             time.sleep(2)
+            from bs4 import BeautifulSoup
             soup = BeautifulSoup(self.driver.page_source, 'html.parser')
-            
-            # Look for pagination - find the last page number
-            pagination_links = soup.find_all('a', href=True)
-            last_page_num = 1
-            
-            for link in pagination_links:
-                href = link.get('href', '')
-                text = link.get_text(strip=True)
-                
-                # Look for page numbers in pagination
-                if 'page=' in href and text.isdigit():
-                    page_num = int(text)
-                    if page_num > last_page_num:
-                        last_page_num = page_num
-                        
-                # Also check for "Last Page" or similar links
-                elif ('last' in text.lower() or 'letzte' in text.lower()) and 'page=' in href:
-                    # Extract page number from the href
-                    import re
-                    page_match = re.search(r'page=([0-9]+)', href)
-                    if page_match:
-                        page_num = int(page_match.group(1))
-                        if page_num > last_page_num:
-                            last_page_num = page_num
-            
-            # If we found a higher page number, construct the last page URL
-            if last_page_num > 1:
-                if '?' in thread_url:
-                    last_page_url = f"{thread_url}&page={last_page_num}"
-                else:
-                    last_page_url = f"{thread_url}?page={last_page_num}"
-                logging.info(f"📚 Found multi-page thread, navigating to page {last_page_num}: {last_page_url}")
-                return last_page_url
-            else:
-                logging.info(f"📚 Single page thread, using original URL: {thread_url}")
+
+            candidate_url = None
+
+            # 1) لو فيه رابط "last" واضح
+            a_last = (soup.select_one('a[rel="last"]')
+                      or soup.select_one('a.smallfont[title*="Letzte Seite"]')
+                      or soup.select_one('a.smallfont[title*="Last"]'))
+            if a_last and a_last.get('href'):
+                href = a_last['href']
+                if href.startswith('/'):
+                    href = self.forum_url.rstrip('/') + href
+                elif not href.startswith('http'):
+                    href = self.forum_url.rstrip('/') + '/' + href.lstrip('/')
+                candidate_url = href
+
+            # 2) وإلا خُد أكبر رقم صفحة من كل اللينكات (من غير تغيير سيليكترات قائمة)
+            if not candidate_url:
+                max_n = current_page_num
+                max_href = None
+                for a in soup.find_all('a', href=True):
+                    href = a['href']
+                    m = re.search(r'page=(\d+)', href) or re.search(r'/page-(\d+)', href)
+                    if m:
+                        n = int(m.group(1))
+                        if n > max_n:
+                            max_n, max_href = n, href
+                if max_href:
+                    if max_href.startswith('/'):
+                        max_href = self.forum_url.rstrip('/') + max_href
+                    elif not max_href.startswith('http'):
+                        max_href = self.forum_url.rstrip('/') + '/' + max_href.lstrip('/')
+                    candidate_url = max_href
+
+            # 3) لو مفيش مرشح، خليك على اللى معاك
+            if not candidate_url:
                 return thread_url
-                
+
+            # 4) الأهم: ممنوع ترجع لورا لو المرشح أصغر من الصفحة الحالية
+            if self._extract_page_num(candidate_url) < current_page_num:
+                return thread_url
+
+            return candidate_url
         except Exception as e:
             logging.error(f"⚠️ Error finding last page, using original URL: {e}")
             return thread_url
+
+    def _extract_page_num(self, url: str) -> int:
+        """Extract page number from URL patterns like ?page=N or /page-N; defaults to 1."""
+        try:
+            m = re.search(r'(?:[?&]page=|/page-)(\d+)', url)
+            return int(m.group(1)) if m else 1
+        except Exception:
+            return 1
 
     def extract_improved_version_title(self, post_element, main_thread_title):
         """
@@ -4253,48 +4270,73 @@ class ForumBotSelenium:
         بعد إيجاد MegaThreads، نختار أفضل نسخة من كل موضوع فرعي
         وترجع dict بالشكل {main_thread_title: best_version_data}.
         """
+        import time
+        import logging
+        import re
+        from datetime import datetime
+        from bs4 import BeautifulSoup
 
-        # 1) تأكد من تسجيل الدخول
-        if not self.is_logged_in:
+        # 1) Cookie-first: حاول تعيد استخدام الجلسة قبل أى Login
+        if not getattr(self, "is_logged_in", False):
+            try:
+                if hasattr(self, "load_cookies") and self.load_cookies():
+                    self.driver.get(self.forum_url)
+                    time.sleep(2)
+                    if hasattr(self, "check_login_status") and self.check_login_status():
+                        self.is_logged_in = True
+                        logging.info("[Megathreads] Reused existing login via cookies.")
+            except Exception as e:
+                logging.warning(f"[Megathreads] Cookie hydration failed: {e}")
+
+        # 2) لو لسه مش لوج-إن اعمل Login مرّة واحدة
+        if not getattr(self, "is_logged_in", False):
             if not self.login(current_url=category_url):
                 logging.error("Cannot proceed without login.")
                 return {}
 
-        # 2) طبع رابط الكاتيجوري
+        # 3) طبع/Normalize رابط الكاتيجوري
         category_url = self.normalize_category_url(category_url)
 
-        # 3) لو الفلتر List، حوّله لنص
+        # 4) لو الفلتر List حوّله لنص ثم Parse
         if isinstance(date_filter, list):
             date_filter = ",".join(date_filter)
-
-        # 4) parse_date_filter ينتظر String
         date_ranges = self.parse_date_filter(date_filter)
 
-        # DEBUG: تأكد إن اللوب بياخد صفحة من وإلى
         logging.info(f"[Megathreads] Pages {page_from}→{page_to}")
 
         # 5) اجمع كل الميجاثريدز عبر الصفحات
         megathreads_data = {}
         for page_number in range(page_from, page_to + 1):
-            # نفس Pagination بتاع الـ Posts: -<n>/ للصفحات التانية
-            if page_number > 1:
-                page_url = f"{category_url.rstrip('/')}-{page_number}/"
-            else:
-                page_url = category_url
+            page_url = f"{category_url.rstrip('/')}-{page_number}/" if page_number > 1 else category_url
 
             logging.info(f"[Megathreads] Visiting: {page_url}")
             self.driver.get(page_url)
             time.sleep(3)
 
-            # لو رُدّ لصفحة لوجين
-            if "/login" in self.driver.current_url:
-                logging.warning(f"[Megathreads] Redirected to login from {page_url}. Re-login.")
+            # 5.a) لو اترمينا على صفحة لوجين جرّب Rehydrate بالكوكيز قبل الفورم
+            if "login" in self.driver.current_url.lower():
+                logging.warning(f"[Megathreads] Redirected to login from {page_url}. Trying cookie rehydrate first.")
                 self.is_logged_in = False
-                if not self.login(current_url=page_url):
-                    logging.error("[Megathreads] Re-login failed.")
-                    return {}
-                self.driver.get(page_url)
-                time.sleep(3)
+                retried = False
+                try:
+                    if hasattr(self, "load_cookies") and self.load_cookies():
+                        self.driver.get(self.forum_url)
+                        time.sleep(2)
+                        if hasattr(self, "check_login_status") and self.check_login_status():
+                            self.is_logged_in = True
+                            self.driver.get(page_url)
+                            time.sleep(3)
+                            retried = True
+                            logging.info("[Megathreads] Login restored via cookies on redirect.")
+                except Exception as e:
+                    logging.warning(f"[Megathreads] Cookie rehydrate on redirect failed: {e}")
+
+                if not retried:
+                    if not self.login(current_url=page_url):
+                        logging.error("[Megathreads] Re-login failed.")
+                        return {}
+                    self.driver.get(page_url)
+                    time.sleep(3)
 
             soup = BeautifulSoup(self.driver.page_source, 'html.parser')
             elems = soup.select('a[id^="thread_title_"]')
@@ -4302,7 +4344,7 @@ class ForumBotSelenium:
 
             for el in elems:
                 title = el.get_text(strip=True)
-                href  = el['href']
+                href = el['href']
                 # أطوّل اللينك لو نسبي
                 if href.startswith('/'):
                     href = self.forum_url.rstrip('/') + href
@@ -4321,24 +4363,32 @@ class ForumBotSelenium:
                     if title not in megathreads_data:
                         megathreads_data[title] = {'url': href, 'date': date_text}
 
-        # 6) استخرج أحدث نسخة لكل ميجاتريد مع المراقبة المستمرة
+        # 6) استخرج أحدث نسخة لكل ميجاتريد (استخدم حارس "لا رجوع للخلف" لو متاح)
         new_versions = {}
         for title, info in megathreads_data.items():
-            last = self.get_megathread_last_page(info['url']) or info['url']
-            
-            # Get last check timestamp for continuous monitoring
+            last = info['url']
+            try:
+                if hasattr(self, "navigate_to_actual_last_page"):
+                    last = self.navigate_to_actual_last_page(info['url'])
+                else:
+                    lp = self.get_megathread_last_page(info['url'])
+                    if lp:
+                        last = lp
+            except Exception as e:
+                logging.warning(f"[Megathreads] Last-page resolve fallback: {e}")
+
+            # last_check timestamp للمراقبة المستمرة
             last_check_timestamp = getattr(self, 'megathread_last_check', {}).get(title, None)
-            
-            # Extract latest version with continuous monitoring
+
+            # استخرج آخر نسخة
             ver = self.extract_megathread_latest_version(last, last_check_timestamp)
             if ver:
                 new_versions[title] = ver
-                
-                # Update last check timestamp
+
+                # حدّث آخر وقت فحص
                 if not hasattr(self, 'megathread_last_check'):
                     self.megathread_last_check = {}
                 self.megathread_last_check[title] = datetime.now()
-                
                 logging.info(f"🔄 Updated last check timestamp for '{title}'")
 
         return new_versions
@@ -5116,10 +5166,10 @@ class ForumBotSelenium:
         logging.debug(f"Found {len(a_tags)} <a> tags with href.")
         for link in a_tags:
             href = link['href']
-            self.process_link(href, file_hosts_found, links_dict)
-            # Also collect keeplinks URLs for potential fallback
             if 'keeplinks.org' in href:
                 keeplinks_urls.add(href)
+                continue  # ما تبعتوش لـ process_link
+            self.process_link(href, file_hosts_found, links_dict)
 
         # Extract links from <pre class="alt2"> blocks
         pre_tags = post.find_all('pre', class_='alt2')
@@ -5180,48 +5230,31 @@ class ForumBotSelenium:
     def process_link(self, url, file_hosts_found, links_dict):
         """
         Process a single link, updating file_hosts_found and links_dict.
-        Handles rg.to URLs by normalizing them to rapidgator.net.
-        Handles keeplinks.org URLs by adding them under the 'rapidgator' key.
+        - Normalizes rg.to -> rapidgator.net
+        - Ignores keeplinks.org here (collected separately as fallback only)
         """
-        parsed_url = re.findall(r'https?://([^/]+)/', url)
-        if not parsed_url:
+        parsed = re.findall(r'https?://([^/]+)/', url)
+        if not parsed:
             return
-            
-        host = parsed_url[0].lower()
-        
-        # Special handling for keeplinks.org URLs - add under rapidgator key
+        host = parsed[0].lower()
+
+        # ⛔ تجاهل keeplinks هنا تمامًا (يتجمع كـ fallback فقط)
         if 'keeplinks.org' in host:
-            target_host = 'rapidgator.net'
-            file_hosts_found.add(target_host)
-            if target_host not in links_dict:
-                links_dict[target_host] = []
-            links_dict[target_host].append(url)
-            logging.info(f"🔗 Added Keeplinks URL under rapidgator: {url}")
             return
-            
-        # Process other known hosts
+
+        # باقى الهوستات المعروفة + تطبيع rg.to → rapidgator.net
         for known_host in self.known_file_hosts:
-            if known_host in host:
-                # Special handling for rg.to URLs - normalize to rapidgator.net
+            if known_host in host or (known_host == 'rg.to' and host == 'rg.to'):
                 if known_host == 'rg.to' or host == 'rg.to':
-                    # Convert rg.to URL to rapidgator.net
                     normalized_url = url.replace('rg.to', 'rapidgator.net')
                     target_host = 'rapidgator.net'
-                    
                     file_hosts_found.add(target_host)
-                    if target_host not in links_dict:
-                        links_dict[target_host] = []
-                    links_dict[target_host].append(normalized_url)
-                    
+                    links_dict.setdefault(target_host, []).append(normalized_url)
                     logging.info(f"🔄 Normalized rg.to URL: {url} -> {normalized_url}")
                 else:
-                    # Regular host processing
                     file_hosts_found.add(known_host)
-                    if known_host not in links_dict:
-                        links_dict[known_host] = []
-                    links_dict[known_host].append(url)
-                
-                break  # Stop checking other known hosts if matched
+                    links_dict.setdefault(known_host, []).append(url)
+                break
 
     def solve_captcha(self, captcha: dict):
         """
