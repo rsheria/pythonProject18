@@ -7,6 +7,9 @@ from utils.utils import sanitize_filename
 import logging
 from dotenv import load_dotenv, find_dotenv
 import re
+from typing import Dict
+
+from core.user_manager import get_user_manager
 
 # ``openai`` is an optional dependency.  Older versions (<1.0) exposed a
 # ``ChatCompletion`` class, while newer releases use an ``OpenAI`` client
@@ -101,6 +104,9 @@ TEMPLAB_DIR = _ensure_dir("templab")
 
 _HOOKS = {"rewrite_images": None, "rewrite_links": None, "reload_tree": None}
 
+# In-memory cache of per-user Template Lab data
+_USER_CACHE: Dict[str, Dict[str, dict]] | None = None
+
 DEFAULT_PROMPT = """
 You are a deterministic BBCode extractor.
 Return ONLY pure JSON with these exact keys:
@@ -137,6 +143,58 @@ def set_hooks(hooks: dict) -> None:
     if not isinstance(hooks, dict):
         return
     _HOOKS.update(hooks)
+
+
+# ------------------------------------------------------------------
+# Template Lab tracked users persistence
+# ------------------------------------------------------------------
+def load_users() -> Dict[str, Dict[str, dict]]:
+    """Load the tracked users mapping for the current application user."""
+    global _USER_CACHE
+    um = get_user_manager()
+    try:
+        data = um.load_user_data("templab_users.json", {})
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    _USER_CACHE = data
+    return data
+
+
+def merge_and_save(delta: Dict[str, Dict[str, dict]]) -> None:
+    """Merge ``delta`` into the persisted user mapping and save immediately."""
+    if not delta:
+        return
+
+    store = _USER_CACHE if _USER_CACHE is not None else load_users()
+
+    for category, users in delta.items():
+        cat_map = store.setdefault(category, {})
+        for username, info in users.items():
+            entry = cat_map.setdefault(
+                username, {"threads": [], "last_seen": info.get("last_seen")}
+            )
+            entry["last_seen"] = info.get("last_seen")
+
+            existing_ids = {
+                t.get("id") for t in entry.get("threads", []) if t.get("id")
+            }
+            for thread in info.get("threads", []):
+                tid = thread.get("id")
+                if tid and tid not in existing_ids:
+                    entry["threads"].append(thread)
+                    existing_ids.add(tid)
+
+    um = get_user_manager()
+    try:
+        um.save_user_data("templab_users.json", store)
+    except Exception:
+        logging.debug("failed to save templab users", exc_info=True)
+
+    cats = len(store)
+    users_total = sum(len(v) for v in store.values())
+    logging.info(f"templab users saved ({cats} cats / {users_total} users)")
 
 # Config helpers
 # ------------------------------------------------------------------

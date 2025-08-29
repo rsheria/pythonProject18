@@ -68,6 +68,7 @@ from core.user_manager import get_user_manager
 from dotenv import find_dotenv, set_key
 from gui.advanced_bbcode_editor import AdvancedBBCodeEditor
 from gui.utils.responsive_manager import ResponsiveManager
+from gui.templates_widget import TemplatesWidget
 from models.job_model import AutoProcessJob
 from models.operation_status import OperationStatus, OpStage, OpType
 from utils import sanitize_filename
@@ -542,6 +543,7 @@ class ForumBotGUI(QMainWindow):
 
     def init_status_view(self):
         self.status_widget = StatusWidget(self)
+        self.templates_widget = TemplatesWidget(self)
         self.content_area.addWidget(self.status_widget)
 
         # Mapping from (section, item, op_type) -> worker for quick lookups
@@ -573,9 +575,12 @@ class ForumBotGUI(QMainWindow):
             self._on_copy_jd_link, Qt.QueuedConnection
         )
 
-        # Allow the status widget to reload its state after login
+        # Allow widgets to reload their state after login
         self.user_logged_in.connect(
             self.status_widget.reload_from_disk, Qt.QueuedConnection
+        )
+        self.user_logged_in.connect(
+            self.templates_widget.reload_from_disk, Qt.QueuedConnection
         )
 
         # اربط الـ StatusWidget بالـ bot عشان JDownloader يشوف cancel_event بتاع الواجهة
@@ -7950,6 +7955,12 @@ class ForumBotGUI(QMainWindow):
 
             # 4) وصل الإشارات وشغّل الـ thread
             worker.update_megathreads.connect(self.handle_new_megathreads_versions)
+            worker.users_updated.connect(
+                self.templates_widget.apply_user_delta, Qt.QueuedConnection
+            )
+            worker.users_updated.connect(
+                templab_manager.merge_and_save, Qt.QueuedConnection
+            )
             worker.finished.connect(self.megathreads_monitoring_finished)
             self.megathreads_workers[category_name] = worker
             worker.start()
@@ -8223,6 +8234,12 @@ class ForumBotGUI(QMainWindow):
 
             # 2) شبّك الإشارات
             worker.update_threads.connect(self.handle_new_threads)
+            worker.users_updated.connect(
+                self.templates_widget.apply_user_delta, Qt.QueuedConnection
+            )
+            worker.users_updated.connect(
+                templab_manager.merge_and_save, Qt.QueuedConnection
+            )
             worker.finished.connect(self.monitoring_finished)
 
             # 3) خزّنه علشان ما يتمش حذفه من الـ Python GC
