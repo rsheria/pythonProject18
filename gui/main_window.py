@@ -148,7 +148,7 @@ from .advanced_bbcode_editor import AdvancedBBCodeEditor
 # Import modern UI components
 from .components import (ModernCard, ModernContentContainer, ModernScrollArea,
                          ModernSectionCard, ModernSidebar)
-from .dialogs import LinksDialog
+from .dialogs import LinksDialog, ReplaceLinksDialog
 from .stats_widget import StatsWidget
 from .status_widget import StatusWidget
 from .upload_status_handler import UploadStatusHandler
@@ -7041,25 +7041,25 @@ class ForumBotGUI(QMainWindow):
                 self.save_process_threads_data()
                 self.populate_process_threads_table(self.process_threads)
 
-            # نفس الدايالوج القديم
-            msg_box = QtMessageBox(self)
-            msg_box.setWindowTitle("Replace Links")
-            msg_box.setText(
-                f"Replace links for '{thread_title}'.\n\nWhat would you like to do?"
+            # Dialog with manual link, create folder, or local folder options
+            dialog = ReplaceLinksDialog(self)
+            dialog.add_link_btn.clicked.connect(
+                lambda: (
+                    dialog.close(),
+                    self.add_manual_link(thread_title, 'Process Threads', category_name),
+                ),
+                type=Qt.QueuedConnection,
             )
-
-            add_link_btn = msg_box.addButton("Add Manual Link", QtMessageBox.ActionRole)
-            create_folder_btn = msg_box.addButton("Create Download Folder", QtMessageBox.ActionRole)
-            cancel_btn = msg_box.addButton("Cancel", QtMessageBox.RejectRole)
-
-            msg_box.setDefaultButton(add_link_btn)
-            msg_box.exec_()
-
-            clicked_button = msg_box.clickedButton()
-            if clicked_button == add_link_btn:
-                self.add_manual_link(thread_title, 'Process Threads', category_name)
-            elif clicked_button == create_folder_btn:
-                self.create_manual_folder(thread_title, 'Process Threads', category_name)
+            dialog.create_folder_btn.clicked.connect(
+                lambda: (
+                    dialog.close(),
+                    self.create_manual_folder(thread_title, 'Process Threads', category_name),
+                ),
+                type=Qt.QueuedConnection,
+            )
+            if dialog.exec_() == QDialog.Accepted and dialog.use_local_folder():
+                folder = dialog.selected_folder()
+                self._treat_folder_as_downloaded(category_name, thread_title, folder)
         except Exception as e:
             self.handle_exception(f"replace_links for '{thread_title}' in '{category_name}'", e)
 
@@ -8708,6 +8708,97 @@ class ForumBotGUI(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to create download folder:\n{str(e)}")
             logging.error(f"Failed to create manual download folder for '{thread_title}': {e}")
+
+    # ------------------------------------------------------------------
+    def _treat_folder_as_downloaded(self, category_name, thread_title, folder_path):
+        """Handle user-provided local folder as if download has finished."""
+
+        try:
+            folder_path = os.path.normpath(folder_path)
+            os.makedirs(folder_path, exist_ok=True)
+
+            # Retrieve thread_id from stored info
+            thread_info = self.process_threads.get(category_name, {}).get(thread_title, {})
+            thread_id = thread_info.get("thread_id")
+            if not thread_id:
+                versions = thread_info.get("versions", [])
+                if versions:
+                    thread_id = versions[-1].get("thread_id")
+            if not thread_id:
+                ui_notifier.warn("Error", "Could not determine thread ID.")
+                return
+
+            # Compute expected thread directory using existing helper
+            expected_dir = self.get_sanitized_path(category_name, thread_id)
+            thread_dir = folder_path if folder_path else expected_dir
+
+            # Count non-hidden files
+            def _count_files(path):
+                try:
+                    return len(
+                        [
+                            f
+                            for f in os.listdir(path)
+                            if os.path.isfile(os.path.join(path, f)) and not f.startswith(".")
+                        ]
+                    )
+                except Exception:
+                    return 0
+
+            files_count = _count_files(thread_dir)
+
+            # Persist information
+            entry = self.process_threads.setdefault(category_name, {}).setdefault(
+                thread_title, {}
+            )
+            entry.update(
+                {
+                    "download_dir": thread_dir,
+                    "download_status": "Finished",
+                    "stage": "Downloaded",
+                    "progress": 100,
+                    "message": "Local folder provided",
+                    "files_count": files_count,
+                }
+            )
+
+            # Emit dataChanged for the affected row
+            row = self._row_for_tid(thread_id)
+            if row >= 0:
+                model = self.process_threads_table.model()
+                tl = model.index(row, 0)
+                br = model.index(row, self.process_threads_table.columnCount() - 1)
+                model.dataChanged.emit(tl, br)
+
+            # Save and refresh UI
+            self.save_process_threads_data()
+            self.populate_process_threads_table(self.process_threads)
+
+            # Finalize when files exist; otherwise poll folder
+            def finalize():
+                r = self._row_for_tid(thread_id)
+                if r >= 0:
+                    self.on_download_row_success(r)
+                if (
+                    hasattr(self, "_auto_process_queue_ids")
+                    and thread_id in getattr(self, "_auto_process_queue_ids", [])
+                ):
+                    self._auto_after_download(True, "Local folder provided", thread_id)
+
+            if files_count > 0:
+                QTimer.singleShot(0, finalize)
+            else:
+                timer = QTimer(self)
+
+                def _poll():
+                    if _count_files(thread_dir) > 0:
+                        timer.stop()
+                        finalize()
+
+                timer.timeout.connect(_poll)
+                timer.start(1000)
+        except Exception as e:
+            self.handle_exception("treat_folder_as_downloaded", e)
 
     def fetch_thread_content(self, item):
         """Fetch HTML content of the selected thread, convert to BBCode, and display in the editor."""

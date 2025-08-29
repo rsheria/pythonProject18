@@ -1,4 +1,17 @@
-from PyQt5.QtWidgets import QDialog, QLabel, QDialogButtonBox, QTextEdit, QVBoxLayout
+import os
+
+from PyQt5.QtWidgets import (
+    QDialog,
+    QLabel,
+    QDialogButtonBox,
+    QTextEdit,
+    QVBoxLayout,
+    QCheckBox,
+    QPushButton,
+    QLineEdit,
+    QFileDialog,
+    QHBoxLayout,
+)
 from PyQt5.QtCore import Qt
 
 # ====================================
@@ -126,3 +139,65 @@ class LinksDialog(QDialog):
             out[k] = vals
 
         return out
+
+
+# ====================================
+# ReplaceLinksDialog: manage link replacement
+# ====================================
+class ReplaceLinksDialog(QDialog):
+    """Dialog to handle link replacement actions.
+
+    Provides legacy buttons for adding a manual link or creating a download
+    folder, plus an optional checkbox allowing the user to select a local
+    directory and treat the thread as already downloaded.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Replace Links")
+        layout = QVBoxLayout(self)
+
+        # Buttons for legacy actions (manual link / create folder)
+        btn_layout = QHBoxLayout()
+        self.add_link_btn = QPushButton("Add Manual Link")
+        self.create_folder_btn = QPushButton("Create Download Folder")
+        btn_layout.addWidget(self.add_link_btn)
+        btn_layout.addWidget(self.create_folder_btn)
+        layout.addLayout(btn_layout)
+
+        # Local folder option
+        self.use_local_cb = QCheckBox("Use local folder (pretend downloaded)")
+        layout.addWidget(self.use_local_cb)
+
+        folder_layout = QHBoxLayout()
+        self.folder_edit = QLineEdit()
+        self.folder_edit.setReadOnly(True)
+        self.select_btn = QPushButton("Select Folder…")
+        folder_layout.addWidget(self.folder_edit)
+        folder_layout.addWidget(self.select_btn)
+        layout.addLayout(folder_layout)
+
+        # Dialog buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        layout.addWidget(button_box)
+
+        # Connections
+        self.select_btn.clicked.connect(self._select_folder, type=Qt.QueuedConnection)
+        button_box.accepted.connect(self.accept, type=Qt.QueuedConnection)
+        button_box.rejected.connect(self.reject, type=Qt.QueuedConnection)
+
+    # ------------------------------------------------------------------
+    def _select_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Folder")
+        if folder:
+            self.folder_edit.setText(os.path.normpath(folder))
+            self.use_local_cb.setChecked(True)
+
+    # ------------------------------------------------------------------
+    def use_local_folder(self) -> bool:
+        return self.use_local_cb.isChecked() and bool(self.folder_edit.text())
+
+    # ------------------------------------------------------------------
+    def selected_folder(self) -> str:
+        return self.folder_edit.text()
+
