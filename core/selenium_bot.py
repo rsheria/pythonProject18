@@ -417,6 +417,14 @@ class ForumBotSelenium:
         """Sanitize a URL to ensure it's properly formatted for API calls."""
         return quote(url, safe=':/')
 
+    def _get_keeplinks_api_hash(self) -> str:
+        val = (
+            self.config.get('keeplinks_api_hash', None)
+            if getattr(self, 'config', None)
+            else None
+        ) or os.getenv('KEEP_LINKS_API_HASH', '')
+        return str(val).strip() if val is not None else ''
+
     def send_to_keeplinks(self, urls):
         """
         Send a list of URLs to Keeplinks API and get a shortened Keeplinks URL.
@@ -430,7 +438,7 @@ class ForumBotSelenium:
             import xml.etree.ElementTree as ET  # <-- Make sure ET is imported so we can parse XML without error
 
             api_url = "https://www.keeplinks.org/api.php"
-            api_hash = str(self.config.get('keeplinks_api_hash', '') or '').strip()
+            api_hash = self._get_keeplinks_api_hash()
             logging.debug(f"Keeplinks API Hash: '{api_hash}'")
 
             if not api_hash:
@@ -1823,92 +1831,44 @@ class ForumBotSelenium:
     def update_keeplinks_links(self, keeplinks_url, new_links):
         """Update a Keeplinks URL with new links and return the updated URL."""
         try:
-            # Extract the URL ID from the keeplinks_url
-            url_id = self.extract_keeplinks_url_id(keeplinks_url)
-            if not url_id:
-                logging.error("Failed to extract URL ID from Keeplinks URL.")
-                return None
-
-            # Prepare the API parameters
-            api_url = "https://www.keeplinks.org/api.php"
-            api_hash = (
-                self.config.get('keeplinks_api_hash', '').strip()
-                or os.getenv("KEEP_LINKS_API_HASH", "").strip()
-            )
+            flat = [
+                str(u).strip()
+                for u in (
+                    sum(([l] if isinstance(l, str) else list(l) for l in new_links), [])
+                )
+                if u
+            ]
+            api_hash = self._get_keeplinks_api_hash()
             if not api_hash:
                 logging.error("Keeplinks API hash is missing")
                 return None
-            # Flatten potential nested lists and sanitize URLs
-            flat_links = []
-            for link in new_links:
-                if isinstance(link, (list, tuple)):
-                    flat_links.extend(link)
-                else:
-                    flat_links.append(link)
-
-            from urllib.parse import urlparse, quote
-
-            def extract_base_rg(url):
-                parsed = urlparse(url)
-                if parsed.netloc.lower() == 'rapidgator.net' and parsed.path.startswith('/file/'):
-                    parts = parsed.path.split('/')
-                    if len(parts) >= 3:
-                        base = '/'.join(parts[:3]) + '/'
-                        return f"{parsed.scheme}://{parsed.netloc}{base}"
-                return url
-
-            processed = [extract_base_rg(u) for u in flat_links]
-            sanitized = [self.sanitize_url(u) for u in processed]
-            encoded = [quote(u, safe=':/?=&,') for u in sanitized]
-            grouped = self.group_links_by_host(encoded)
-            formatted = self.format_links_for_keeplinks(grouped)
-            all_urls_string = ','.join(formatted)
-            api_params = {
-                'apihash': api_hash,
-                'url-id': url_id,
-                'link-to-protect': all_urls_string,
-                'output': 'xml'
-            }
-            headers = {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Accept': 'application/xml'
-            }
-
-            # Send the request
-            response = requests.post(api_url, data=api_params, headers=headers)
-            response.raise_for_status()
-            response_text = response.text.strip()
-            logging.debug(f"Keeplinks API Response Text: {response_text}")
-
-            # Parse the response to confirm the update
-            import xml.etree.ElementTree as ET
-            root = ET.fromstring(response_text)
-            error_elem = root.find('api_error')
-            if error_elem is not None:
-                logging.error(f"Keeplinks API Error: {error_elem.text}")
+            kid = self.extract_keeplinks_url_id(keeplinks_url)
+            if not kid:
+                logging.error("Failed to extract URL ID from Keeplinks URL.")
                 return None
-            else:
-                p_links_elem = root.find('p_links')
-                if p_links_elem is not None:
-                    updated_keeplinks_url = p_links_elem.text.strip()
-                    return updated_keeplinks_url
-                else:
-                    logging.error("Failed to get updated Keeplinks URL from response.")
-                    return None
+            payload = {
+                'api_hash': api_hash,
+                'id': kid,
+                'links': ','.join(flat)
+            }
+            api_url = "https://www.keeplinks.org/api/update"
+            response = requests.post(api_url, data=payload, timeout=30)
+            logging.debug(f"Keeplinks (update) API Response: {response.text}")
+            if response.status_code == 200:
+                return keeplinks_url
+            logging.error(
+                f"Keeplinks API error on update: {response.status_code}. Response: {response.text}"
+            )
+            return None
         except Exception as e:
             logging.error(f"Error updating Keeplinks links: {e}", exc_info=True)
             return None
 
     def extract_keeplinks_url_id(self, keeplinks_url):
-        # Assuming the URL ID is the last part of the URL
-        # e.g., https://www.keeplinks.org/p42/6713cf408f886
         try:
-            url_parts = keeplinks_url.rstrip('/').split('/')
-            url_id = url_parts[-1]
-            return url_id
-        except Exception as e:
-            logging.error(f"Error extracting URL ID from Keeplinks URL: {e}")
-            return None
+            return str(keeplinks_url).strip().rstrip('/').split('/')[-1]
+        except Exception:
+            return ''
 
     def check_rapidgator_link_alive(self, link):
         try:
@@ -2577,12 +2537,10 @@ class ForumBotSelenium:
 
         We'll split by '/' and take the last part as url-id.
         """
-        if not keeplinks_url:
-            return ""
-        parts = keeplinks_url.strip().split('/')
-        if parts:
-            return parts[-1]  # The last segment should be the url-id
-        return ""
+        try:
+            return str(keeplinks_url).strip().rstrip('/').split('/')[-1]
+        except Exception:
+            return ''
 
     def insert_into_keeplinks(self, urls):
         """
@@ -2590,13 +2548,10 @@ class ForumBotSelenium:
         This creates a new Keeplinks link with only recaptcha enabled.
         """
         keeplinks_api_url = "https://www.keeplinks.org/api.php"
-        api_hash = (
-            os.getenv("KEEP_LINKS_API_HASH", "").strip()
-            or self.config.get('keeplinks_api_hash', '').strip()
-        )
+        api_hash = self._get_keeplinks_api_hash()
         if not api_hash:
             logging.error("Keeplinks API hash is missing")
-            return False
+            return None
 
         # Join URLs into a comma-separated string
         links_to_protect = ",".join(urls)
@@ -2644,10 +2599,7 @@ class ForumBotSelenium:
         - urls: A list of new links to set in the Keeplinks link.
         """
         keeplinks_api_url = "https://www.keeplinks.org/api.php"
-        api_hash = (
-            os.getenv("KEEP_LINKS_API_HASH", "").strip()
-            or self.config.get('keeplinks_api_hash', '').strip()
-        )
+        api_hash = self._get_keeplinks_api_hash()
         if not api_hash:
             logging.error("Keeplinks API hash is missing")
             return False
