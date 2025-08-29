@@ -285,23 +285,13 @@ class JDownloaderDownloader(BaseDownloader):
                     download_dir = os.path.abspath(os.path.expanduser(download_dir))
                     os.makedirs(download_dir, exist_ok=True)
 
-                    # For Keeplinks, ensure we use the same download directory as Rapidgator
-                    if 'keeplinks.org' in url.lower():
-                        # Get the default download directory from settings
-                        from config.config import load_configuration
-                        config = load_configuration()
-                        download_dir = config.get('download_dir', download_dir)
-                        logging.info(f"🔗 Keeplinks: Using download directory: {download_dir}")
-                    
                     # Try to set download directory for the device
                     try:
                         if hasattr(self.device.config, 'set'):
-                            # Set the download directory specifically for this download
-                            # This ensures Keeplinks respect the same path as other hosts
                             self.device.config.set(
                                 "org.jdownloader.settings.GeneralSettings",
                                 "defaultdownloadfolder",
-                                download_dir
+                                download_dir,
                             )
                             logging.info(f"📁 Set JDownloader download directory: {download_dir}")
                     except Exception as e:
@@ -310,22 +300,28 @@ class JDownloaderDownloader(BaseDownloader):
                 except Exception as e:
                     logging.warning(f"⚠️ Could not set download directory: {e}")
                     # Continue anyway, we'll move files later
-            
+
             # Add to linkgrabber - let WinRAR handle password prompts naturally
-            links_to_add = [{
-                "links": url,
-                "autostart": True,
-                "downloadPassword": "",
-                "extractPassword": "",  # Empty - WinRAR will prompt for password
-                "priority": "HIGHEST",
-                "packageName": f"{thread_title}_{thread_id}"
-            }]
-
-            if download_dir:
-                links_to_add[0]["destinationFolder"] = download_dir
-
-                # Add links to linkgrabber
-            self.device.linkgrabber.add_links(links_to_add)
+            job = {
+                "category_name": category_name,
+                "thread_id": thread_id,
+                "thread_title": thread_title,
+            }
+            enqueue_fn = getattr(getattr(self, "worker", None), "_enqueue_links", None)
+            if callable(enqueue_fn):
+                enqueue_fn([url], job)
+            else:
+                links_to_add = [{
+                    "links": url,
+                    "autostart": True,
+                    "downloadPassword": "",
+                    "extractPassword": "",  # Empty - WinRAR will prompt for password
+                    "priority": "HIGHEST",
+                    "packageName": f"{thread_title}_{thread_id}",
+                }]
+                if download_dir:
+                    links_to_add[0]["destinationFolder"] = download_dir
+                self.device.linkgrabber.add_links(links_to_add)
 
             # reset cancel flag for new session
             try:

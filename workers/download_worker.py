@@ -870,6 +870,49 @@ class DownloadWorker(QThread):
             self.progress_update.emit(proc_status)
             self.download_error.emit(row, err)
 
+    def _enqueue_links(self, links, job) -> bool:
+        """Send links to JDownloader with a sanitized download path.
+
+        Handles JD API quirks by trying ``downloadPath`` first and falling
+        back to ``destinationFolder`` if necessary. Returns ``True`` on
+        success, ``False`` otherwise.
+        """
+
+        # Resolve JD POST function
+        jd_post = getattr(self, "_jd_post", None)
+        if not jd_post:
+            try:
+                dl = getattr(self.bot, "_shared_jd_downloader", None)
+                if dl and dl.is_available():
+                    jd_post = dl.post
+            except Exception:
+                jd_post = None
+
+        if not jd_post:
+            logging.error("⚠️ No JDownloader session available for enqueue")
+            return False
+
+        save_to = self._save_to_for(job["category_name"], job["thread_id"])
+        payload = {
+            "links": "\n".join(links),
+            "packageName": f'{job["thread_title"]}_{job["thread_id"]}',
+            "downloadPath": save_to,
+            "overwritePackagizerRules": True,
+            "autostart": True,
+        }
+
+        logging.info(f"📁 JD enqueue downloadPath: {save_to}")
+        res = jd_post("linkgrabberv2/addLinks", [payload])
+        if not res:
+            # Some JD versions reject 'downloadPath'; retry with 'destinationFolder'
+            payload.pop("downloadPath", None)
+            payload["destinationFolder"] = save_to
+            logging.info(
+                f"📁 JD enqueue retry with destinationFolder: {save_to}"
+            )
+            res = jd_post("linkgrabberv2/addLinks", [payload])
+        return bool(res)
+
     def _save_to_for(self, category_name: str, thread_id: str) -> str:
         """Return the sanitized download path for a thread and ensure it exists."""
         cat = sanitize_filename(category_name)

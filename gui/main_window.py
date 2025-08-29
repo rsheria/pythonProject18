@@ -4747,11 +4747,13 @@ class ForumBotGUI(QMainWindow):
                         thread_title = title_item.text()
                         category_name = category_name_item.text()
                         thread_id = thread_id_item.text()
-                        self._current_download_threads.append({
+                        # 🔐 Ensure every tracked job includes category and thread identifiers
+                        job = {
                             "category_name": category_name,
                             "thread_title": thread_title,
                             "thread_id": thread_id,
-                        })
+                        }
+                        self._current_download_threads.append(job)
                         logging.info(
                             f"📝 Tracking download for: {category_name}/{thread_title} ({thread_id})"
                         )
