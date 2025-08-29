@@ -2,7 +2,7 @@
 
 import time
 import logging
-from PyQt5.QtCore import QThread, pyqtSignal, QMutexLocker
+from PyQt5.QtCore import QThread, pyqtSignal
 from threading import Lock
 
 class WorkerThread(QThread):
@@ -358,58 +358,120 @@ class MegaThreadsWorkerThread(QThread):
 
     def run(self):
         try:
-            if self.mode == 'Track Once':
-                self.track_once()
-            elif self.mode == 'Keep Tracking':
-                while self._is_running and not self.is_cancelled:
+            while self._is_running and not self.is_cancelled:
+                if self.mode == 'Track Once':
+                    self.track_once()
+                    break
+
+                if self.mode == 'Keep Tracking':
                     if not self.is_paused:
                         self.keep_tracking()
-                    
-                    # Sleep in smaller chunks to allow faster stopping
+
+                    # Sleep in small chunks so we can react quickly to stop requests
                     for _ in range(60):  # 60 seconds total
                         if not self._is_running or self.is_cancelled:
                             break
-                        self.msleep(1000)  # Sleep 1 second at a time
-                        
+                        self.msleep(1000)
+                else:
+                    break
         except Exception as e:
-            logging.error(f"Exception in MegaThreadsWorkerThread('{self.category_name}'): {e}", exc_info=True)
+            logging.error(
+                f"Exception in MegaThreadsWorkerThread('{self.category_name}'): {e}",
+                exc_info=True,
+            )
         finally:
-            logging.info(f"🔄 MegaThreadsWorkerThread for '{self.category_name}' finished")
+            logging.info(
+                f"🔄 MegaThreadsWorkerThread for '{self.category_name}' finished"
+            )
             self.finished.emit(self.category_name)
 
     def track_once(self):
-        logging.info(f"MegaThreadsWorkerThread: Tracking once for '{self.category_name}'.")
-        with QMutexLocker(self.bot_lock):
+        logging.info(
+            f"MegaThreadsWorkerThread: Tracking once for '{self.category_name}'."
+        )
+
+        lock_acquired = False
+        try:
+            logging.info(
+                f"🔒 Attempting to acquire bot_lock for megathreads '{self.category_name}'"
+            )
+            lock_acquired = self.bot_lock.tryLock(10000)
+            if not lock_acquired:
+                logging.error(
+                    f"❌ Failed to acquire bot_lock for megathreads '{self.category_name}'"
+                )
+                return
+
             # 🔍 HEALTH CHECK: Verify WebDriver is responsive before navigation
-            logging.info(f"🔍 Checking WebDriver health before megathreads tracking '{self.category_name}'")
+            logging.info(
+                f"🔍 Checking WebDriver health before megathreads tracking '{self.category_name}'"
+            )
             try:
-                # Simple health check - get current URL to verify driver responsiveness
-                current_url = self.bot.driver.current_url if hasattr(self.bot, 'driver') and self.bot.driver else None
+                current_url = (
+                    self.bot.driver.current_url
+                    if hasattr(self.bot, 'driver') and self.bot.driver
+                    else None
+                )
                 if current_url:
-                    logging.info(f"✅ WebDriver is responsive for megathreads '{self.category_name}' (current URL: {current_url[:50]}...)")
+                    logging.info(
+                        f"✅ WebDriver is responsive for megathreads '{self.category_name}' (current URL: {current_url[:50]}...)"
+                    )
                 else:
-                    logging.warning(f"⚠️ WebDriver may not be initialized for megathreads '{self.category_name}'")
+                    logging.warning(
+                        f"⚠️ WebDriver may not be initialized for megathreads '{self.category_name}'"
+                    )
             except Exception as driver_check_error:
-                logging.error(f"❌ WebDriver health check failed for megathreads '{self.category_name}': {driver_check_error}")
-                # Don't return here - let navigate_to_megathread_category handle driver issues
-            
+                logging.error(
+                    f"❌ WebDriver health check failed for megathreads '{self.category_name}': {driver_check_error}"
+                )
+
             url = self.category_manager.get_category_url(self.category_name)
             if not url:
-                logging.warning(f"No URL for megathreads '{self.category_name}'")
+                logging.warning(
+                    f"No URL for megathreads '{self.category_name}'"
+                )
                 return
             try:
                 new_versions = self.bot.navigate_to_megathread_category(
                     url, self.date_filters, self.page_from, self.page_to
                 )
             except Exception as e:
-                logging.error(f"Error in navigate_to_megathread_category: {e}", exc_info=True)
+                logging.error(
+                    f"Error in navigate_to_megathread_category: {e}",
+                    exc_info=True,
+                )
                 return
             if isinstance(new_versions, dict) and new_versions:
                 self.update_megathreads.emit(self.category_name, new_versions)
+        finally:
+            if lock_acquired:
+                try:
+                    self.bot_lock.unlock()
+                    logging.info(
+                        f"🔓 Released bot_lock for megathreads '{self.category_name}'"
+                    )
+                except Exception as unlock_error:
+                    logging.warning(
+                        f"⚠️ Failed to release bot_lock for megathreads '{self.category_name}': {unlock_error}"
+                    )
 
     def keep_tracking(self):
-        logging.info(f"MegaThreadsWorkerThread: Keep tracking '{self.category_name}'.")
-        with QMutexLocker(self.bot_lock):
+        logging.info(
+            f"MegaThreadsWorkerThread: Keep tracking '{self.category_name}'."
+        )
+
+        lock_acquired = False
+        try:
+            logging.info(
+                f"🔒 Attempting to acquire bot_lock for megathreads '{self.category_name}'"
+            )
+            lock_acquired = self.bot_lock.tryLock(10000)
+            if not lock_acquired:
+                logging.error(
+                    f"❌ Failed to acquire bot_lock for megathreads '{self.category_name}'"
+                )
+                return
+
             key = f"Megathreads_{self.category_name}"
             existing = self.gui.megathreads_process_threads.get(key, {})
             if not isinstance(existing, dict):
@@ -417,71 +479,54 @@ class MegaThreadsWorkerThread(QThread):
             try:
                 updates = self.bot.check_megathreads_for_updates(existing)
             except Exception as e:
-                logging.error(f"Error in check_megathreads_for_updates: {e}", exc_info=True)
+                logging.error(
+                    f"Error in check_megathreads_for_updates: {e}",
+                    exc_info=True,
+                )
                 return
             if isinstance(updates, dict) and updates:
                 self.update_megathreads.emit(self.category_name, updates)
+        finally:
+            if lock_acquired:
+                try:
+                    self.bot_lock.unlock()
+                    logging.info(
+                        f"🔓 Released bot_lock for megathreads '{self.category_name}'"
+                    )
+                except Exception as unlock_error:
+                    logging.warning(
+                        f"⚠️ Failed to release bot_lock for megathreads '{self.category_name}': {unlock_error}"
+                    )
 
     def stop(self):
         """لإيقاف الحلقة في وضع Keep Tracking."""
-        logging.info(f"⛔ Stopping MegaThreadsWorkerThread for '{self.category_name}'")
-        
-        # Set cancellation flags
+        logging.info(
+            f"⛔ Stopping MegaThreadsWorkerThread for '{self.category_name}'"
+        )
+
         with self.control_lock:
-            self._is_running = False
             self.is_cancelled = True
-        
-        # If thread is not running, we're done
-        if not self.isRunning():
-            logging.info(f"✅ MegaThreadsWorkerThread for '{self.category_name}' was not running")
-            return
-        
-        logging.info(f"⏰ Waiting for MegaThreadsWorkerThread '{self.category_name}' to finish gracefully...")
-        
-        # First attempt: Wait for graceful shutdown (increased timeout)
-        if self.wait(5000):  # Wait max 5 seconds for graceful shutdown
-            logging.info(f"✅ MegaThreadsWorkerThread for '{self.category_name}' stopped gracefully")
-            return
-        
-        # Second attempt: Send quit signal and wait (increased timeout)
-        logging.warning(f"⚠️ MegaThreadsWorkerThread '{self.category_name}' didn't stop gracefully, sending quit signal")
+            self._is_running = False
+
         self.quit()
-        
-        if self.wait(3000):  # Wait another 3 seconds for quit signal
-            logging.info(f"✅ MegaThreadsWorkerThread for '{self.category_name}' stopped after quit signal")
-            return
-        
-        # 🔧 SAFER APPROACH: Don't force unlock - let Qt handle mutex cleanup naturally
-        logging.warning(f"⚠️ Skipping manual bot_lock unlock to prevent crashes for MegaThreads '{self.category_name}'")
-        # Note: Qt will automatically clean up mutex when thread terminates
-        # Manual unlock attempts can cause access violations in force termination scenarios
-        
-        # Third attempt: Force termination
-        logging.warning(f"🔨 Force terminating MegaThreadsWorkerThread '{self.category_name}'")
-        try:
+        if not self.wait(3000):
+            logging.warning(
+                f"⚠️ MegaThreadsWorkerThread '{self.category_name}' did not stop after quit, terminating"
+            )
             self.terminate()
-            if self.wait(1000):  # Give 1 second for termination
-                logging.info(f"✅ MegaThreadsWorkerThread for '{self.category_name}' force terminated successfully")
-            else:
-                logging.error(f"❌ Failed to terminate MegaThreadsWorkerThread '{self.category_name}'")
-        except Exception as e:
-            logging.error(f"❌ Error during force termination of '{self.category_name}': {e}")
-        
-        # 🧹 FINAL CLEANUP: Clear all references to prevent memory leaks
+            self.wait(1000)
+
         try:
-            self._is_running = False
-            self.is_cancelled = True
-            self.is_paused = False
-            
-            # Clear bot reference to prevent hanging connections
-            if hasattr(self, 'bot'):
-                self.bot = None
-                
-            logging.info(f"🧹 Completed resource cleanup for MegaThreadsWorkerThread '{self.category_name}'")
-        except Exception as cleanup_error:
-            logging.warning(f"⚠️ Resource cleanup warning for MegaThreads '{self.category_name}': {cleanup_error}")
-        
-        logging.info(f"🏁 Stop procedure completed for MegaThreadsWorkerThread '{self.category_name}'")
+            self.bot_lock.unlock()
+            logging.info(
+                f"🔓 Released bot_lock for megathreads '{self.category_name}' during stop"
+            )
+        except Exception:
+            pass
+
+        logging.info(
+            f"🏁 Stop procedure completed for MegaThreadsWorkerThread '{self.category_name}'"
+        )
     
     def pause(self):
         """إيقاف مؤقت للمراقبة"""

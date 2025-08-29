@@ -4293,6 +4293,7 @@ class ForumBotSelenium:
             if not self.login(current_url=category_url):
                 logging.error("Cannot proceed without login.")
                 return {}
+            self.is_logged_in = True
 
         # 3) طبع/Normalize رابط الكاتيجوري
         category_url = self.normalize_category_url(category_url)
@@ -4335,6 +4336,7 @@ class ForumBotSelenium:
                     if not self.login(current_url=page_url):
                         logging.error("[Megathreads] Re-login failed.")
                         return {}
+                    self.is_logged_in = True
                     self.driver.get(page_url)
                     time.sleep(3)
 

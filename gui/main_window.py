@@ -9,9 +9,8 @@ from PyQt5.QtWidgets import QAction, QApplication, QPlainTextEdit
 from config.config import DATA_DIR, save_configuration
 from downloaders.katfile import KatfileDownloader as KatfileDownloaderAPI
 from workers.download_worker import DownloadWorker
-from workers.megathreads_worker import MegaThreadsWorkerThread
 from workers.upload_worker import UploadWorker
-from workers.worker_thread import WorkerThread
+from workers.worker_thread import WorkerThread, MegaThreadsWorkerThread
 from workers.proceed_template_worker import ProceedTemplateWorker
 from ui_notifier import ui_notifier, suppress_popups
 
@@ -1548,39 +1547,46 @@ class ForumBotGUI(QMainWindow):
         categories_to_stop = [self.megathreads_category_model.itemFromIndex(index).text() for index in indexes]
 
         for category_name in categories_to_stop:
-            worker = self.megathreads_workers.pop(category_name, None)
-            if worker:
-                logging.info(f"⛔ Stopping megathreads worker for category '{category_name}'")
+            worker = self.megathreads_workers.get(category_name)
+            if not worker:
+                continue
 
+            logging.info(
+                f"⛔ Stopping megathreads worker for category '{category_name}'"
+            )
+
+            try:
                 try:
-                    # 🔌 DISCONNECT SIGNALS: Prevent signal conflicts after restart
-                    try:
-                        worker.update_megathreads.disconnect()
-                        worker.finished.disconnect()
-                        logging.info(f"🔌 Disconnected megathreads signals for worker '{category_name}'")
-                    except Exception as disconnect_error:
-                        logging.warning(
-                            f"⚠️ Could not disconnect megathreads signals for '{category_name}': {disconnect_error}")
+                    worker.update_megathreads.disconnect(
+                        self.handle_new_megathreads_versions
+                    )
+                    worker.finished.disconnect(
+                        self.megathreads_monitoring_finished
+                    )
+                    logging.info(
+                        f"🔌 Disconnected megathreads signals for worker '{category_name}'"
+                    )
+                except Exception as disconnect_error:
+                    logging.warning(
+                        f"⚠️ Could not disconnect megathreads signals for '{category_name}': {disconnect_error}"
+                    )
 
-                    # Stop the worker
-                    worker.stop()
+                worker.stop()
+                worker.wait(3000)
 
-                    # Wait for worker to stop with increased timeout
-                    if not worker.wait(8000):  # Wait max 8 seconds (5+3 from worker timeout)
-                        logging.warning(
-                            f"⚠️ Megathreads worker for '{category_name}' didn't stop gracefully, forcing termination")
-                        worker.terminate()
-                        worker.wait(2000)  # Wait 2 seconds for termination
+                logging.info(
+                    f"✅ Successfully stopped megathreads monitoring for category '{category_name}'"
+                )
+            except Exception as e:
+                logging.error(
+                    f"❌ Error stopping megathreads worker for '{category_name}': {e}"
+                )
+                try:
+                    worker.terminate()
+                except Exception:
+                    pass
 
-                    logging.info(f"✅ Successfully stopped megathreads monitoring for category '{category_name}'")
-
-                except Exception as e:
-                    logging.error(f"❌ Error stopping megathreads worker for '{category_name}': {e}")
-                    # Force terminate if there's an error
-                    try:
-                        worker.terminate()
-                    except:
-                        pass
+            self.megathreads_workers.pop(category_name, None)
 
         self.statusBar().showMessage(f"Stopped monitoring selected megathread categories.")
         logging.info(f"🏁 Finished stopping megathread categories: {', '.join(categories_to_stop)}")
@@ -7918,12 +7924,16 @@ class ForumBotGUI(QMainWindow):
         for index in indexes:
             item = self.megathreads_category_model.itemFromIndex(index)
             category_name = item.text()
-            if category_name in self.megathreads_workers:
-                QMessageBox.warning(
-                    self, "Already Tracking",
-                    f"Already tracking megathread category '{category_name}'."
-                )
-                continue
+            existing_worker = self.megathreads_workers.get(category_name)
+            if existing_worker:
+                if existing_worker.isRunning():
+                    QMessageBox.warning(
+                        self, "Already Tracking",
+                        f"Already tracking megathread category '{category_name}'."
+                    )
+                    continue
+                else:
+                    self.megathreads_workers.pop(category_name, None)
 
             # 1) خذ الفلاتر الفعلية المحولة من النسبية إلى المطلقة
             df_list = self.settings_tab.get_actual_date_filters()
@@ -7949,8 +7959,12 @@ class ForumBotGUI(QMainWindow):
             )
 
             # 4) وصل الإشارات وشغّل الـ thread
-            worker.update_megathreads.connect(self.handle_new_megathreads_versions)
-            worker.finished.connect(self.megathreads_monitoring_finished)
+            worker.update_megathreads.connect(
+                self.handle_new_megathreads_versions, Qt.QueuedConnection
+            )
+            worker.finished.connect(
+                self.megathreads_monitoring_finished, Qt.QueuedConnection
+            )
             self.megathreads_workers[category_name] = worker
             worker.start()
 
@@ -8161,9 +8175,16 @@ class ForumBotGUI(QMainWindow):
         return True
 
     def megathreads_monitoring_finished(self, category_name):
-        self.statusBar().showMessage(f'Megathreads monitoring finished for {category_name}.')
-        logging.info(f"Megathreads monitoring thread finished for category '{category_name}'.")
+        self.statusBar().showMessage(
+            f'Megathreads monitoring finished for {category_name}.'
+        )
+        logging.info(
+            f"Megathreads monitoring thread finished for category '{category_name}'."
+        )
         self.megathreads_workers.pop(category_name, None)
+        # Re-enable controls since worker is done
+        self.start_megathreads_tracking_button.setEnabled(True)
+        self.keep_megathreads_tracking_button.setEnabled(True)
 
     def start_monitoring(self, indexes, mode='Track Once'):
         """Start monitoring selected categories."""
