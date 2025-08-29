@@ -3692,7 +3692,8 @@ class ForumBotSelenium:
             'has_other_known_hosts': has_other_known_hosts,
             'has_any_links': has_any_links,
             'priority_score': priority_score,
-            'html_content': str(last_post)  # Store HTML for BBCode conversion
+            'html_content': str(last_post),
+            'author': author if 'author' in locals() and author else self._safe_extract_author(last_post)
         }
 
         # Log the selection decision for the last post
@@ -3720,7 +3721,8 @@ class ForumBotSelenium:
             'has_other_known_hosts': has_other_known_hosts,
             'has_any_links': has_any_links,
             'priority_score': priority_score,
-            'html_content': str(last_post)  # Store HTML for BBCode conversion
+            'html_content': str(last_post),
+            'author': author if 'author' in locals() and author else self._safe_extract_author(last_post)
         }
 
     def calculate_version_priority_score(self, has_rapidgator, has_katfile, has_other_known_hosts, has_any_links, post_date):
@@ -4212,6 +4214,16 @@ class ForumBotSelenium:
         if post_id_match:
             return post_id_match.group(1)
         return None
+
+    def _safe_extract_author(self, last_post):
+        try:
+            # Try common forums selectors (phpBB/XenForo-like)
+            node = last_post.select_one('a.username, a[class*="author"], a[href*="member"]')
+            if node and node.get_text(strip=True):
+                return node.get_text(strip=True)
+        except Exception:
+            pass
+        return ''
 
         # ملف: selenfdt.py
 
