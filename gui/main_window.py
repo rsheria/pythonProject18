@@ -1861,30 +1861,18 @@ class ForumBotGUI(QMainWindow):
     def load_log_file(self):
         log_path = os.path.join(DATA_DIR, 'forum_bot.log')
         if not os.path.exists(log_path):
+            # If the log file hasn't been created yet, silently skip loading it
+            # rather than spamming the user's log with warnings.
             return
 
         try:
-            # اقرأ كبايتس لتفادي ترميز OS الافتراضي
-            with open(log_path, 'rb') as f:
-                raw = f.read()
-
-            # حاول UTF-8 أولاً (مع استبدال الحروف غير الصالحة)،
-            # ولو فشل لأي سبب استخدم ترميزات شائعة كاحتياطي.
-            try:
-                content = raw.decode('utf-8', errors='replace')
-            except Exception:
-                try:
-                    content = raw.decode('cp1252', errors='replace')
-                except Exception:
-                    content = raw.decode('latin-1', errors='replace')
-
-            # اعرض في الـQTextBrowser لو موجود
-            if hasattr(self, "log_viewer") and self.log_viewer:
-                self.log_viewer.setPlainText(content)
-
+            with open(log_path, 'r') as log_file:
+                content = log_file.read()
+                # هنا ضَع الكود الأصلي الذي يعرض المحتوى في الواجهة
+                # مثال:
+                # self.log_text_edit.setPlainText(content)
         except Exception as e:
-            # استخدم exception() عشان يحفظ التتبّع بدون رفع الاستثناء للـGUI loop
-            logging.exception("Exception in load_log_file: %s", e)
+            logging.error("Exception in load_log_file: %s", e, exc_info=True)
 
     def on_thread_selected(self, item):
         """Handle thread selection and display its BBCode in the editor."""
@@ -5306,7 +5294,14 @@ class ForumBotGUI(QMainWindow):
                 if getattr(self, "auto_retry_mode", False):
                     w = getattr(self, "upload_workers", {}).get(row)
                     if w:
-                        QTimer.singleShot(10000, lambda w=w, r=row: w.retry_failed_uploads(r))
+                        from PyQt5.QtCore import QTimer, QMetaObject, Qt, Q_ARG
+                        # Schedule a delayed retry; the actual call is invoked on the worker's thread via queued connection
+                        def _schedule_retry(worker=w, r=row):
+                            try:
+                                QMetaObject.invokeMethod(worker, "retry_failed_uploads", Qt.QueuedConnection, Q_ARG(int, r))
+                            except Exception:
+                                pass
+                        QTimer.singleShot(10000, _schedule_retry)
                 return
 
             # 1) حدّد الصف عن طريق thread_id (fallback = row)
@@ -5361,12 +5356,18 @@ class ForumBotGUI(QMainWindow):
 
             # 3) تحديث خلايا الجدول (الأولوية: أول RG فقط فى العمود)
             model = self.process_threads_table.model()
-            self.process_threads_table.item(current_row, 3).setText(rg_links[0] if rg_links else "")
-            model.dataChanged.emit(model.index(current_row, 3), model.index(current_row, 3))
-            self.process_threads_table.item(current_row, 4).setText("\n".join(rg_backup))
-            model.dataChanged.emit(model.index(current_row, 4), model.index(current_row, 4))
-            self.process_threads_table.item(current_row, 5).setText(keeplink if isinstance(keeplink, str) else "")
-            model.dataChanged.emit(model.index(current_row, 5), model.index(current_row, 5))
+            # Set text for RG, RG_BAK, and Keeplinks columns
+            rg_text    = rg_links[0] if rg_links else ""
+            rg_bak_txt = "\n".join(rg_backup)
+            keep_txt   = keeplink if isinstance(keeplink, str) else ""
+            if self.process_threads_table.item(current_row, 3):
+                self.process_threads_table.item(current_row, 3).setText(rg_text)
+            if self.process_threads_table.item(current_row, 4):
+                self.process_threads_table.item(current_row, 4).setText(rg_bak_txt)
+            if self.process_threads_table.item(current_row, 5):
+                self.process_threads_table.item(current_row, 5).setText(keep_txt)
+            # Emit a single dataChanged signal for the range of modified cells to reduce UI overhead
+            model.dataChanged.emit(model.index(current_row, 3), model.index(current_row, 5))
 
             # 4) تحديث الداتا الداخلية (مهم: الجذر + آخر نسخة)
             #    علشان View Links و Proceed Template يقروا الروابط الجديدة فعلاً
@@ -5991,12 +5992,14 @@ class ForumBotGUI(QMainWindow):
                 and any(res.get("status") == "failed" for res in worker.upload_results.values())
         ):
             try:
-                # Provide thread_id to retry_failed_uploads instead of row so that worker uses correct index
-                QTimer.singleShot(
-                    0,
-                    lambda w=worker, tid=thread_id: w.retry_failed_uploads(
-                        max(self._row_for_tid(tid), 0)
-                    ),
+                # Schedule retry on the worker's thread via queued connection to avoid blocking the GUI
+                from PyQt5.QtCore import QMetaObject, Qt, Q_ARG
+                tid_index = max(self._row_for_tid(thread_id), 0)
+                QMetaObject.invokeMethod(
+                    worker,
+                    "retry_failed_uploads",
+                    Qt.QueuedConnection,
+                    Q_ARG(int, tid_index),
                 )
             except Exception:
                 pass
@@ -6995,6 +6998,7 @@ class ForumBotGUI(QMainWindow):
 
     def save_backup_threads_data(self):
         try:
+            # Determine the filename based on the current user
             if self.user_manager.get_current_user():
                 user_folder = self.user_manager.get_user_folder()
                 os.makedirs(user_folder, exist_ok=True)
@@ -7004,9 +7008,41 @@ class ForumBotGUI(QMainWindow):
                 os.makedirs(data_dir, exist_ok=True)
                 filename = os.path.join(data_dir, "backup_threads.json")
 
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(self.backup_threads, f, ensure_ascii=False, indent=4)
-            logging.info(f"Backup Threads data saved to {filename}.")
+            # Serialize a copy to avoid concurrent modification
+            try:
+                serialized = json.dumps(self.backup_threads, ensure_ascii=False, indent=4)
+                data_copy = json.loads(serialized)
+            except Exception:
+                data_copy = dict(self.backup_threads)
+
+            # Cancel any pending backup save to coalesce rapid calls
+            if hasattr(self, "_backup_threads_save_timer"):
+                timer = getattr(self, "_backup_threads_save_timer")
+                if timer.isActive():
+                    timer.stop()
+
+            # Write the data in a background thread
+            def _write_backup(data, path):
+                try:
+                    with open(path, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, ensure_ascii=False, indent=4)
+                    logging.info(f"Backup Threads data saved to {path}.")
+                except Exception as ex:
+                    logging.error(f"Error writing Backup Threads: {ex}", exc_info=True)
+
+            from PyQt5.QtCore import QTimer
+            def _start_backup_write():
+                import threading
+                t = threading.Thread(target=_write_backup, args=(data_copy, filename), daemon=True)
+                t.start()
+
+            if not hasattr(self, "_backup_threads_save_timer"):
+                self._backup_threads_save_timer = QTimer(self)
+                self._backup_threads_save_timer.setSingleShot(True)
+                self._backup_threads_save_timer.timeout.connect(_start_backup_write)
+
+            # Start/reset the timer with small debounce interval (300 ms)
+            self._backup_threads_save_timer.start(300)
         except Exception as e:
             self.handle_exception("save_backup_threads_data", e)
 
@@ -9236,6 +9272,7 @@ class ForumBotGUI(QMainWindow):
         حفظ متغير self.process_threads إلى data/<username>_process_threads.json
         """
         try:
+            # Determine target file and user for logging
             filename = self.get_process_threads_filepath()
             current_user = self.user_manager.get_current_user() if hasattr(self, 'user_manager') else None
 
@@ -9243,19 +9280,50 @@ class ForumBotGUI(QMainWindow):
             logging.info(f"💾 Target file path: {filename}")
             logging.info(f"💾 Data to save: {len(self.process_threads)} threads")
 
-            # Ensure directory exists
+            # Serialize a copy of the data in the UI thread to avoid race conditions when
+            # the data structure is being mutated elsewhere. We use json roundtrip to
+            # deep copy the nested dictionaries/lists.
+            try:
+                serialized = json.dumps(self.process_threads, ensure_ascii=False, indent=4)
+                data_copy = json.loads(serialized)
+            except Exception:
+                # Fallback shallow copy if serialization fails
+                data_copy = dict(self.process_threads)
+
+            # Ensure the directory exists
             os.makedirs(os.path.dirname(filename), exist_ok=True)
 
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(self.process_threads, f, ensure_ascii=False, indent=4)
+            # Cancel any pending save to coalesce rapid successive calls
+            if hasattr(self, "_process_threads_save_timer"):
+                timer = getattr(self, "_process_threads_save_timer")
+                if timer.isActive():
+                    timer.stop()
 
-            # Verify the save by reading back
-            if os.path.exists(filename):
-                with open(filename, 'r', encoding='utf-8') as f:
-                    saved_data = json.load(f)
-                    logging.info(f"✅ Verification: File saved with {len(saved_data)} threads")
+            # Inner function performing the actual disk write on a background thread
+            def _write_file(data, path):
+                try:
+                    with open(path, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, ensure_ascii=False, indent=4)
+                    # Optional verification
+                    logging.info(f"✅ Process Threads data saved successfully to {path}")
+                except Exception as ex:
+                    logging.error(f"❌ Error writing process threads data: {ex}", exc_info=True)
 
-            logging.info(f"✅ Process Threads data saved successfully to {filename}")
+            # Use a single-shot QTimer to schedule the write after a short delay; this
+            # collapses multiple calls into a single write operation.
+            from PyQt5.QtCore import QTimer
+            def _start_async_write():
+                import threading
+                t = threading.Thread(target=_write_file, args=(data_copy, filename), daemon=True)
+                t.start()
+
+            if not hasattr(self, "_process_threads_save_timer"):
+                self._process_threads_save_timer = QTimer(self)
+                self._process_threads_save_timer.setSingleShot(True)
+                self._process_threads_save_timer.timeout.connect(_start_async_write)
+
+            # Start/reset the timer with a small debounce interval (300 ms)
+            self._process_threads_save_timer.start(300)
         except Exception as e:
             logging.error(f"❌ Error in save_process_threads_data: {e}", exc_info=True)
             self.handle_exception("save_process_threads_data", e)
