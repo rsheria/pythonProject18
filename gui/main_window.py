@@ -1861,18 +1861,30 @@ class ForumBotGUI(QMainWindow):
     def load_log_file(self):
         log_path = os.path.join(DATA_DIR, 'forum_bot.log')
         if not os.path.exists(log_path):
-            # If the log file hasn't been created yet, silently skip loading it
-            # rather than spamming the user's log with warnings.
             return
 
         try:
-            with open(log_path, 'r') as log_file:
-                content = log_file.read()
-                # هنا ضَع الكود الأصلي الذي يعرض المحتوى في الواجهة
-                # مثال:
-                # self.log_text_edit.setPlainText(content)
+            # اقرأ كبايتس لتفادي ترميز OS الافتراضي
+            with open(log_path, 'rb') as f:
+                raw = f.read()
+
+            # حاول UTF-8 أولاً (مع استبدال الحروف غير الصالحة)،
+            # ولو فشل لأي سبب استخدم ترميزات شائعة كاحتياطي.
+            try:
+                content = raw.decode('utf-8', errors='replace')
+            except Exception:
+                try:
+                    content = raw.decode('cp1252', errors='replace')
+                except Exception:
+                    content = raw.decode('latin-1', errors='replace')
+
+            # اعرض في الـQTextBrowser لو موجود
+            if hasattr(self, "log_viewer") and self.log_viewer:
+                self.log_viewer.setPlainText(content)
+
         except Exception as e:
-            logging.error("Exception in load_log_file: %s", e, exc_info=True)
+            # استخدم exception() عشان يحفظ التتبّع بدون رفع الاستثناء للـGUI loop
+            logging.exception("Exception in load_log_file: %s", e)
 
     def on_thread_selected(self, item):
         """Handle thread selection and display its BBCode in the editor."""
