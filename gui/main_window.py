@@ -2129,20 +2129,90 @@ class ForumBotGUI(QMainWindow):
 
     def on_reupload_upload_complete(self, thread_title, thread_info, row, urls_dict):
         try:
-            # 1) Preserve old Keeplinks if not overridden
+            import re
+            # -------- helpers محلية لتجميع اللينكات بأمان --------
+            def _as_url_list(x):
+                out, seen = [], set()
+
+                def rec(v):
+                    if v is None:
+                        return
+                    # string: التقط كل http(s) جوّا السطر
+                    if isinstance(v, str):
+                        s = v.strip()
+                        for u in re.findall(r'https?://\S+', s):
+                            if "keeplinks.org" in u:
+                                continue
+                            uu = u.strip()
+                            if uu and uu not in seen:
+                                seen.add(uu)
+                                out.append(uu)
+                        return
+                    # dict: جرّب مفاتيح شائعة وبعدين باقى القيم
+                    if isinstance(v, dict):
+                        common_keys = (
+                            "urls", "links", "url", "link",
+                            "rapidgator", "rapidgator.net", "rg", "RG", "rapidgator-backup", "rapidgator_backup",
+                            "RG_BAK",
+                            "nitroflare", "nitroflare.com", "nf",
+                            "ddownload", "ddownload.com",
+                            "katfile", "katfile.com",
+                            "mega", "mega.nz",
+                        )
+                        for k in common_keys:
+                            if k in v:
+                                rec(v[k])
+                        for vv in v.values():
+                            rec(vv)
+                        return
+                    # list/tuple/set
+                    if isinstance(v, (list, tuple, set)):
+                        for i in v:
+                            rec(i)
+                        return
+                    # objects: جرّب خواص url/urls/links
+                    u = getattr(v, "url", None) or getattr(v, "link", None)
+                    if u:
+                        rec(u)
+                    us = getattr(v, "urls", None) or getattr(v, "links", None)
+                    if us:
+                        rec(us)
+                    # fallback: أي نوع تاني كنص
+                    if not isinstance(v, (str, dict, list, tuple, set)):
+                        rec(str(v))
+
+                rec(x)
+                return out
+
+            # 1) حافظ على لينك كيبلينكس القديم لو مفيش جديد
             old_keeplinks = thread_info.get('keeplinks_link', '')
 
+            # 2) اسحب اللينكات الجديدة من urls_dict مع دعم مفاتيح متعددة
+            rapidgator_links = _as_url_list(
+                urls_dict.get('rapidgator')
+                or urls_dict.get('rapidgator.net')
+                or urls_dict.get('RG')
+                or urls_dict.get('rg')
+            )
+            backup_rg_urls = _as_url_list(
+                urls_dict.get('rapidgator_backup')
+                or urls_dict.get('rapidgator-backup')
+                or urls_dict.get('RG_BAK')
+            )
+            nitroflare_links = _as_url_list(
+                urls_dict.get('nitroflare') or urls_dict.get('nitroflare.com') or urls_dict.get('nf')
+            )
+            ddownload_links = _as_url_list(
+                urls_dict.get('ddownload') or urls_dict.get('ddownload.com')
+            )
+            katfile_links = _as_url_list(
+                urls_dict.get('katfile') or urls_dict.get('katfile.com')
+            )
+            mega_links = _as_url_list(
+                urls_dict.get('mega') or urls_dict.get('mega.nz')
+            )
 
-            # 2) Extract newly uploaded links.  Normalize values into lists to
-            # support both the old nested format and the new list-only format.
-            rapidgator_links = self._as_list(urls_dict.get('rapidgator'))
-            backup_rg_urls = self._as_list(urls_dict.get('rapidgator_backup') or urls_dict.get('rapidgator-backup'))
-            nitroflare_links = self._as_list(urls_dict.get('nitroflare'))
-            ddownload_links = self._as_list(urls_dict.get('ddownload'))
-            katfile_links = self._as_list(urls_dict.get('katfile'))
-            mega_links = self._as_list(urls_dict.get('mega'))
-
-            # Combined new links (excluding Rapidgator backup so it remains private)
+            # Combined new links (excluding Rapidgator backup من الواجهة العامة)
             new_links = (
                     rapidgator_links
                     + nitroflare_links
@@ -2151,34 +2221,34 @@ class ForumBotGUI(QMainWindow):
                     + mega_links
             )
 
-            # If we already had a Keeplinks link for this thread:
-            # Normalize keeplinks: convert lists to a single string (use the first element)
-            kl_val = urls_dict.get('keeplinks', '') if isinstance(urls_dict, dict) else ''
-            if isinstance(kl_val, list):
-                keeplinks_url = kl_val[0] if kl_val else ''
-            else:
-                keeplinks_url = kl_val or ''
-            # If no new keeplinks provided, retain the existing one
-            if not keeplinks_url:
-                keeplinks_url = old_keeplinks
+            # Fallback: لو لسه فاضى، لف على كل الـ urls_dict واستخرج أى http(s)
+            if not new_links:
+                new_links = _as_url_list(urls_dict)
+
+            # Debug: طبع عينة
+            logging.debug(f"[Reupload] new_links count={len(new_links)} sample={new_links[:3]}")
+
+            # 3) كيبلينكس: خد الموجود فى urls_dict لو متوفر، وإلا القديم
+            kl_val = ''
+            if isinstance(urls_dict, dict):
+                kl_val = urls_dict.get('keeplinks', '') or urls_dict.get('Keeplinks', '') or urls_dict.get(
+                    'keeplinks_link', '')
+            keeplinks_url = (kl_val[0] if isinstance(kl_val, list) and kl_val else kl_val) or old_keeplinks
 
             if not keeplinks_url:
                 QMessageBox.warning(self, "No Keeplinks URL", f"No Keeplinks link found for '{thread_title}'.")
-                # Close progress dialog, etc. ...
                 return
 
-            # Next: actually update Keeplinks link if you want with the new links
+            # 4) حدّث نفس لينك كيبلينكس (in-place). بعض الإصدارات بترجع True/False، وبعضها بترجع نفس اللينك.
             updated_link = self.bot.update_keeplinks_links(keeplinks_url, new_links)
             if not updated_link:
                 QMessageBox.warning(self, "Update Failed", "Could not update Keeplinks link with new links.")
                 return
-            keeplinks_url = updated_link
-            # If success, store them in backup data
-            #
-            # First update the backup entry itself.  We keep the Keeplinks
-            # string and both primary and backup Rapidgator lists here for
-            # display in the Backup tab.  Clear any dead link tracking.
-            thread_info['keeplinks_link'] = keeplinks_url  # final Keeplinks
+            if isinstance(updated_link, str):
+                keeplinks_url = updated_link  # متوافق مع إصدارات بترجع URL
+
+            # 5) حدّث بيانات الباك اب فى الذاكرة/الواجهة
+            thread_info['keeplinks_link'] = keeplinks_url
             thread_info['rapidgator_links'] = list(rapidgator_links)
             thread_info['rapidgator_backup_links'] = list(backup_rg_urls)
             thread_info['dead_rapidgator_links'] = []
@@ -2186,81 +2256,49 @@ class ForumBotGUI(QMainWindow):
                 thread_info['mega_link'] = "\n".join(mega_links)
                 thread_info['mega_links'] = mega_links
 
-            # Persist backup data
             self.backup_threads[thread_title] = thread_info
             self.save_backup_threads_data()
             self.populate_backup_threads_table()
 
-            # ------------------------------------------------------------------
-            # Update the canonical links schema in process_threads using the
-            # same structure as handle_upload_complete.  This ensures the
-            # template generator sees the latest Rapidgator/KF/NF/DD links.
+            # 6) حدّث الـ process_threads (نفس الهيكل اللى الـTemplate بتقرأ منه)
             try:
                 canonical_links: dict[str, dict] = {}
-                # Main Rapidgator
                 if rapidgator_links:
-                    canonical_links['rapidgator.net'] = {
-                        'urls': list(rapidgator_links),
-                        'is_backup': False,
-                    }
-                # Nitroflare
+                    canonical_links['rapidgator.net'] = {'urls': list(rapidgator_links), 'is_backup': False}
                 if nitroflare_links:
-                    canonical_links['nitroflare.com'] = {
-                        'urls': list(nitroflare_links),
-                    }
-                # DDownload
+                    canonical_links['nitroflare.com'] = {'urls': list(nitroflare_links)}
                 if ddownload_links:
-                    canonical_links['ddownload.com'] = {
-                        'urls': list(ddownload_links),
-                    }
-                # Katfile
+                    canonical_links['ddownload.com'] = {'urls': list(ddownload_links)}
                 if katfile_links:
-                    canonical_links['katfile.com'] = {
-                        'urls': list(katfile_links),
-                    }
-                # Rapidgator backup
+                    canonical_links['katfile.com'] = {'urls': list(katfile_links)}
                 if backup_rg_urls:
-                    canonical_links['rapidgator-backup'] = {
-                        'urls': list(backup_rg_urls),
-                        'is_backup': True,
-                    }
-                # Keeplinks
+                    canonical_links['rapidgator-backup'] = {'urls': list(backup_rg_urls), 'is_backup': True}
                 if keeplinks_url:
                     canonical_links['keeplinks'] = keeplinks_url
 
-                # Iterate through categories and update matching records
                 for cat_name, threads in (self.process_threads or {}).items():
                     if thread_title in threads:
                         rec = threads[thread_title]
-                        # Log before update
                         try:
-                            logging.info(
-                                "LINKS-BEFORE cat=%s title=%s links=%s (reupload)",
-                                cat_name, thread_title, rec.get('links')
-                            )
+                            logging.info("LINKS-BEFORE cat=%s title=%s links=%s (reupload)",
+                                         cat_name, thread_title, rec.get('links'))
                         except Exception:
                             pass
                         rec['links'] = canonical_links.copy()
-                        # update versions if present
                         versions = rec.get('versions')
                         if isinstance(versions, list) and versions:
                             latest = versions[-1]
                             if isinstance(latest, dict):
                                 latest['links'] = canonical_links.copy()
-                        # also update upload_status/thread_id if present
                         if rapidgator_links or nitroflare_links or ddownload_links or katfile_links:
                             rec['upload_status'] = True
                             if 'thread_id' not in rec:
                                 rec['thread_id'] = thread_info.get('thread_id', '')
-                        # Log after update
                         try:
-                            logging.info(
-                                "LINKS-AFTER  cat=%s title=%s links=%s (reupload)",
-                                cat_name, thread_title, rec.get('links')
-                            )
+                            logging.info("LINKS-AFTER  cat=%s title=%s links=%s (reupload)",
+                                         cat_name, thread_title, rec.get('links'))
                         except Exception:
                             pass
-                # Persist the updated canonical data
                 self.save_process_threads_data()
             except Exception:
                 logging.exception("Failed to update canonical links on reupload")

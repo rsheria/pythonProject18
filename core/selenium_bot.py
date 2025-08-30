@@ -6,6 +6,8 @@ from email.parser import HeaderParser
 import hashlib
 import logging
 import mimetypes
+import re
+from urllib.parse import urlparse
 import sys
 import time
 import re
@@ -106,6 +108,15 @@ def extract_version_title(post_element, main_thread_title):
         return best_line
 
     return main_thread_title
+
+
+def flatten(seq):
+    """Yield a flat iterator over nested lists/tuples/sets."""
+    for item in seq:
+        if isinstance(item, (list, tuple, set)):
+            yield from flatten(item)
+        else:
+            yield item
 
 
 class ForumBotSelenium:
@@ -418,12 +429,89 @@ class ForumBotSelenium:
         return quote(url, safe=':/')
 
     def _get_keeplinks_api_hash(self) -> str:
-        val = (
-            self.config.get('keeplinks_api_hash', None)
-            if getattr(self, 'config', None)
-            else None
-        ) or os.getenv('KEEP_LINKS_API_HASH', '')
-        return str(val).strip() if val is not None else ''
+        try:
+            if getattr(self, "config", None) is not None:
+                val = self.config.get("keeplinks_api_hash", None)
+            else:
+                val = None
+        except Exception:
+            val = None
+        if not val:
+            val = os.getenv("KEEP_LINKS_API_HASH", "")
+        try:
+            return str(val).strip()
+        except Exception:
+            return ""
+
+    def _is_url(self, s: str) -> bool:
+        return isinstance(s, str) and s.startswith(("http://", "https://"))
+
+    def _collect_direct_urls(self, payload) -> list:
+        """Return flat list of direct http(s) URLs from any nested structure."""
+        out, seen = [], set()
+
+        def rec(x):
+            if x is None:
+                return
+            # string
+            if isinstance(x, str):
+                s = x.strip()
+                if self._is_url(s) and "keeplinks.org" not in s:
+                    if s not in seen:
+                        seen.add(s);
+                        out.append(s)
+                return
+            # dict
+            if isinstance(x, dict):
+                for k, v in x.items():
+                    kl = str(k).lower()
+                    # مفاتيح معتادة للروابط
+                    if kl in ("url", "link"):
+                        rec(v);
+                        continue
+                    if kl in ("urls", "links"):
+                        rec(v);
+                        continue
+                    # أسماء هوستات شائعة
+                    if kl in (
+                    "rg", "rg_bak", "rapidgator", "ddownload", "katfile", "nitroflare", "nf", "uploady", "turbobit"):
+                        rec(v);
+                        continue
+                    rec(v)
+                return
+            # iterable
+            if isinstance(x, (list, tuple, set)):
+                for i in x: rec(i)
+                return
+            # objects (OperationStatus / custom)
+            u = getattr(x, "url", None) or getattr(x, "link", None)
+            if u: rec(u)
+            us = getattr(x, "urls", None) or getattr(x, "links", None)
+            if us: rec(us)
+
+        rec(payload)
+        return out
+
+    def _iter_urls(self, o):
+        """Yield all URLs from nested containers/dicts/strings."""
+        if o is None:
+            return
+        if isinstance(o, str):
+            yield o
+            return
+        if isinstance(o, dict):
+            for v in o.values():
+                yield from self._iter_urls(v)
+            return
+        if isinstance(o, (list, tuple, set)):
+            for x in o:
+                yield from self._iter_urls(x)
+            return
+        # fallback: cast anything else to str
+        yield str(o)
+
+    def _is_url(self, s: str) -> bool:
+        return isinstance(s, str) and s.startswith(("http://", "https://"))
 
     def send_to_keeplinks(self, urls):
         """
@@ -1828,41 +1916,209 @@ class ForumBotSelenium:
             logging.error(f"Error validating/refreshing upload token: {e}")
             return False
 
-    def update_keeplinks_links(self, keeplinks_url, new_links):
-        """Update a Keeplinks URL with new links and return the updated URL."""
-        try:
-            flat = [
-                str(u).strip()
-                for u in (
-                    sum(([l] if isinstance(l, str) else list(l) for l in new_links), [])
+    def update_keeplinks_links(self, keeplinks_url, new_links, title: str = None) -> bool:
+        """
+        Modify the EXISTING Keeplinks entry (same url-id) to contain `new_links`.
+        - Sends raw links comma-separated + captcha Re only (no password/dlc).
+        - Canonicalizes Rapidgator links to https://rapidgator.net/file/<id>/
+          to avoid commas/& inside filenames.
+        - Verifies by calling API list (url-id) and matching host IDs.
+        Returns True on verified success, otherwise False.
+        """
+        import re, json
+        from urllib.parse import urlparse
+        import requests
+
+        # -------- helpers (محليّة) --------
+        def _extract_url_id(url: str) -> str:
+            try:
+                # يفضّل دالتك لو موجودة
+                if hasattr(self, "extract_keeplinks_url_id"):
+                    uid = self.extract_keeplinks_url_id(url)
+                    if uid:
+                        return uid
+                m = re.search(r"/[pr](\d+)/([A-Za-z0-9]+)", (url or "").strip())
+                return m.group(2) if m else ""
+            except Exception:
+                return ""
+
+        def _norm_list(obj) -> list[str]:
+            # استخدم مجمّعك لو موجود
+            urls = []
+            if hasattr(self, "_collect_direct_urls"):
+                try:
+                    urls = self._collect_direct_urls(obj) or []
+                except Exception:
+                    urls = []
+            # fallback: نص كبير
+            if (not urls) and isinstance(obj, str):
+                urls = re.findall(r'https?://[^\s\'"<>]+', obj)
+
+            out, seen = [], set()
+            for u in urls:
+                if not isinstance(u, str):
+                    continue
+                s = u.strip()
+                if not s or "keeplinks.org" in s:
+                    continue
+                if not s.startswith(("http://", "https://")):
+                    continue
+                if s in seen:
+                    continue
+                seen.add(s)
+                out.append(s)
+            return out
+
+        def _host_id(u: str) -> tuple[str, str]:
+            """(host, id) — لو معرّفش ID يرجّع الرابط نفسه."""
+            try:
+                host = urlparse(u).netloc.lower()
+                host = host[4:] if host.startswith("www.") else host
+                if "rapidgator.net" in host:
+                    m = re.search(r"/file/([0-9a-f]{32})/", u, re.I)
+                    return ("rapidgator.net", m.group(1) if m else u)
+                if "nitroflare.com" in host:
+                    m = re.search(r"/view/([A-Z0-9]+)/", u, re.I)
+                    return ("nitroflare.com", m.group(1) if m else u)
+                if "ddownload.com" in host:
+                    m = re.search(r"ddownload\.com/([A-Za-z0-9]+)", u, re.I)
+                    return ("ddownload.com", m.group(1) if m else u)
+                if "katfile.com" in host:
+                    m = re.search(r"katfile\.com/([A-Za-z0-9]+)", u, re.I)
+                    return ("katfile.com", m.group(1) if m else u)
+                return (host, u)
+            except Exception:
+                return ("", u)
+
+        def _wanted_map(urls: list[str]) -> dict[str, set]:
+            mp: dict[str, set] = {}
+            for u in urls:
+                h, i = _host_id(u)
+                if not h:
+                    continue
+                mp.setdefault(h, set()).add(i)
+            return mp
+
+        def _api_list_fetch(apihash: str, url_id: str) -> dict:
+            """رجّع dict خام من JSON أو {}."""
+            try:
+                r = requests.get(
+                    "https://www.keeplinks.org/api.php",
+                    params={"apihash": apihash, "list": "1", "url-id": url_id, "output": "json"},
+                    timeout=30,
                 )
-                if u
-            ]
+                if r.status_code != 200:
+                    logging.error(f"[Keeplinks] list HTTP {r.status_code}: {r.text[:200]}")
+                    return {}
+                try:
+                    return r.json()
+                except Exception:
+                    # أى نص → نحوله لقابل للبحث
+                    return {"_raw": r.text}
+            except Exception as e:
+                logging.error(f"[Keeplinks] list fetch error: {e}", exc_info=True)
+                return {}
+
+        def _map_from_list_response(resp: dict) -> dict[str, set]:
+            """
+            حاول تخرج كل URLs من الـ JSON أو من النص الخام ثم ابنِ host->IDs.
+            بنلتقط أى https://... من الـ JSON بالـ regex كـ fallback.
+            """
+            text = ""
+            if isinstance(resp, dict):
+                try:
+                    text = json.dumps(resp)
+                except Exception:
+                    text = str(resp)
+            else:
+                text = str(resp)
+            urls = re.findall(r'https?://[^\s\'"<>]+', text, flags=re.I)
+            # استبعد keeplinks نفسها
+            urls = [u for u in urls if "keeplinks.org" not in u]
+            return _wanted_map(urls)
+
+        # -------- 1) تحضير المُدخلات --------
+        url_id = _extract_url_id(keeplinks_url)
+        if not url_id:
+            logging.error("Keeplinks update aborted: unable to extract url-id from keeplinks_url.")
+            return False
+
+        api_hash = None
+        if hasattr(self, "_get_keeplinks_api_hash"):
             api_hash = self._get_keeplinks_api_hash()
-            if not api_hash:
-                logging.error("Keeplinks API hash is missing")
-                return None
-            kid = self.extract_keeplinks_url_id(keeplinks_url)
-            if not kid:
-                logging.error("Failed to extract URL ID from Keeplinks URL.")
-                return None
-            payload = {
-                'api_hash': api_hash,
-                'id': kid,
-                'links': ','.join(flat)
-            }
-            api_url = "https://www.keeplinks.org/api/update"
-            response = requests.post(api_url, data=payload, timeout=30)
-            logging.debug(f"Keeplinks (update) API Response: {response.text}")
-            if response.status_code == 200:
-                return keeplinks_url
-            logging.error(
-                f"Keeplinks API error on update: {response.status_code}. Response: {response.text}"
-            )
-            return None
+        if not api_hash:
+            logging.error("Keeplinks update aborted: missing apihash.")
+            return False
+
+        cleaned = _norm_list(new_links)
+        logging.debug(f"[Keeplinks] normalize: out={len(cleaned)} sample={cleaned[:3]}")
+        if not cleaned:
+            logging.error("Keeplinks update aborted: link-to-protect is empty after normalization.")
+            return False
+
+        # -------- 1.1 Canonicalize RG لتفادى الكوما داخل أسماء الملفات --------
+        def _canon_rg(u: str) -> str:
+            try:
+                if "rapidgator.net" not in (u or ""):
+                    return u
+                m = re.search(r"rapidgator\.net/file/([0-9a-f]{32})", u, re.I)
+                if not m:
+                    return u
+                fid = m.group(1)
+                return f"https://rapidgator.net/file/{fid}/"
+            except Exception:
+                return u
+
+        cleaned_before = cleaned[:]
+        cleaned = [_canon_rg(u) for u in cleaned]
+        if cleaned != cleaned_before:
+            logging.debug(f"[Keeplinks] RG canonicalized: before={cleaned_before[:2]} after={cleaned[:2]}")
+
+        # ابنى خريطة المطلوب بعد الـ canonicalization
+        want = _wanted_map(cleaned)
+        if not want:
+            logging.error("Keeplinks update aborted: could not build desired host->IDs map.")
+            return False
+
+        # -------- 2) POST update — روابط خام مفصولة بكوما + reCAPTCHA فقط --------
+        payload = {
+            "apihash": api_hash,
+            "url-id": url_id,
+            "link-to-protect": ",".join(cleaned),  # مهم: كوما فقط
+            "captcha": "on",
+            "captchatype": "Re",
+            "output": "json",
+        }
+        if title:
+            payload["title"] = title
+
+        try:
+            r = requests.post("https://www.keeplinks.org/api.php", data=payload, timeout=30)
+            logging.debug(f"[Keeplinks] UPDATE resp HTTP={r.status_code} body={r.text[:200]}...")
+            if r.status_code != 200:
+                logging.error(f"Keeplinks API update HTTP {r.status_code}: {r.text[:200]}")
+                return False
+            # مفيش اعتماد على نص النجاح؛ هنحقق بالـ list
         except Exception as e:
-            logging.error(f"Error updating Keeplinks links: {e}", exc_info=True)
-            return None
+            logging.error(f"Keeplinks API update error: {e}", exc_info=True)
+            return False
+
+        # -------- 3) Verify via API list (url-id) --------
+        resp = _api_list_fetch(api_hash, url_id)
+        got = _map_from_list_response(resp)
+        diffs = []
+        for host, want_ids in want.items():
+            got_ids = got.get(host, set())
+            if not want_ids.issubset(got_ids):
+                diffs.append((host, want_ids, got_ids))
+
+        if diffs:
+            for host, w, g in diffs:
+                logging.warning(f"[Keeplinks] verify mismatch via list host={host} want={sorted(w)} got={sorted(g)}")
+            return False
+
+        logging.info(f"✅ Keeplinks updated (verified by list) id={url_id} with {len(cleaned)} links (captcha=Re only).")
+        return True
 
     def extract_keeplinks_url_id(self, keeplinks_url):
         try:
