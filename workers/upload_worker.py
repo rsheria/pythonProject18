@@ -315,6 +315,9 @@ class UploadWorker(QThread):
         size = file_path.stat().st_size
         name = file_path.name
         start = time.time()
+        # Throttle state: only emit progress updates at most every 100 ms
+        last_emit_time = 0.0
+        last_pct = -1
         def cb(curr, total):
             self._check_control()
             pct = int(curr / total * 100) if total else 0
@@ -332,10 +335,22 @@ class UploadWorker(QThread):
                 eta=eta,
                 host=host,
             )
-            self.progress_update.emit(status)
-            self.host_progress.emit(
-                self.row, host_idx, pct, f"Uploading {name}", curr, total
-            )
+            # Emit progress updates throttled to reduce UI load
+            nonlocal last_emit_time, last_pct
+            now = time.time()
+            # Only emit if progress changed and at least 100ms elapsed, or at completion
+            if pct != last_pct and (now - last_emit_time >= 0.1 or pct >= 100):
+                self.progress_update.emit(status)
+                self.host_progress.emit(
+                    self.row,
+                    host_idx,
+                    pct,
+                    f"Uploading {name}" if pct < 100 else "Complete",
+                    curr,
+                    total,
+                )
+                last_emit_time = now
+                last_pct = pct
 
         # ─── رفع الملف ──────────────────────────────────────────────
         try:
@@ -507,70 +522,64 @@ class UploadWorker(QThread):
         Retry only the hosts that previously failed.
         """
         try:
-            # امسح أى حالة إيقاف/إلغاء قبل البدء (لو الميثود موجودة)
+            # Reset any pause/cancel flags before starting
             try:
                 self._reset_control_for_retry()
             except Exception:
-                # متوافقة لو الميثود مش متضافة فى نسختك
                 self.is_cancelled = False
                 self.is_paused = False
             self._check_control()
 
-            to_retry = [i for i, res in self.upload_results.items() if res["status"] == "failed"]
-            if not to_retry:
-                final = self._prepare_final_urls()
-                self._emit_final_statuses(row)
-                if "error" not in final:
-                    links_payload = {
-                        "rapidgator": final.get("rapidgator", []),
-                        "ddownload": final.get("ddownload", []),
-                        "katfile": final.get("katfile", []),
-                        "nitroflare": final.get("nitroflare", []),
-                        "rapidgator_bak": final.get("rapidgator_backup", []),
-                    }
+            attempt = 0
+            max_attempts = 3
+            # Continue retrying failed hosts until none remain or attempts exhausted
+            while attempt < max_attempts:
+                to_retry = [i for i, res in self.upload_results.items() if res.get("status") == "failed"]
+                if not to_retry:
+                    break
+
+                # Reset statuses for hosts to retry
+                for i in to_retry:
+                    self.upload_results[i] = {"status": "not_attempted", "urls": []}
+                    # Emit a RUNNING status for UI recolor
                     status = OperationStatus(
                         section=self.section,
                         item=self.files[0].name if self.files else "",
                         op_type=OpType.UPLOAD,
-                        stage=OpStage.FINISHED,
-                        message="Complete",
-                        progress=100,
-                        thread_id=final.get("thread_id", ""),
-                        links=links_payload,
-                        keeplinks_url=final.get("keeplinks", ""),
+                        stage=OpStage.RUNNING,
+                        message="Retrying",
+                        progress=0,
+                        host=self.hosts[i],
                     )
                     self.progress_update.emit(status)
-                self.upload_complete.emit(row, final)
-                return
+                    self.host_progress.emit(row, i, 0, "Retrying", 0, 0)
 
-            # reset statuses
-            for i in to_retry:
-                self.upload_results[i] = {"status": "not_attempted", "urls": []}
-                # اختياري: إشارة تشغيل لكل هوست لتحريك الألوان
-                status = OperationStatus(
-                    section=self.section,
-                    item=self.files[0].name if self.files else "",
-                    op_type=OpType.UPLOAD,
-                    stage=OpStage.RUNNING,
-                    message="Retrying",
-                    progress=0,
-                    host=self.hosts[i],
-                )
-                self.progress_update.emit(status)
-                self.host_progress.emit(row, i, 0, "Retrying", 0, 0)
+                # Submit uploads for hosts to retry
+                futures = {}
+                for i in to_retry:
+                    self._check_control()
+                    futures[self.thread_pool.submit(self._upload_host_all, i)] = i
 
-            futures = {}
-            for i in to_retry:
-                self._check_control()
-                futures[self.thread_pool.submit(self._upload_host_all, i)] = i
+                # Wait for all hosts to finish
+                for fut in as_completed(futures):
+                    self._check_control()
+                    i = futures[fut]
+                    self.upload_results[i]["status"] = (
+                        "success" if fut.result() == "success" else "failed"
+                    )
 
-            for fut in as_completed(futures):
-                self._check_control()
-                i = futures[fut]
-                self.upload_results[i]["status"] = "success" if fut.result() == "success" else "failed"
+                # After this attempt, check if more failures remain
+                attempt += 1
+                remaining_failures = [
+                    i for i, res in self.upload_results.items() if res.get("status") == "failed"
+                ]
+                if not remaining_failures:
+                    break
 
+            # Build final URLs and emit statuses
             final = self._prepare_final_urls()
             self._emit_final_statuses(row)
+            # Emit a finished status if no error
             if "error" not in final:
                 links_payload = {
                     "rapidgator": final.get("rapidgator", []),
@@ -607,12 +616,13 @@ class UploadWorker(QThread):
                 final = self._prepare_final_urls()
                 self._emit_final_statuses(row)
                 if "error" not in final:
+                    # Build links payload using canonical host keys
                     links_payload = {
-                        "rapidgator": final.get("rapidgator", []),
-                        "ddownload": final.get("ddownload", []),
-                        "katfile": final.get("katfile", []),
-                        "nitroflare": final.get("nitroflare", []),
-                        "rapidgator_bak": final.get("rapidgator_backup", []),
+                        "rapidgator": (final.get("rapidgator.net") or {}).get("urls", []),
+                        "ddownload": (final.get("ddownload.com") or {}).get("urls", []),
+                        "katfile": (final.get("katfile.com") or {}).get("urls", []),
+                        "nitroflare": (final.get("nitroflare.com") or {}).get("urls", []),
+                        "rapidgator_bak": (final.get("rapidgator-backup") or {}).get("urls", []),
                     }
                     status = OperationStatus(
                         section=self.section,
@@ -655,12 +665,13 @@ class UploadWorker(QThread):
             final = self._prepare_final_urls()
             self._emit_final_statuses(row)
             if "error" not in final:
+                # Build links payload using canonical host keys
                 links_payload = {
-                    "rapidgator": final.get("rapidgator", []),
-                    "ddownload": final.get("ddownload", []),
-                    "katfile": final.get("katfile", []),
-                    "nitroflare": final.get("nitroflare", []),
-                    "rapidgator_bak": final.get("rapidgator_backup", []),
+                    "rapidgator": (final.get("rapidgator.net") or {}).get("urls", []),
+                    "ddownload": (final.get("ddownload.com") or {}).get("urls", []),
+                    "katfile": (final.get("katfile.com") or {}).get("urls", []),
+                    "nitroflare": (final.get("nitroflare.com") or {}).get("urls", []),
+                    "rapidgator_bak": (final.get("rapidgator-backup") or {}).get("urls", []),
                 }
                 status = OperationStatus(
                     section=self.section,
@@ -710,12 +721,13 @@ class UploadWorker(QThread):
             final = self._prepare_final_urls()
             self._emit_final_statuses(row)
             if "error" not in final:
+                # Build links payload using canonical host keys
                 links_payload = {
-                    "rapidgator": final.get("rapidgator", []),
-                    "ddownload": final.get("ddownload", []),
-                    "katfile": final.get("katfile", []),
-                    "nitroflare": final.get("nitroflare", []),
-                    "rapidgator_bak": final.get("rapidgator_backup", []),
+                    "rapidgator": (final.get("rapidgator.net") or {}).get("urls", []),
+                    "ddownload": (final.get("ddownload.com") or {}).get("urls", []),
+                    "katfile": (final.get("katfile.com") or {}).get("urls", []),
+                    "nitroflare": (final.get("nitroflare.com") or {}).get("urls", []),
+                    "rapidgator_bak": (final.get("rapidgator-backup") or {}).get("urls", []),
                 }
                 status = OperationStatus(
                     section=self.section,

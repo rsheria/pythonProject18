@@ -1866,12 +1866,28 @@ class ForumBotGUI(QMainWindow):
             return
 
         try:
-            with open(log_path, 'r') as log_file:
-                content = log_file.read()
-                # هنا ضَع الكود الأصلي الذي يعرض المحتوى في الواجهة
-                # مثال:
-                # self.log_text_edit.setPlainText(content)
+            # Read the log file in binary mode and decode safely.  Many log
+            # files contain non‑ASCII bytes; reading with the default
+            # encoding can raise UnicodeDecodeError.  We read as bytes and
+            # decode using UTF‑8 with replacement, falling back to latin‑1
+            # and the system default if necessary.
+            with open(log_path, 'rb') as log_file:
+                raw = log_file.read()
+            try:
+                content = raw.decode('utf-8', errors='replace')
+            except Exception:
+                try:
+                    content = raw.decode('latin-1', errors='replace')
+                except Exception:
+                    content = raw.decode(errors='replace')
+            # Display the content in the log viewer if present
+            try:
+                if hasattr(self, 'log_text_edit') and self.log_text_edit:
+                    self.log_text_edit.setPlainText(content)
+            except Exception:
+                pass
         except Exception as e:
+            # Log any error without crashing the UI
             logging.error("Exception in load_log_file: %s", e, exc_info=True)
 
     def on_thread_selected(self, item):
@@ -2239,13 +2255,15 @@ class ForumBotGUI(QMainWindow):
                 QMessageBox.warning(self, "No Keeplinks URL", f"No Keeplinks link found for '{thread_title}'.")
                 return
 
-            # 4) حدّث نفس لينك كيبلينكس (in-place). بعض الإصدارات بترجع True/False، وبعضها بترجع نفس اللينك.
+            # 4) حدّث نفس لينك كيبلينكس (in-place). بعض الإصدارات بترجع True/False أو ترجع نفس اللينك.
             updated_link = self.bot.update_keeplinks_links(keeplinks_url, new_links)
-            if not updated_link:
-                QMessageBox.warning(self, "Update Failed", "Could not update Keeplinks link with new links.")
-                return
-            if isinstance(updated_link, str):
-                keeplinks_url = updated_link  # متوافق مع إصدارات بترجع URL
+            # إذا رجعت الدالة قيمة صادقة اعتبرها نجاحًا؛ إن كانت نصاً فهو رابط جديد
+            if updated_link:
+                if isinstance(updated_link, str):
+                    keeplinks_url = updated_link
+            else:
+                # فى بعض الإصدارات قد تُرجع False مؤقتاً مع أن التحديث تم؛ نُسجّل تحذيراً ولا نوقف العملية
+                logging.warning("[Keeplinks] Update returned False; continuing to update backup data.")
 
             # 5) حدّث بيانات الباك اب فى الذاكرة/الواجهة
             thread_info['keeplinks_link'] = keeplinks_url
@@ -3080,14 +3098,15 @@ class ForumBotGUI(QMainWindow):
             return
 
         updated_link = self.bot.update_keeplinks_links(keeplinks_link, new_links)
+        # Treat return value as success flag.  If the function returns a
+        # string, it's the new Keeplinks URL; otherwise keep the original
+        # link but proceed with updating backup data.
         if updated_link:
             logging.info("Keeplinks link updated successfully.")
-            keeplinks_link = updated_link
-            # Store the (unchanged) Keeplinks link back into thread info
+            if isinstance(updated_link, str):
+                keeplinks_link = updated_link
             thread_info['keeplinks_link'] = keeplinks_link
-            # Update Rapidgator links in backup data (we may have multiple hosts)
             thread_info['rapidgator_links'] = new_links
-            # Persist backup data
             self.save_backup_threads_data()
             self.populate_backup_threads_table()
 
@@ -6996,7 +7015,7 @@ class ForumBotGUI(QMainWindow):
             data_dir = get_data_folder()
             return os.path.join(data_dir, "backup_threads.json")
 
-    def save_backup_threads_data(self):
+    def save_backup_threads_data(self, force: bool = False):
         try:
             # Determine the filename based on the current user
             if self.user_manager.get_current_user():
@@ -7021,7 +7040,7 @@ class ForumBotGUI(QMainWindow):
                 if timer.isActive():
                     timer.stop()
 
-            # Write the data in a background thread
+            # Write the data synchronously if force=True, else on a background thread
             def _write_backup(data, path):
                 try:
                     with open(path, 'w', encoding='utf-8') as f:
@@ -7029,6 +7048,16 @@ class ForumBotGUI(QMainWindow):
                     logging.info(f"Backup Threads data saved to {path}.")
                 except Exception as ex:
                     logging.error(f"Error writing Backup Threads: {ex}", exc_info=True)
+
+            # If force=True write synchronously and return
+            if force:
+                try:
+                    with open(filename, 'w', encoding='utf-8') as f:
+                        json.dump(data_copy, f, ensure_ascii=False, indent=4)
+                    logging.info(f"Backup Threads data saved to {filename}.")
+                except Exception as ex:
+                    logging.error(f"Error writing Backup Threads: {ex}", exc_info=True)
+                return
 
             from PyQt5.QtCore import QTimer
             def _start_backup_write():
@@ -9231,10 +9260,16 @@ class ForumBotGUI(QMainWindow):
         self.category_manager.save_categories()
         self.megathreads_category_manager.save_categories()
         self.bot.save_processed_thread_ids()  # Save processed thread IDs on close
-        self.save_process_threads_data()  # Save Process Threads data
-        self.save_megathreads_process_threads_data()  # Save Megathreads data
-        if hasattr(self, 'process_threads'):
-            self.save_process_threads_data()
+        # Save Process Threads data immediately (synchronous write)
+        self.save_process_threads_data(force=True)
+        # Save Backup Threads data immediately (synchronous write)
+        try:
+            self.save_backup_threads_data(force=True)
+        except Exception:
+            logging.error("Error saving backup threads data on close", exc_info=True)
+        # Save Megathreads data (already synchronous)
+        self.save_megathreads_process_threads_data()
+        # No need to call save_process_threads_data again; it's already saved above.
         if self.bot:
             self.bot.close()
             logging.info("Closed bot connection.")
@@ -9267,7 +9302,7 @@ class ForumBotGUI(QMainWindow):
             os.makedirs(data_dir, exist_ok=True)
             return os.path.join(data_dir, f"threads_{sanitized_name}.json")
 
-    def save_process_threads_data(self):
+    def save_process_threads_data(self, force: bool = False):
         """
         حفظ متغير self.process_threads إلى data/<username>_process_threads.json
         """
@@ -9308,6 +9343,16 @@ class ForumBotGUI(QMainWindow):
                     logging.info(f"✅ Process Threads data saved successfully to {path}")
                 except Exception as ex:
                     logging.error(f"❌ Error writing process threads data: {ex}", exc_info=True)
+
+            # If force is True, write synchronously immediately and skip the debounce timer.
+            if force:
+                try:
+                    with open(filename, 'w', encoding='utf-8') as f:
+                        json.dump(data_copy, f, ensure_ascii=False, indent=4)
+                    logging.info(f"✅ Process Threads data saved successfully to {filename}")
+                except Exception as ex:
+                    logging.error(f"❌ Error writing process threads data: {ex}", exc_info=True)
+                return
 
             # Use a single-shot QTimer to schedule the write after a short delay; this
             # collapses multiple calls into a single write operation.
