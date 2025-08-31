@@ -2377,6 +2377,20 @@ class ForumBotGUI(QMainWindow):
         title_lbl.setFont(QFont("Arial", 12, QFont.Bold))
         backup_layout.addWidget(title_lbl)
 
+        # شريط البحث
+        filter_row = QHBoxLayout()
+        self.backup_filter_combo = QComboBox()
+        self.backup_filter_combo.addItems(["Title", "Status", "Keeplinks"])
+        filter_row.addWidget(self.backup_filter_combo)
+
+        self.backup_filter_input = QLineEdit()
+        self.backup_filter_input.setPlaceholderText("فلترة فورية…")
+        filter_row.addWidget(self.backup_filter_input)
+
+        backup_layout.addLayout(filter_row)
+        self.backup_filter_input.textChanged.connect(self.apply_backup_filter)
+        self.backup_filter_combo.currentIndexChanged.connect(self.apply_backup_filter)
+
         # === جدول المواضيع المحتفَظ بها ========================================
         self.backup_threads_table = QTableWidget()
         self.backup_threads_table.setColumnCount(5)
@@ -7004,6 +7018,43 @@ class ForumBotGUI(QMainWindow):
         # Adjust columns and rows to show all lines
         self.backup_threads_table.resizeColumnsToContents()
         self.backup_threads_table.resizeRowsToContents()
+        self.apply_backup_filter()
+
+    def apply_backup_filter(self):
+        """Filter backup threads table based on current query."""
+        query = (
+            self.backup_filter_input.text().strip().lower()
+            if hasattr(self, "backup_filter_input")
+            else ""
+        )
+        mode = (
+            self.backup_filter_combo.currentText().lower()
+            if hasattr(self, "backup_filter_combo")
+            else "title"
+        )
+
+        for row in range(self.backup_threads_table.rowCount()):
+            item = self.backup_threads_table.item(row, 0)
+            title = item.text() if item else ""
+            info = self.backup_threads.get(title, {})
+            show = True
+
+            if query:
+                if mode == "title":
+                    show = query in title.lower()
+                elif mode == "status":
+                    status = info.get("rapidgator_status", "not-checked").lower()
+                    show = query in status
+                else:  # Keeplinks
+                    keeplink = (info.get("keeplinks_link") or "").lower()
+                    if query in {"y", "yes", "true", "1", "has", "available", "وجود", "موجود"}:
+                        show = bool(keeplink)
+                    elif query in {"n", "no", "false", "0", "none", "missing", "غير موجود"}:
+                        show = not keeplink
+                    else:
+                        show = query in keeplink
+
+            self.backup_threads_table.setRowHidden(row, not show)
 
     def get_backup_threads_filepath(self):
         if self.user_manager.get_current_user():
