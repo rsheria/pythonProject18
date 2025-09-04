@@ -954,7 +954,7 @@ class ForumBotSelenium:
 
         return action, data
 
-    def reply_via_requests(self, thread_id=None, thread_url=None, message_html="", subject=""):
+    def _reply_via_requests_old(self, thread_id=None, thread_url=None, message_html="", subject=""):
         """
         HTTP reply to a thread (no Selenium interaction).
         Returns: {"ok": bool, "url": str, "error": str}
@@ -1096,6 +1096,197 @@ class ForumBotSelenium:
 
         return {"ok": bool(ok), "url": verified_url or final_url,
                 "error": "" if ok else "Verification failed after POST"}
+
+    def reply_via_requests(self, thread_id=None, thread_url=None, message_html="", subject=""):
+        """
+        Post a reply via HTTP only (no Selenium here).
+        Steps:
+          a) GET newreply.php?do=newreply&t=<tid> -> extract hidden inputs incl. securitytoken/posthash/poststarttime/s
+          b) GET showthread.php?t=<tid> -> extract ajax_lastpost and capture pre lastpostid + post count
+          c) POST newreply.php?do=postreply&t=<tid> with required form-data and AJAX headers
+          d) Strict verify via showthread.php?t=<tid>&goto=lastpost
+        Returns: {"ok": bool, "url": str, "error": str}
+        """
+        import re
+        import time
+        from urllib.parse import urlparse, parse_qs
+
+        base = getattr(self, "forum_url", "").rstrip("/") or "https://www.mygully.com"
+
+        # Allow both calling styles: (id,url,msg,subject) or (key,msg,subject)
+        if thread_url:
+            # Called as (thread_key, message_html, subject) from GUI worker
+            # Detect non-URL or clearly message-like content and shift args
+            tn = str(thread_url)
+            if (not isinstance(thread_url, str)) or (not tn.lower().startswith("http")) or ("\n" in tn or " " in tn or "[" in tn or "<" in tn):
+                message_html, subject = thread_url, (message_html or subject)
+                thread_url = None
+
+        # Resolve thread id
+        tid = None
+        key = thread_id or thread_url
+        if key:
+            if isinstance(key, (int, float)) or (isinstance(key, str) and key.isdigit()):
+                tid = str(int(key))
+            elif isinstance(key, str):
+                try:
+                    qs = parse_qs(urlparse(key).query)
+                    tid = (qs.get("t", [None])[0] or "").strip() or None
+                except Exception:
+                    tid = None
+        if not tid:
+            return {"ok": False, "url": "", "error": "No thread id/url provided"}
+
+        session = self.get_requests_session()
+        logged_uid = (session.cookies.get("bbuserid") or "").strip()
+        showthread_url = f"{base}/showthread.php?t={tid}"
+        newreply_form_url = f"{base}/newreply.php?do=newreply&t={tid}"
+
+        # Helper: parse ajax_lastpost, lastpostid, and post count from showthread HTML
+        def parse_thread_meta(html: str) -> tuple[str | None, str | None, int]:
+            ajax_lp = None
+            lastpost_id = None
+            post_ids = []
+            try:
+                from bs4 import BeautifulSoup  # type: ignore
+                soup = BeautifulSoup(html or "", "html.parser")
+                inp = soup.find("input", attrs={"name": "ajax_lastpost"}) or \
+                      soup.find("input", attrs={"id": "ajax_lastpost"})
+                if inp and inp.get("value"):
+                    ajax_lp = (inp.get("value") or "").strip()
+                for tag in soup.find_all(id=re.compile(r"^(post_message_|postcount)(\d+)$")):
+                    m = re.search(r"(post_message_|postcount)(\d+)$", tag.get("id", ""))
+                    if m:
+                        try:
+                            post_ids.append(int(m.group(2)))
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            # Regex fallbacks
+            if not ajax_lp:
+                m = re.search(r"ajax_lastpost[^\d]*(\d{10,})", html or "", re.I)
+                if m:
+                    ajax_lp = m.group(1)
+            if not post_ids:
+                post_ids = [int(x) for x in re.findall(r"id=\"post_message_(\d+)\"", html or "")]
+                if not post_ids:
+                    post_ids = [int(x) for x in re.findall(r"id=\"postcount(\d+)\"", html or "")]
+            if post_ids:
+                lastpost_id = str(max(post_ids))
+            return ajax_lp, lastpost_id, len(post_ids)
+
+        # a) GET newreply form
+        r_form = session.get(newreply_form_url, timeout=30)
+        if r_form.status_code != 200:
+            return {"ok": False, "url": newreply_form_url, "error": f"GET newreply failed: HTTP {r_form.status_code}"}
+        action_url, form_data = self._extract_reply_form(r_form.text or "", base)
+
+        # b) GET showthread (pre meta and ajax_lastpost)
+        r_thread = session.get(showthread_url, timeout=30)
+        if r_thread.status_code != 200:
+            return {"ok": False, "url": showthread_url, "error": f"GET showthread failed: HTTP {r_thread.status_code}"}
+        ajax_lastpost, pre_lastpostid, pre_post_count = parse_thread_meta(r_thread.text or "")
+
+        # Build payload per spec
+        payload = dict(form_data)
+        payload.update({
+            "do": "postreply",
+            "t": str(tid),
+            "message": message_html or "",
+            "fromquickreply": "1",
+            "parseurl": "1",
+            "signature": "1",
+            "wysiwyg": "0",
+            "styleid": payload.get("styleid", "0"),
+            "loggedinuser": logged_uid or payload.get("loggedinuser", ""),
+            "ajax": "1",
+            "ajax_lastpost": ajax_lastpost or str(int(time.time()) - 60),
+            "specifiedpost": "0",
+            "p": payload.get("p", ""),
+            "sbutton": "Antworten",
+        })
+        if subject:
+            payload["title"] = subject
+
+        # Log payload (without dumping full message)
+        logging.info(
+            f"Build payload: t={tid}, title={'yes' if bool(subject) else 'no'}, "
+            f"message_len={len(payload.get('message',''))}, ajax_lastpost={payload.get('ajax_lastpost')}, "
+            f"loggedinuser={payload.get('loggedinuser','')}"
+        )
+
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Origin": base,
+            "Referer": showthread_url,
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        }
+
+        logging.info(f"POST reply -> {action_url}")
+        r_post = session.post(action_url, data=payload, headers=headers, timeout=45, allow_redirects=True)
+        post_final_url = getattr(r_post, "url", action_url) or action_url
+
+        # Pre-verify snapshot
+        logging.info(f"Verify pre: lastpostid={pre_lastpostid}, post_count={pre_post_count}")
+
+        def strip_bbcode(txt: str) -> str:
+            t = re.sub(r"\[/?[^\]]+\]", " ", txt or "")
+            t = re.sub(r"\s+", " ", t).strip()
+            return t
+
+        # d) Verify after
+        verify_url = f"{base}/showthread.php?t={tid}&goto=lastpost"
+        r_verify = session.get(verify_url, timeout=30)
+        verify_final_url = getattr(r_verify, "url", verify_url)
+        page = r_verify.text or ""
+        _, post_lastpostid, post_count = parse_thread_meta(page)
+
+        # (a) lastpost changed or count increased
+        changed = False
+        try:
+            changed = (post_lastpostid and post_lastpostid != (pre_lastpostid or "")) or (post_count > pre_post_count)
+        except Exception:
+            changed = False
+
+        # (b) author is our uid OR page contains >=15-char snippet of message
+        ok_author = False
+        ok_snippet = False
+        try:
+            if (session.cookies.get("bbuserid") or "").strip():
+                uid = (session.cookies.get("bbuserid") or "").strip()
+                try:
+                    from bs4 import BeautifulSoup  # type: ignore
+                    soup = BeautifulSoup(page, "html.parser")
+                    posts = soup.find_all(id=re.compile(r"^(post_message_|postcount)(\d+)$"))
+                    container = posts[-1].parent if posts else soup
+                    for a in container.find_all("a", href=True):
+                        if f"member.php?u={uid}" in a.get("href", ""):
+                            ok_author = True
+                            break
+                except Exception:
+                    ok_author = (f"member.php?u={uid}" in page)
+            # Snippet
+            plain = strip_bbcode(message_html or "")
+            token = (plain[:512] or "").strip()
+            if len(token) >= 15:
+                ok_snippet = token.lower() in page.lower()
+        except Exception:
+            pass
+
+        ok = bool(changed and (ok_author or ok_snippet))
+        logging.info(
+            f"Verify post: changed={changed} (pre_id={pre_lastpostid}, post_id={post_lastpostid}, "
+            f"pre_count={pre_post_count}, post_count={post_count}), author_match={ok_author}, snippet_match={ok_snippet}"
+        )
+
+        if ok:
+            return {"ok": True, "url": verify_final_url, "error": ""}
+
+        # On failure print first 200 chars of r_post.text
+        snippet = (r_post.text or "")[:200]
+        err = f"Reply verification failed. HTTP={r_post.status_code}. Body[:200]={snippet!r}"
+        return {"ok": False, "url": post_final_url, "error": err}
 
     def safe_navigate(self, url, timeout=30):
         """
