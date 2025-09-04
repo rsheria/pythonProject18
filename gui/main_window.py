@@ -899,6 +899,72 @@ class ForumBotGUI(QMainWindow):
         """Handle end of batch (GUI thread)."""
         logging.info(f"Reply batch finished. Total processed: {count}")
 
+    def on_batch_reply_clicked(self):
+        """Collect selected rows in Process table and start a batch HTTP reply.
+
+        Gathers for each selected row: title, category, thread_id, thread_url,
+        and resolves message_html from stored bbcode or the editor content.
+        """
+        try:
+            table = getattr(self, "process_threads_table", None)
+            if table is None:
+                QMessageBox.information(self, "Unavailable", "Process table is not initialized.")
+                return
+
+            rows = sorted({idx.row() for idx in table.selectedIndexes()})
+            if not rows:
+                QMessageBox.information(self, "No Selection", "Select one or more threads to batch reply.")
+                return
+
+            tasks = []
+            for row in rows:
+                title_item = table.item(row, 0)
+                category_item = table.item(row, 1)
+                thread_id_item = table.item(row, 2)
+                if not (title_item and category_item and thread_id_item):
+                    continue
+
+                title = (title_item.text() or "").strip()
+                category = (category_item.text() or "").strip()
+                thread_id = (thread_id_item.text() or "").strip()
+                thread_url = title_item.data(Qt.UserRole + 2)
+
+                # Resolve message_html: prefer stored content per thread, else current editor content
+                message_html = ""
+                try:
+                    message_html = (
+                        self.process_threads.get(category, {})
+                        .get(title, {})
+                        .get("bbcode_content", "")
+                    ) or ""
+                except Exception:
+                    message_html = ""
+
+                if not message_html and hasattr(self, "process_bbcode_editor"):
+                    try:
+                        message_html = self.process_bbcode_editor.get_text()
+                    except Exception:
+                        message_html = ""
+
+                tasks.append({
+                    "thread_id": thread_id,
+                    "thread_url": thread_url,
+                    "message_html": message_html,
+                    "subject": "",
+                    "title": title,
+                })
+
+            if not tasks:
+                QMessageBox.information(self, "Nothing To Post", "No valid threads found in selection.")
+                return
+
+            # Start batch with 30s minimum rate-limit between posts
+            self.start_reply_batch(tasks, 30)
+
+        except Exception as e:
+            logging.error(f"Error in on_batch_reply_clicked: {e}", exc_info=True)
+            QMessageBox.warning(self, "Error", f"Failed to start batch reply: {e}")
+
     def apply_settings(self):
         # مسار التحميل الجديد
         new_dl = self.config['download_dir']
@@ -3972,6 +4038,11 @@ class ForumBotGUI(QMainWindow):
         self.reply_button.setIcon(QIcon.fromTheme("mail-send"))
         self.reply_button.clicked.connect(self.on_reply_button_clicked)
         bbcode_layout.addWidget(self.reply_button)
+
+        # Batch Reply button (Selected)
+        self.batch_reply_button = QPushButton("Batch Reply (Selected)")
+        self.batch_reply_button.clicked.connect(self.on_batch_reply_clicked)
+        bbcode_layout.addWidget(self.batch_reply_button)
 
         splitter.addWidget(bbcode_editor_group)
 
