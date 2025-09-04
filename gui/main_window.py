@@ -291,6 +291,118 @@ class LinkStatusDelegate(QStyledItemDelegate):
         else:
             super().paint(painter, option, index)
 
+class RGLinkBatchWorker(QThread):
+    """Batch-check Rapidgator links for many threads with rate limiting.
+
+    Signals:
+    - progress_update(object): OperationStatus updates
+    - thread_checked(str, dict): {'status','dead_links','checked_at'}
+    - finished(int): total processed thread count
+    """
+    progress_update = pyqtSignal(object)
+    thread_checked = pyqtSignal(str, dict)
+    finished = pyqtSignal(int)
+
+    def __init__(self, bot: SeleniumBot, tasks: list, *,
+                 rate_limit_per_min: int = 60,
+                 min_sleep_between_threads: float = 0.5,
+                 parent: QObject | None = None):
+        super().__init__(parent)
+        self.bot = bot
+        self.tasks = list(tasks or [])  # [{'title': str, 'links': [..]}, ...] أو [(title, info)]
+        self.rate_limit_per_min = max(1, int(rate_limit_per_min or 60))
+        self.min_interval = 60.0 / float(self.rate_limit_per_min)
+        self.min_sleep_between_threads = max(0.0, float(min_sleep_between_threads or 0.0))
+        self._cancelled = False
+
+    def request_stop(self):
+        self._cancelled = True
+
+    def run(self):
+        import time
+        checked = 0
+        next_allowed = 0.0
+
+        for task in self.tasks:
+            if self._cancelled:
+                break
+
+            # يدعم شكلين للـtasks: dict أو tuple
+            if isinstance(task, dict):
+                title = task.get('title', '').strip()
+                links = [str(l).strip() for l in (task.get('links') or []) if str(l).strip()]
+            else:
+                title, info = task  # (title, info)
+                links = [str(l).strip() for l in (info.get('rapidgator_links') or []) if str(l).strip()]
+
+            # ── حالة 0 لينك: انهى فوراً بتحذير وتقدم 100% ─────────────────────
+            if not links:
+                self.thread_checked.emit(title, {
+                    'status': 'none',
+                    'dead_links': [],
+                    'checked_at': int(time.time()),
+                })
+                self.progress_update.emit(OperationStatus(
+                    section="Backup Link Check", item=title, op_type=OpType.POST,
+                    stage=OpStage.ERROR, message="No RG links", progress=100, host="rapidgator",
+                ))
+                checked += 1
+                time.sleep(self.min_sleep_between_threads)
+                continue
+
+            dead = []
+            total = len(links)
+
+            for i, link in enumerate(links, 1):
+                if self._cancelled:
+                    break
+
+                # Rate limit (بسيط وثابت)
+                sleep_for = max(0.0, next_allowed - time.time())
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+
+                alive = False
+                try:
+                    res = self.bot.check_rapidgator_link_status(link)
+                    alive = bool(res and res.get('status') == 'ACCESS')
+                except Exception:
+                    alive = False
+
+                if not alive:
+                    dead.append(link)
+
+                pct = int(i * 100 / total)
+                self.progress_update.emit(OperationStatus(
+                    section="Backup Link Check", item=title, op_type=OpType.POST,
+                    stage=OpStage.RUNNING, message=f"Checking RG ({i}/{total})",
+                    progress=pct, host="rapidgator",
+                ))
+                next_allowed = time.time() + self.min_interval
+
+            if self._cancelled:
+                break
+
+            status = 'dead' if dead else 'alive'
+            final_stage = OpStage.ERROR if dead else OpStage.FINISHED
+            final_msg = f"Dead: {len(dead)}/{total}" if dead else "Complete"
+
+            # أرسل نتيجة الثريد بشكل متوافق مع on_rg_thread_checked()
+            self.thread_checked.emit(title, {
+                'status': status,
+                'dead_links': dead,
+                'checked_at': int(time.time()),
+            })
+            # حالة نهائية بـ 100% علشان Clear Finished/Errors يمسح البنود
+            self.progress_update.emit(OperationStatus(
+                section="Backup Link Check", item=title, op_type=OpType.POST,
+                stage=final_stage, message=final_msg, progress=100, host="rapidgator",
+            ))
+
+            checked += 1
+            time.sleep(self.min_sleep_between_threads)
+
+        self.finished.emit(checked)
 
 class ForumBotGUI(QMainWindow):
     # Define Qt signals for thread-safe UI updates
@@ -862,6 +974,42 @@ class ForumBotGUI(QMainWindow):
         except Exception as e:
             logging.error(f"Error while searching for archive file: {e}", exc_info=True)
             return None
+
+    def _normalize_thread_url(self, raw):
+        """Normalize a thread URL: add scheme / prepend forum base / accept relative."""
+        import re
+        raw = (raw or "").strip()
+        if not raw:
+            return None
+        if raw.startswith(("http://", "https://")):
+            return raw
+        # domain/path without scheme
+        if re.match(r"^[A-Za-z0-9.-]+\.[A-Za-z]{2,}(/.*)?$", raw):
+            return "https://" + raw
+        # relative -> prepend forum base
+        base = getattr(self.bot, "forum_url", "") or self.config.get("forum_url", "")
+        if not base:
+            return None
+        if not base.startswith(("http://", "https://")):
+            base = "https://" + base.lstrip("/")
+        base = base.rstrip("/")
+        if raw.startswith("/"):
+            return base + raw
+        return base + "/" + raw
+
+    def _build_thread_url_from_id(self, thread_id):
+        """Best-effort build of a thread URL from numeric ID (vBulletin/XenForo common patterns)."""
+        tid = (str(thread_id or "")).strip()
+        if not tid.isdigit():
+            return None
+        base = getattr(self.bot, "forum_url", "") or self.config.get("forum_url", "")
+        if not base:
+            return None
+        if not base.startswith(("http://", "https://")):
+            base = "https://" + base.lstrip("/")
+        base = base.rstrip("/")
+        # نفضّل vBulletin أولاً؛ لو المنتدى XenForo الرابط ده عادةً بيعمل redirect صحيح
+        return f"{base}/showthread.php?t={tid}"
 
     def normalize_link(self, link):
         """
@@ -2446,6 +2594,8 @@ class ForumBotGUI(QMainWindow):
         self.backup_threads_table.itemSelectionChanged.connect(
             self.on_backup_selection_changed
         )
+        # Double-click to open the thread URL
+        self.backup_threads_table.cellDoubleClicked.connect(self.on_backup_thread_double_click)
 
         # قائمة ستُحدَّث تلقائيًا
         self.selected_backup_threads: list[str] = []
@@ -2640,76 +2790,96 @@ class ForumBotGUI(QMainWindow):
         logging.info(f"Active upload hosts: {self.active_upload_hosts}")
 
     def check_rapidgator_links_for_all_threads(self):
-        """
-        Check Rapidgator links for ALL threads in backup_threads_table,
-        but avoid repeated pop-ups if the Rapidgator token is missing.
-        """
-        # Ensure a Rapidgator token is available for link checks
-        if not (self.bot.upload_rapidgator_token or self.bot.rapidgator_token):
-            loaded = self.bot.load_token('main') or self.bot.load_token('backup')
-            if not loaded and not (self.bot.api_login('main') or self.bot.api_login('backup')):
-                logging.warning("No Rapidgator API token found; skipping Rapidgator link checks for ALL threads.")
-                return
+        """Prepare and run a rate-limited batch RG check using QThread worker."""
+        # try to ensure we have some token to use; avoid noisy popups
+        try:
+            if not (self.bot.upload_rapidgator_token or self.bot.rapidgator_token):
+                _ = self.bot.load_token('main') or self.bot.load_token('backup') or \
+                    self.bot.api_login('main') or self.bot.api_login('backup')
+        except Exception:
+            pass
 
-        new_dead_threads = []
+        ttl_sec = int(23 * 3600)
+        now_ts = int(time.time())
 
+        tasks: list[dict] = []
         for row in range(self.backup_threads_table.rowCount()):
-            thread_title_item = self.backup_threads_table.item(row, 0)
-            if not thread_title_item:
+            title_item = self.backup_threads_table.item(row, 0)
+            rg_item = self.backup_threads_table.item(row, 2)
+            if not title_item or not rg_item:
                 continue
-
-            thread_title = thread_title_item.text()
-            rapidgator_cell_item = self.backup_threads_table.item(row, 2)
-            if not rapidgator_cell_item:
+            title = title_item.text()
+            info = self.backup_threads.get(title, {}) or {}
+            last_ts = int(info.get('last_rg_check_ts', 0) or 0)
+            if last_ts and (now_ts - last_ts) < ttl_sec:
                 continue
+            links = [s.strip() for s in (rg_item.text() or '').split('\n') if s.strip()]
+            tasks.append({'title': title, 'links': links})
 
-            rapidgator_links = [link.strip() for link in rapidgator_cell_item.text().split("\n") if link.strip()]
-            thread_info = self.backup_threads.get(thread_title, {})
-            prev_dead = set(thread_info.get('dead_rapidgator_links', []))
-            thread_info['dead_rapidgator_links'] = []
-            dead_found = False
+        if not tasks:
+            logging.info("RG check: nothing to do (all within TTL).")
+            return
 
-            for link in rapidgator_links:
-                response = self.bot.check_rapidgator_link_status(link)
-                if not (response and response.get('status') == "ACCESS"):
-                    thread_info['dead_rapidgator_links'].append(link)
-                    dead_found = True
+        # cancel old worker if any
+        try:
+            old = getattr(self, 'rg_link_worker', None)
+            if old and old.isRunning():
+                old.request_stop()
+                old.wait(1500)
+        except Exception:
+            pass
 
-            if dead_found:
-                self.set_backup_link_status_color(rapidgator_cell_item, False)
-                thread_info['rapidgator_status'] = 'dead'
-            else:
-                if rapidgator_links:
-                    self.set_backup_link_status_color(rapidgator_cell_item, True)
-                    thread_info['rapidgator_status'] = 'alive'
+        rate_limit = int(self.config.get('rg_rate_limit_per_min', 60))
+        min_sleep = float(self.config.get('rg_min_sleep_between_threads', 0.5))
+        worker = RGLinkBatchWorker(self.bot, tasks, rate_limit_per_min=rate_limit,
+                                   min_sleep_between_threads=min_sleep)
+        self.rg_link_worker = worker
+        self.register_worker(worker)
+        worker.thread_checked.connect(self.on_rg_thread_checked, Qt.QueuedConnection)
+        worker.finished.connect(self.on_rg_check_finished, Qt.QueuedConnection)
+        worker.start()
+        logging.info("RG check: started batch worker with %d task(s)", len(tasks))
+
+    def on_rg_thread_checked(self, title: str, info: dict):
+        try:
+            status = info.get('status') or 'none'
+            dead_links = list(info.get('dead_links') or [])
+            ts = int(info.get('checked_at') or int(time.time()))
+
+            entry = dict(self.backup_threads.get(title, {}) or {})
+            entry['rapidgator_status'] = status
+            entry['dead_rapidgator_links'] = dead_links
+            entry['last_rg_check_ts'] = ts
+            self.backup_threads[title] = entry
+
+            row_idx = -1
+            for r in range(self.backup_threads_table.rowCount()):
+                it = self.backup_threads_table.item(r, 0)
+                if it and it.text() == title:
+                    row_idx = r
+                    break
+            if row_idx >= 0:
+                cell = self.backup_threads_table.item(row_idx, 2)
+                if status == 'alive':
+                    self.set_backup_link_status_color(cell, True)
+                    cell.setToolTip("Rapidgator links: alive")
+                elif status == 'dead':
+                    self.set_backup_link_status_color(cell, False)
+                    cell.setToolTip(f"Dead RG links: {len(dead_links)}")
                 else:
-                    # no links
-                    rapidgator_cell_item.setBackground(QColor(255, 255, 255))
-                    rapidgator_cell_item.setData(Qt.UserRole, None)
-                    thread_info['rapidgator_status'] = 'none'
+                    if cell:
+                        cell.setBackground(QColor(255, 255, 255))
+                        cell.setData(Qt.UserRole, None)
+                        cell.setToolTip("No RG links")
+        except Exception as exc:
+            logging.error("on_rg_thread_checked error: %s", exc)
 
-            new_added = set(thread_info['dead_rapidgator_links']) - prev_dead
-            if new_added:
-                new_dead_threads.append((thread_title, list(new_added)))
-
-            self.backup_threads[thread_title] = thread_info
-            logging.info(f"Checked Rapidgator links for '{thread_title}' (dead_found={dead_found}).")
-
-        self.save_backup_threads_data()
-
-        if new_dead_threads:
-            msg_box = QtMessageBox(self)
-            msg_box.setWindowTitle("Dead Links Detected")
-            msg_box.setText("Some Rapidgator links were found dead.")
-            reupload_btn = msg_box.addButton("Re-upload now", QtMessageBox.ActionRole)
-            msg_box.addButton(QtMessageBox.Ok)
-            msg_box.exec_()
-            if msg_box.clickedButton() == reupload_btn:
-                self._reupload_queue = [(t, self.backup_threads.get(t, {})) for t, _ in new_dead_threads]
-                self._start_next_reupload_from_queue()
-
-        QApplication.processEvents()
-        logging.info("Finished checking Rapidgator links for all threads.")
+    def on_rg_check_finished(self, count: int):
+        try:
+            self.save_backup_threads_data()
+            logging.info("RG check finished. Threads processed: %d", int(count))
+        except Exception as exc:
+            logging.error("on_rg_check_finished error: %s", exc)
 
     def set_automatic_check_interval(self):
         interval, ok = QInputDialog.getInt(self, "Set Interval", "Enter interval in minutes:", min=1)
@@ -3408,13 +3578,48 @@ class ForumBotGUI(QMainWindow):
                                 f"Checking Rapidgator links for {len(self.selected_backup_threads)} selected threads...")
 
     def on_backup_thread_double_click(self, row, column):
-        """Open the thread URL when the thread title is double-clicked."""
-        if column == 0:  # Ensure only clicks on the Thread Title column are handled
-            thread_url = self.backup_threads_table.item(row, column).data(Qt.UserRole)
-            if thread_url:
-                webbrowser.open(thread_url)
-            else:
-                QMessageBox.warning(self, "URL Missing", "The selected thread does not have a valid URL.")
+        """Open backup thread in the active Selenium Chrome driver (exactly like Process Threads)."""
+        try:
+            title_item = self.backup_threads_table.item(row, 0)
+            id_item = self.backup_threads_table.item(row, 1)
+            title = (title_item.text() if title_item else "").strip()
+            raw_url = title_item.data(Qt.UserRole) if title_item else None
+            thread_id = (id_item.text() if id_item else "").strip()
+
+            # 1) حاول من الـUserRole ثم من الـID ثم من backup_threads
+            url = self._normalize_thread_url(raw_url) or self._build_thread_url_from_id(thread_id)
+            if not url:
+                info = (self.backup_threads or {}).get(title, {})
+                url = self._normalize_thread_url(info.get("thread_url")) or self._build_thread_url_from_id(
+                    info.get("thread_id"))
+
+            if not url:
+                QMessageBox.warning(self, "Invalid URL",
+                                    f"Cannot open thread: missing/invalid URL for '{title}'.")
+                return
+
+            # 2) زى Process Threads بالظبط: افتح فى Selenium driver
+            if not getattr(self.bot, "driver", None):
+                QMessageBox.warning(self, "Driver Error", "WebDriver is not available.")
+                return
+            if not url.lower().startswith(("http://", "https://")):
+                url = "http://" + url
+
+            logging.info(f"Opening backup thread in Chrome driver: {url}")
+            self.bot.driver.get(url)
+
+            # 3) خزّن الرابط المُحلول للمرات اللاحقة
+            if title_item:
+                title_item.setData(Qt.UserRole, url)
+            info = dict(self.backup_threads.get(title, {}) or {})
+            if url and info.get("thread_url") != url:
+                info["thread_url"] = url
+                self.backup_threads[title] = info
+                self.save_backup_threads_data()
+
+        except Exception as e:
+            logging.error(f"Error opening backup thread in WebDriver: {e}", exc_info=True)
+            QMessageBox.critical(self, "Error", f"Failed to open thread: {e}")
 
     def init_process_threads_view(self):
         """Initialize the 'Process Threads' view in the content area."""
