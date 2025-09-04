@@ -404,6 +404,103 @@ class RGLinkBatchWorker(QThread):
 
         self.finished.emit(checked)
 
+class ReplyBatchWorker(QThread):
+    """Post replies via HTTP in a background thread with rate limiting.
+
+    Signals:
+    - progress_update(OperationStatus): status updates for StatusWidget via orchestrator
+    - post_done(str, str, bool, str): (thread_id, final_url, ok, error)
+    - finished(int): total processed
+    """
+    progress_update = pyqtSignal(object)
+    post_done = pyqtSignal(str, str, bool, str)
+    finished = pyqtSignal(int)
+
+    def __init__(self, bot: SeleniumBot, tasks: list, rate_limit_secs: int = 30, parent: QObject | None = None):
+        super().__init__(parent)
+        self.bot = bot
+        self.tasks = list(tasks or [])
+        # Enforce a minimum of 30 seconds between replies
+        self.interval = max(30, int(rate_limit_secs or 30))
+        self._cancelled = False
+
+    def request_stop(self):
+        self._cancelled = True
+
+    def _make_label(self, task: dict) -> tuple[str, str]:
+        """Return (thread_id_str, label) for OperationStatus.item."""
+        tid = ""
+        label = ""
+        if isinstance(task, dict):
+            if task.get("thread_id") is not None:
+                tid = str(task.get("thread_id"))
+                label = task.get("title") or tid
+            elif task.get("thread_url"):
+                label = task.get("title") or task.get("thread_url")
+                # Try to extract t=<id>
+                try:
+                    from urllib.parse import urlparse, parse_qs
+                    q = parse_qs(urlparse(task.get("thread_url")).query)
+                    if "t" in q and q["t"]:
+                        tid = str(q["t"][0])
+                except Exception:
+                    pass
+        return tid or label or "thread", label or tid or "thread"
+
+    def run(self):
+        import time as _time
+        processed = 0
+
+        for t in self.tasks:
+            if self._cancelled:
+                break
+
+            # Normalize task dict
+            task = dict(t) if isinstance(t, dict) else {}
+            thread_key = task.get("thread_id") or task.get("thread_url")
+            message_html = task.get("message_html") or task.get("message") or ""
+            subject = task.get("subject") or ""
+
+            tid_str, label = self._make_label(task)
+
+            # Announce RUNNING
+            self.progress_update.emit(OperationStatus(
+                section="Posting", item=label, op_type=OpType.POST,
+                stage=OpStage.RUNNING, message="Posting reply", progress=0,
+            ))
+
+            ok = False
+            final_url = ""
+            error = ""
+            try:
+                res = self.bot.reply_via_requests(thread_key, message_html, subject)
+                ok = bool(res and res.get("ok"))
+                final_url = (res or {}).get("url", "")
+                error = (res or {}).get("error", "") or ("" if ok else "Unknown error")
+            except Exception as e:
+                ok = False
+                error = str(e)
+
+            # Announce completion
+            self.progress_update.emit(OperationStatus(
+                section="Posting", item=label, op_type=OpType.POST,
+                stage=(OpStage.FINISHED if ok else OpStage.ERROR),
+                message=("Posted" if ok else f"Error: {error}"), progress=100,
+            ))
+
+            self.post_done.emit(tid_str, final_url, ok, error)
+            processed += 1
+
+            # Respect interval between replies (except after last)
+            if processed < len(self.tasks):
+                left = self.interval
+                # Sleep in small chunks to be interruptible
+                while left > 0 and not self._cancelled:
+                    _time.sleep(min(1, left))
+                    left -= 1
+
+        self.finished.emit(processed)
+
 class ForumBotGUI(QMainWindow):
     # Define Qt signals for thread-safe UI updates
     thread_status_updated = pyqtSignal()
@@ -758,6 +855,49 @@ class ForumBotGUI(QMainWindow):
             self.sidebar.set_active_item_by_text("STATUS")
         else:
             self.content_area.setCurrentWidget(self.status_widget)
+
+    # ----------------------
+    # Reply batch management
+    # ----------------------
+    def start_reply_batch(self, tasks: list, rate_limit_secs: int = 30):
+        """Start a batch of HTTP replies using ReplyBatchWorker.
+
+        Args:
+            tasks: list of dicts with keys: thread_id or thread_url, message_html, subject, title(optional)
+            rate_limit_secs: desired seconds between replies (min 30 enforced)
+        """
+        try:
+            # Stop existing worker if any
+            if hasattr(self, "reply_worker") and self.reply_worker and self.reply_worker.isRunning():
+                try:
+                    self.reply_worker.request_stop()
+                except Exception:
+                    pass
+                self.reply_worker.wait(100)
+        except Exception:
+            pass
+
+        self.reply_worker = ReplyBatchWorker(self.bot, list(tasks or []), rate_limit_secs)
+
+        # Route progress through orchestrator via register_worker
+        self.register_worker(self.reply_worker)
+
+        # Connect result signals to GUI handlers
+        self.reply_worker.post_done.connect(self.on_reply_done, Qt.QueuedConnection)
+        self.reply_worker.finished.connect(self.on_reply_finished, Qt.QueuedConnection)
+
+        self.reply_worker.start()
+
+    def on_reply_done(self, thread_id: str, final_url: str, ok: bool, error: str):
+        """Handle completion of a single reply (GUI thread)."""
+        if ok:
+            logging.info(f"Reply posted for thread {thread_id}: {final_url}")
+        else:
+            logging.error(f"Reply failed for thread {thread_id}: {error}")
+
+    def on_reply_finished(self, count: int):
+        """Handle end of batch (GUI thread)."""
+        logging.info(f"Reply batch finished. Total processed: {count}")
 
     def apply_settings(self):
         # مسار التحميل الجديد

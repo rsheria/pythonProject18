@@ -852,6 +852,198 @@ class ForumBotSelenium:
         self.handle_exception("initializing WebDriver after multiple attempts",
                               WebDriverException("Failed to initialize WebDriver"))
         return False
+
+    # -------------------------------
+    # HTTP reply helpers (no Selenium)
+    # -------------------------------
+    def get_requests_session(self) -> requests.Session:
+        """Create a requests.Session that mirrors the Selenium driver's cookies and User-Agent.
+
+        Returns:
+            requests.Session: Session with forum cookies and headers set.
+        """
+        session = requests.Session()
+
+        # Default UA fallback
+        user_agent = "Mozilla/5.0"
+        try:
+            if hasattr(self, "driver") and self.driver:
+                try:
+                    user_agent = self.driver.execute_script("return navigator.userAgent") or user_agent
+                except Exception:
+                    # Some drivers may block JS if torn down; fallback to capabilities when possible
+                    caps = getattr(self.driver, "capabilities", {}) or {}
+                    ua_from_caps = caps.get("browserVersion") or caps.get("version")
+                    if ua_from_caps:
+                        user_agent = f"Mozilla/5.0 ({ua_from_caps})"
+        except Exception:
+            pass
+
+        session.headers.update({
+            "User-Agent": user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": self.forum_url,
+        })
+
+        # Copy cookies from Selenium to requests
+        try:
+            if hasattr(self, "driver") and self.driver:
+                for c in (self.driver.get_cookies() or []):
+                    try:
+                        session.cookies.set(
+                            c.get("name"),
+                            c.get("value"),
+                            domain=c.get("domain") or urlparse(self.forum_url).netloc,
+                            path=c.get("path") or "/",
+                        )
+                    except Exception:
+                        continue
+        except Exception:
+            # If cookies cannot be read, continue with empty jar (will likely fail auth)
+            pass
+
+        return session
+
+    def _extract_reply_form(self, html: str, base_url: str) -> tuple[str, dict]:
+        """Parse vBulletin new reply page and extract the postreply form.
+
+        Args:
+            html: HTML content of the newreply page.
+            base_url: Base URL to resolve relative form action.
+
+        Returns:
+            (action_url, hidden_fields) where hidden_fields is a dict of input name->value
+            collected primarily from type=hidden inputs.
+        """
+        soup = BeautifulSoup(html or "", "html.parser")
+
+        # Candidate forms: action contains 'postreply' OR has input name 'do' value 'postreply'
+        candidates = []
+        for form in soup.find_all("form"):
+            action = (form.get("action") or "").lower()
+            if "postreply" in action:
+                candidates.append(form)
+                continue
+            do_in = form.find("input", attrs={"name": "do"})
+            if do_in and str(do_in.get("value", "")).lower() == "postreply":
+                candidates.append(form)
+
+        target = candidates[0] if candidates else None
+        if target is None:
+            # Fallback: quick reply form by id
+            target = soup.find("form", id=lambda x: x and "qr" in x.lower())
+        if target is None:
+            # Last resort: first form on page
+            target = soup.find("form")
+
+        if target is None:
+            return "", {}
+
+        action_url = target.get("action") or ""
+        action_url = urljoin(base_url, action_url)
+
+        data: dict[str, str] = {}
+        # Collect hidden inputs (and include any named inputs with preset values)
+        for inp in target.find_all("input"):
+            name = inp.get("name")
+            if not name:
+                continue
+            typ = (inp.get("type") or "").lower()
+            if typ and typ != "hidden":
+                # Skip non-hidden unless they already have a predefined value we must carry
+                if inp.get("value") is None:
+                    continue
+            val = inp.get("value") or ""
+            data[name] = val
+
+        # Also carry textareas with predefined values (rare but safe)
+        for ta in target.find_all("textarea"):
+            name = ta.get("name")
+            if not name:
+                continue
+            if ta.string:
+                data[name] = ta.string
+
+        return action_url, data
+
+    def reply_via_requests(self, thread: str | int, message_html: str, subject: str = "") -> dict:
+        """Post a reply to a thread via HTTP requests (no Selenium).
+
+        Args:
+            thread: Thread ID (int/str) or full thread URL.
+            message_html: The message body (BBCode/HTML as required by forum config).
+            subject: Optional subject line.
+
+        Returns:
+            dict: {"ok": bool, "url": str, "error": str}
+        """
+        # Derive thread_id and base
+        thread_id = None
+        thread_url = None
+        try:
+            if isinstance(thread, (int,)) or (isinstance(thread, str) and thread.isdigit()):
+                thread_id = int(thread)
+            elif isinstance(thread, str):
+                thread_url = thread
+                pr = urlparse(thread_url)
+                # Try to extract t= from query (vB classic)
+                qs = pr.query or ""
+                m = re.search(r"(?:^|&)t=(\d+)(?:&|$)", qs)
+                if m:
+                    thread_id = int(m.group(1))
+        except Exception:
+            pass
+
+        if not thread_id:
+            return {"ok": False, "url": "", "error": "thread_id not found"}
+
+        base = self.forum_url.rstrip("/") + "/"
+        newreply_url = urljoin(base, f"newreply.php?do=newreply&t={thread_id}")
+
+        sess = self.get_requests_session()
+        try:
+            r1 = sess.get(newreply_url, allow_redirects=True, timeout=30)
+        except Exception as e:
+            return {"ok": False, "url": "", "error": f"GET newreply failed: {e}"}
+
+        if r1.status_code != 200:
+            return {"ok": False, "url": "", "error": f"GET newreply status {r1.status_code}"}
+
+        action_url, fields = self._extract_reply_form(r1.text, newreply_url)
+        if not action_url:
+            return {"ok": False, "url": "", "error": "Reply form not found"}
+
+        # Prepare payload
+        payload = dict(fields)
+        payload["do"] = "postreply"
+        payload.setdefault("t", str(thread_id))
+
+        # vBulletin typically expects 'message' for body and optional 'subject'
+        payload["message"] = message_html or ""
+        if subject:
+            payload["subject"] = subject
+
+        try:
+            r2 = sess.post(action_url, data=payload, allow_redirects=True, timeout=30)
+        except Exception as e:
+            return {"ok": False, "url": "", "error": f"POST postreply failed: {e}"}
+
+        # Success heuristics: redirected to showthread.php?p=<id> or contains success text
+        final_url = getattr(r2, "url", "") or action_url
+        ok = False
+        try:
+            if r2.history and any(resp.status_code in (301, 302, 303, 307, 308) for resp in r2.history):
+                ok = True
+            if ("showthread.php" in final_url and ("p=" in final_url or "#post" in final_url)):
+                ok = True
+            text_lower = (r2.text or "").lower()
+            if any(s in text_lower for s in ["your post", "thank you", "has been posted", "antwort", "erfolgreich"]):
+                ok = True
+        except Exception:
+            ok = False
+
+        return {"ok": ok, "url": final_url, "error": "" if ok else "unknown failure"}
     
     def safe_navigate(self, url, timeout=30):
         """
