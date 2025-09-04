@@ -467,6 +467,7 @@ class ReplyBatchWorker(QThread):
             self.progress_update.emit(OperationStatus(
                 section="Posting", item=label, op_type=OpType.POST,
                 stage=OpStage.RUNNING, message="Posting reply", progress=0,
+                thread_id=tid_str,
             ))
 
             ok = False
@@ -486,6 +487,7 @@ class ReplyBatchWorker(QThread):
                 section="Posting", item=label, op_type=OpType.POST,
                 stage=(OpStage.FINISHED if ok else OpStage.ERROR),
                 message=("Posted" if ok else f"Error: {error}"), progress=100,
+                thread_id=tid_str,
             ))
 
             self.post_done.emit(tid_str, final_url, ok, error)
@@ -889,11 +891,77 @@ class ForumBotGUI(QMainWindow):
         self.reply_worker.start()
 
     def on_reply_done(self, thread_id: str, final_url: str, ok: bool, error: str):
-        """Handle completion of a single reply (GUI thread)."""
-        if ok:
-            logging.info(f"Reply posted for thread {thread_id}: {final_url}")
-        else:
-            logging.error(f"Reply failed for thread {thread_id}: {error}")
+        """Handle completion of a single HTTP reply (GUI thread)."""
+        try:
+            if ok:
+                logging.info(f"Reply posted for thread {thread_id}: {final_url}")
+
+                # 1) علّم صف Process Threads كـ Posted + أخضر
+                #    أ. حاول تجيب الصف من الجدول بالـ Thread ID
+                row = None
+                try:
+                    for r in range(self.process_threads_table.rowCount()):
+                        item = self.process_threads_table.item(r, 2)  # عمود Thread ID
+                        if item and item.text().strip() == str(thread_id).strip():
+                            row = r
+                            break
+                except Exception:
+                    row = None
+
+                category_name = None
+                thread_title = None
+                if row is not None:
+                    # خُد العنوان والتصنيف من الجدول
+                    t_item = self.process_threads_table.item(row, 0)
+                    c_item = self.process_threads_table.item(row, 1)
+                    thread_title = t_item.text().strip() if t_item else ""
+                    category_name = c_item.text().strip() if c_item else ""
+
+                #    ب. لو ملقيناش الصف مباشرة، دوّر فى self.process_threads
+                if not thread_title or not category_name:
+                    for cat, threads in (self.process_threads or {}).items():
+                        for title, info in (threads or {}).items():
+                            # يدعم الشكل القديم والجديد (versions)
+                            if 'versions' in info and info['versions']:
+                                latest = info['versions'][-1]
+                                if str(latest.get('thread_id', '')).strip() == str(thread_id).strip():
+                                    category_name, thread_title = cat, title
+                                    break
+                            else:
+                                if str(info.get('thread_id', '')).strip() == str(thread_id).strip():
+                                    category_name, thread_title = cat, title
+                                    break
+                        if thread_title and category_name:
+                            break
+
+                #    ج. علّم الحالة كـ post_status=True واحفظ وجدّد الجدول (زى مسار السيلينيوم)
+                if thread_title and category_name:
+                    # تستخدم API الموجودة عشان تُحدّث وتعمل refresh بإشارة thread_status_updated
+                    self.mark_post_complete(category_name,
+                                            thread_title)  # يفعّل الـgreen عبر populate_process_threads_table
+                    # لو لقينا الصف أصلاً، لوّنه فوراً بصرياً
+                    if row is not None:
+                        self.mark_process_thread_row_green(row)
+                else:
+                    logging.warning(f"Could not map thread_id={thread_id} to a Process Threads row to mark as posted.")
+
+                # 2) خزّن الـfinal_url فى StatusWidget + علّم الصف كـ Posted (Stage/Message)
+                from PyQt5.QtCore import QMetaObject, Q_ARG, Qt
+                try:
+                    QMetaObject.invokeMethod(
+                        self.status_widget, "set_item_posted", Qt.QueuedConnection,
+                        Q_ARG(str, "Posting"), Q_ARG(str, str(thread_id)), Q_ARG(str, final_url or "")
+                    )
+                except Exception:
+                    # احتياط: نادى مباشر فى نفس الثريد
+                    try:
+                        self.status_widget.set_item_posted("Posting", str(thread_id), final_url or "")
+                    except Exception:
+                        pass
+            else:
+                logging.error(f"Reply failed for thread {thread_id}: {error}")
+        except Exception as e:
+            self.handle_exception("on_reply_done", e)
 
     def on_reply_finished(self, count: int):
         """Handle end of batch (GUI thread)."""

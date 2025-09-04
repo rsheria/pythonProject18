@@ -3,8 +3,8 @@ import logging
 import os
 import threading
 import time
-from PyQt5.QtCore import QTimer, Qt, QSize, QEvent, QObject, pyqtSignal, QItemSelectionModel, pyqtSlot
-from PyQt5.QtGui import QColor, QPalette, QBrush, QKeySequence
+from PyQt5.QtCore import QTimer, Qt, QSize, QEvent, QObject, pyqtSignal, QItemSelectionModel, pyqtSlot, QUrl
+from PyQt5.QtGui import QColor, QPalette, QBrush, QKeySequence, QDesktopServices
 
 from PyQt5.QtWidgets import (
     QAbstractScrollArea,
@@ -289,6 +289,7 @@ class StatusWidget(QWidget):
         self._row_last_stage = {}
         self._jd_links = {}
         self._upload_meta = {}
+        self._posted_urls: dict[tuple, str] = {}
         self._thread_steps = {}  # 🆕 تجميع خطوات كل Thread => {(section,item): {(op,host)->state}}
         self._bar_at = {}
         self._pending_by_key = {}
@@ -308,6 +309,12 @@ class StatusWidget(QWidget):
                     self._load_status_snapshot()
             except Exception:
                 pass
+
+        # Double-click to open final posted URL for Posting section
+        try:
+            self.table.itemDoubleClicked.connect(self._on_row_double_clicked, Qt.QueuedConnection)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     def _clear_filters(self) -> None:
@@ -1057,6 +1064,7 @@ class StatusWidget(QWidget):
             },
             "key": list(key_tuple) if key_tuple else None,  # (section,item,op_type)
             "jd_link": self._jd_links.get(tuple(key_tuple)) if key_tuple else "",
+            "posted_url": self._posted_urls.get(tuple(key_tuple)) if key_tuple else "",
         }
         tid = ""
         for t, r in self._row_by_tid.items():
@@ -1074,6 +1082,132 @@ class StatusWidget(QWidget):
 
             snap["upload_meta"] = meta
         return snap
+
+    # -------------------------------
+    # Posted URL + Double-Click Hooks
+    # -------------------------------
+    def _resolve_key_for_row(self, row: int) -> tuple | None:
+        try:
+            sec_col = self._col_map.get("Section")
+            item_col = self._col_map.get("Item")
+            if sec_col is None or item_col is None:
+                return None
+            sec = self.table.item(row, sec_col).text() if self.table.item(row, sec_col) else ""
+            itm = self.table.item(row, item_col).text() if self.table.item(row, item_col) else ""
+            if not sec or not itm:
+                return None
+            return (sec, itm, "POST")
+        except Exception:
+            return None
+
+    def _row_for_key(self, key: tuple | None) -> int | None:
+        if not key:
+            return None
+        row = self._row_by_key.get(tuple(key))
+        if row is not None:
+            return row
+        # Fallback: search by section+item
+        try:
+            sec, itm, _ = key
+        except Exception:
+            return None
+        sec_col = self._col_map.get("Section")
+        item_col = self._col_map.get("Item")
+        if sec_col is None or item_col is None:
+            return None
+        for r in range(self.table.rowCount()):
+            s = self.table.item(r, sec_col).text() if self.table.item(r, sec_col) else ""
+            i = self.table.item(r, item_col).text() if self.table.item(r, item_col) else ""
+            if s == sec and i == itm:
+                return r
+        return None
+
+    def set_item_posted(self, section: str, key, url: str) -> None:
+        """Mark a row as posted and store its final URL.
+
+        Args:
+            section: e.g., "Posting".
+            key: either a full key tuple (section,item,op_type) or a string
+                 representing a thread_id or the item label.
+            url: the final URL to open on double-click.
+        """
+        try:
+            # Determine key tuple
+            key_tuple = None
+            if isinstance(key, (tuple, list)) and len(key) == 3:
+                key_tuple = (str(key[0]), str(key[1]), str(key[2]))
+            elif isinstance(key, str):
+                # Try TID mapping first
+                row = self._row_by_tid.get(key)
+                if row is None:
+                    row = self._row_by_tid.get(f"{section}:{key}")
+                if row is not None:
+                    kt = self._resolve_key_for_row(row)
+                    if kt:
+                        key_tuple = kt
+                else:
+                    # Assume it's the item label
+                    key_tuple = (section, key, "POST")
+            if key_tuple is None:
+                return
+
+            row = self._row_for_key(key_tuple)
+            if row is None:
+                return
+
+            # Store URL
+            self._posted_urls[tuple(key_tuple)] = url or ""
+
+            # Update UI: set Stage/Message and apply green background
+            model = self.table.model()
+            stage_col = self._col_map.get("Stage")
+            msg_col = self._col_map.get("Message")
+            if stage_col is not None:
+                self._ensure_item(row, stage_col).setText("Finished")
+                idx = model.index(row, stage_col)
+                model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
+            if msg_col is not None:
+                self._ensure_item(row, msg_col).setText("Posted")
+                idx = model.index(row, msg_col)
+                model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
+
+            # Also set a status key for consistency with other delegates
+            item_col = self._col_map.get("Item")
+            if item_col is not None:
+                it = self._ensure_item(row, item_col)
+                it.setData(Qt.UserRole, "status-posted")
+                idx = model.index(row, item_col)
+                model.dataChanged.emit(idx, idx, [Qt.DisplayRole, Qt.UserRole])
+
+            # Recolor row using FINISHED stage
+            try:
+                self._color_row(row, OpStage.FINISHED)
+                tl = model.index(row, 0)
+                br = model.index(row, self.table.columnCount() - 1)
+                model.dataChanged.emit(tl, br, [Qt.BackgroundRole])
+            except Exception:
+                pass
+
+            self._schedule_status_save()
+        except Exception:
+            log.error("Failed to set item posted", exc_info=True)
+
+    def _on_row_double_clicked(self, item):
+        try:
+            row = item.row()
+            sec_col = self._col_map.get("Section")
+            if sec_col is None:
+                return
+            sec = self.table.item(row, sec_col).text() if self.table.item(row, sec_col) else ""
+            if sec != "Posting":
+                return
+            key_tuple = self._resolve_key_for_row(row)
+            url = self._posted_urls.get(tuple(key_tuple)) if key_tuple else None
+            if not url:
+                return
+            QDesktopServices.openUrl(QUrl(url))
+        except Exception:
+            log.error("Failed to open posted URL on double-click", exc_info=True)
 
     def _table_snapshot(self) -> dict:
         """ياخد Snapshot لكل الصفوف الحالية keyed بنفس مفاتيحك الداخلية."""
@@ -1168,6 +1302,7 @@ class StatusWidget(QWidget):
             self._row_by_tid.clear()
             self._jd_links.clear()
             self._upload_meta.clear()
+            self._posted_urls.clear()
             self._thread_steps.clear()
             self._bar_at.clear()
 
@@ -1229,6 +1364,9 @@ class StatusWidget(QWidget):
                     link = rdata.get("jd_link") or ""
                     if link:
                         self._jd_links[key] = link
+                    purl = rdata.get("posted_url") or ""
+                    if purl:
+                        self._posted_urls[key] = purl
                     meta = rdata.get("upload_meta") or {}
                     if meta:
                         self._upload_meta[key] = dict(meta)
@@ -1807,4 +1945,3 @@ class StatusWidget(QWidget):
                 pass
         except Exception as exc:
             log.error("[StatusWidget] on_progress_update error: %s", exc)
-
