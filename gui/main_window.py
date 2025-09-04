@@ -2326,9 +2326,19 @@ class ForumBotGUI(QMainWindow):
                 "Re-upload Successful",
                 f"Files re-uploaded and Keeplinks link updated for '{thread_title}'.",
             )
+            if getattr(self, '_reupload_queue', []):
+                self._start_next_reupload_from_queue()
         except Exception as e:
             logging.error(f"Error in on_reupload_upload_complete: {e}", exc_info=True)
             QMessageBox.warning(self, "Error", f"An unexpected error occurred: {e}")
+
+    def _start_next_reupload_from_queue(self):
+        queue = getattr(self, '_reupload_queue', [])
+        if not queue:
+            return
+        title, info = queue.pop(0)
+        self._reupload_queue = queue
+        self.reupload_thread_files(title, info)
 
     def reupload_dead_rapidgator_links(self):
         indexes = self.backup_threads_table.selectionModel().selectedRows()
@@ -2641,6 +2651,8 @@ class ForumBotGUI(QMainWindow):
                 logging.warning("No Rapidgator API token found; skipping Rapidgator link checks for ALL threads.")
                 return
 
+        new_dead_threads = []
+
         for row in range(self.backup_threads_table.rowCount()):
             thread_title_item = self.backup_threads_table.item(row, 0)
             if not thread_title_item:
@@ -2653,6 +2665,7 @@ class ForumBotGUI(QMainWindow):
 
             rapidgator_links = [link.strip() for link in rapidgator_cell_item.text().split("\n") if link.strip()]
             thread_info = self.backup_threads.get(thread_title, {})
+            prev_dead = set(thread_info.get('dead_rapidgator_links', []))
             thread_info['dead_rapidgator_links'] = []
             dead_found = False
 
@@ -2675,10 +2688,26 @@ class ForumBotGUI(QMainWindow):
                     rapidgator_cell_item.setData(Qt.UserRole, None)
                     thread_info['rapidgator_status'] = 'none'
 
+            new_added = set(thread_info['dead_rapidgator_links']) - prev_dead
+            if new_added:
+                new_dead_threads.append((thread_title, list(new_added)))
+
             self.backup_threads[thread_title] = thread_info
             logging.info(f"Checked Rapidgator links for '{thread_title}' (dead_found={dead_found}).")
 
         self.save_backup_threads_data()
+
+        if new_dead_threads:
+            msg_box = QtMessageBox(self)
+            msg_box.setWindowTitle("Dead Links Detected")
+            msg_box.setText("Some Rapidgator links were found dead.")
+            reupload_btn = msg_box.addButton("Re-upload now", QtMessageBox.ActionRole)
+            msg_box.addButton(QtMessageBox.Ok)
+            msg_box.exec_()
+            if msg_box.clickedButton() == reupload_btn:
+                self._reupload_queue = [(t, self.backup_threads.get(t, {})) for t, _ in new_dead_threads]
+                self._start_next_reupload_from_queue()
+
         QApplication.processEvents()
         logging.info("Finished checking Rapidgator links for all threads.")
 
