@@ -113,13 +113,10 @@ class AutoProcessWorker(QRunnable):
             self._emit(OpType.PROCESS, OpStage.RUNNING, "Splitting…", progress=35)
 
             # Package ------------------------------------------------------
-            archives = fp.package_assets(
-                book_dir, audio_dir, self.snapshot.title, assets
-            )
-            if archives.get("book"):
+            archives = fp.package_assets(book_dir, audio_dir, self.snapshot.title, assets)
+            if assets.get("book_files"):
                 self._emit(OpType.PROCESS, OpStage.RUNNING, "RAR (Book)…", progress=55)
-            if archives.get("audio"):
-                self._emit(OpType.PROCESS, OpStage.RUNNING, "RAR (Audio)…", progress=75)
+            self._emit(OpType.PROCESS, OpStage.RUNNING, "RAR (Audio)…", progress=75)
 
             # Upload stage -------------------------------------------------
             self._emit(OpType.UPLOAD, OpStage.RUNNING, "Uploading…")
@@ -130,16 +127,18 @@ class AutoProcessWorker(QRunnable):
             hosts = ["rapidgator", "ddownload", "katfile", "nitroflare", "mega"]
             links_audio: dict[str, list[str]] = {}
             for host in hosts:
-                links_audio[host] = [
-                    f"https://{host}.example/{tid}/audio{i+1}"
-                    for i, _ in enumerate(archives.get("audio", []))
-                ]
-            links_book: dict[str, list[str]] = {}
-            for host in hosts:
-                links_book[host] = [
-                    f"https://{host}.example/{tid}/book{i+1}"
-                    for i, _ in enumerate(archives.get("book", []))
-                ]
+                for idx, _ in enumerate(archives.get("audio", []), 1):
+                    links_audio.setdefault(host, []).append(
+                        f"https://{host}.example/{tid}/audio{idx}"
+                    )
+            links_book: dict[str, dict[str, list[str]]] = {}
+            for fmt, files in archives.get("book", {}).items():
+                links_book[fmt] = {}
+                for host in hosts:
+                    links_book[fmt][host] = [
+                        f"https://{host}.example/{tid}/{fmt}{i+1}"
+                        for i, _ in enumerate(files)
+                    ]
 
             payload = {
                 "thread_id": tid,
