@@ -56,9 +56,11 @@ def run_diagnostics() -> Path:
     if winrar:
         logger.info("WinRAR: %s", winrar)
     else:  # pragma: no cover - configuration issue
+        # Do not abort startup if WinRAR is missing. Some environments may not
+        # have it installed, but the application can still run. Log a warning
+        # so users know packaging features will be unavailable.
         msg = "WinRAR executable not found – please install WinRAR and ensure it is on PATH"
-        logger.error(msg)
-        raise FileNotFoundError(msg)
+        logger.warning(msg)
 
     try:
         import selenium  # type: ignore
