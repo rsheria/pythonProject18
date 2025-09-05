@@ -254,34 +254,37 @@ def apply_links_template(template: str, links_dict: dict) -> str:
 def render_links_german(links: dict, keeplinks: str | None = None) -> str:
     """Render final BBCode blocks for audio/book links in German.
 
-    Parameters
-    ----------
-    links: dict
-        Structure with optional ``audio`` and ``book`` mappings.  Each host
-        key should use the normalized host names (rapidgator, ddownload, etc.).
-    keeplinks: str | None
-        Optional Keeplinks URL to show above other links.
+    ``links`` should contain ``audio`` and/or ``book`` dictionaries using the
+    normalized host keys (``rapidgator``, ``ddownload`` …).  The resulting BBCode
+    uses ``[size=3]`` everywhere and host abbreviations as link texts.
     """
 
     lines: list[str] = []
     if keeplinks:
-        lines.append(f"[size=3][url={keeplinks}]Keeplinks[/url][/size]")
+        lines.append(f"[center][size=3][url={keeplinks}]Keeplinks[/url][/size][/center]")
 
-    lines.append("[size=3][b]Download-Links[/b][/size]")
+    lines.append("[center][size=3][b]Download-Links[/b][/size][/center]")
 
     audio = links.get("audio", {}) if isinstance(links, dict) else {}
     if audio:
-        lines.append("[size=3][b]Hörbuch-Teile[/b][/size]")
-        for host in HOST_ORDER:
+        lines.append("[center][size=3][b]Hörbuch-Teile[/b][/size][/center]")
+        for host in HOST_ORDER + ["mega"]:
             urls = audio.get(host) or []
             if not urls:
                 continue
-            parts = " ".join(f"[url={u}]{i:02d}[/url]" for i, u in enumerate(urls, 1))
-            lines.append(f"[size=3]{HOST_TOKENS[host]}: {parts}[/size]")
+            if len(urls) == 1:
+                part = f"[url={urls[0]}]{HOST_TOKENS[host]}[/url]"
+            else:
+                part = " ".join(
+                    f"[url={u}]{i:02d}[/url]" for i, u in enumerate(urls, 1)
+                )
+            lines.append(
+                f"[center][size=3]{HOST_TOKENS[host]}: {part}[/size][/center]"
+            )
 
     book = links.get("book", {}) if isinstance(links, dict) else {}
     if book:
-        lines.append("[size=3][b]Buchdateien[/b][/size]")
+        lines.append("[center][size=3][b]Buchdateien[/b][/size][/center]")
         fmt_parts: list[str] = []
         fmt_order = ["pdf", "epub", "azw3", "mobi", "djvu"]
         for fmt in fmt_order:
@@ -296,9 +299,11 @@ def render_links_german(links: dict, keeplinks: str | None = None) -> str:
                 url = urls[0] if isinstance(urls, list) else urls
                 host_parts.append(f"[url={url}]{HOST_TOKENS[host]}[/url]")
             if host_parts:
-                fmt_parts.append(f"{fmt.upper()}: {' - '.join(host_parts)}")
+                fmt_parts.append(f"{fmt.upper()}: {'-'.join(host_parts)}")
         if fmt_parts:
-            lines.append("[size=3]" + " — ".join(fmt_parts) + "[/size]")
+            lines.append(
+                "[center][size=3]" + " — ".join(fmt_parts) + "[/size][/center]"
+            )
 
     return "\n".join(lines).strip()
 

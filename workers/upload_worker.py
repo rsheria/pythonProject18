@@ -217,7 +217,7 @@ class UploadWorker(QThread):
             }
             status = OperationStatus(
                 section=self.section,
-                item=self.files[0].name if self.files else "",
+                item=self.package_label,
                 op_type=OpType.UPLOAD,
                 stage=OpStage.FINISHED,
                 message="Complete",
@@ -488,7 +488,7 @@ class UploadWorker(QThread):
     def _emit_final_statuses(self, row: int) -> None:
         """Emit final OperationStatus for each host so the UI recolors."""
         cancel_stage = getattr(OpStage, "CANCELLED", OpStage.ERROR)
-        item_name = self.files[0].name if self.files else ""
+        item_name = self.package_label
         for i, host in enumerate(self.hosts):
             res = self.upload_results.get(i, {}).get("status")
             if res == "success":
@@ -547,7 +547,7 @@ class UploadWorker(QThread):
                     # Emit a RUNNING status for UI recolor
                     status = OperationStatus(
                         section=self.section,
-                        item=self.files[0].name if self.files else "",
+                        item=self.package_label,
                         op_type=OpType.UPLOAD,
                         stage=OpStage.RUNNING,
                         message="Retrying",
@@ -593,7 +593,7 @@ class UploadWorker(QThread):
                 }
                 status = OperationStatus(
                     section=self.section,
-                    item=self.files[0].name if self.files else "",
+                    item=self.package_label,
                     op_type=OpType.UPLOAD,
                     stage=OpStage.FINISHED,
                     message="Complete",
@@ -629,7 +629,7 @@ class UploadWorker(QThread):
                     }
                     status = OperationStatus(
                         section=self.section,
-                        item=self.files[0].name if self.files else "",
+                        item=self.package_label,
                         op_type=OpType.UPLOAD,
                         stage=OpStage.FINISHED,
                         message="Complete",
@@ -645,7 +645,7 @@ class UploadWorker(QThread):
                 self.upload_results[i] = {"status": "not_attempted", "urls": []}
                 status = OperationStatus(
                     section=self.section,
-                    item=self.files[0].name if self.files else "",
+                    item=self.package_label,
                     op_type=OpType.UPLOAD,
                     stage=OpStage.RUNNING,
                     message="Resuming",
@@ -678,7 +678,7 @@ class UploadWorker(QThread):
                 }
                 status = OperationStatus(
                     section=self.section,
-                    item=self.files[0].name if self.files else "",
+                    item=self.package_label,
                     op_type=OpType.UPLOAD,
                     stage=OpStage.FINISHED,
                     message="Complete",
@@ -701,7 +701,7 @@ class UploadWorker(QThread):
                 self.upload_results[i] = {"status": "not_attempted", "urls": []}
                 status = OperationStatus(
                     section=self.section,
-                    item=self.files[0].name if self.files else "",
+                    item=self.package_label,
                     op_type=OpType.UPLOAD,
                     stage=OpStage.RUNNING,
                     message="Re-uploading",
@@ -734,7 +734,7 @@ class UploadWorker(QThread):
                 }
                 status = OperationStatus(
                     section=self.section,
-                    item=self.files[0].name if self.files else "",
+                    item=self.package_label,
                     op_type=OpType.UPLOAD,
                     stage=OpStage.FINISHED,
                     message="Complete",

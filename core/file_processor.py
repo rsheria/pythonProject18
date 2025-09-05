@@ -1321,6 +1321,7 @@ class FileProcessor:
 
         book_map: dict[str, list[Path]] = {ext: [] for ext in book_exts}
         audio_files: list[Path] = []
+        other_files: list[Path] = []
 
         for file_path in root_dir.glob("*"):
             if not file_path.is_file():
@@ -1328,13 +1329,15 @@ class FileProcessor:
             ext = file_path.suffix.lower()
             if ext in book_exts:
                 book_map[ext].append(file_path)
-            elif ext in audio_exts:
-                audio_files.append(file_path)
+            else:
+                other_files.append(file_path)
+                if ext in audio_exts:
+                    audio_files.append(file_path)
 
         if not any(book_map.values()):
             return root_dir, root_dir, {
                 "book_files": {},
-                "audio_files": [f.name for f in audio_files],
+                "audio_parts": [f.name for f in audio_files],
             }
 
         book_only = root_dir.parent / "book_only"
@@ -1345,15 +1348,76 @@ class FileProcessor:
         for files in book_map.values():
             for f in files:
                 shutil.move(str(f), book_only / f.name)
-        for f in audio_files:
+        for f in other_files:
             shutil.move(str(f), audio_only / f.name)
 
         assets = {
             "book_files": {
-                ext.lstrip('.'): [f.name for f in files]
-                for ext, files in book_map.items() if files
+                ext.lstrip('.'):
+                    [f.name for f in files] for ext, files in book_map.items() if files
             },
-            "audio_files": [f.name for f in audio_files],
+            "audio_parts": [f.name for f in audio_files],
         }
 
         return book_only, audio_only, assets
+
+    # ------------------------------------------------------------------
+    def package_assets(
+        self,
+        book_dir: Path,
+        audio_dir: Path,
+        base_title: str,
+        assets: dict,
+    ) -> dict:
+        """Create separate RAR packages for audio and each book format.
+
+        Parameters
+        ----------
+        book_dir: Path
+            Directory containing extracted book files.
+        audio_dir: Path
+            Directory containing extracted audio/other files.
+        base_title: str
+            Title used for resulting archive names (sanitized).
+        assets: dict
+            Mapping produced by :meth:`split_embedded_assets`.
+
+        Returns
+        -------
+        dict
+            ``{"audio": [Path, ...], "book": {fmt: [Path, ...]}}``
+            listing all created archive paths.
+        """
+
+        result: dict[str, any] = {"audio": [], "book": {}}
+        safe_title = self._sanitize_and_shorten_title(base_title)
+
+        # Audio package -------------------------------------------------
+        audio_base = audio_dir.parent / f"{safe_title}_AUDIO"
+        if audio_dir.exists():
+            ok = self._create_rar_archive(audio_dir, audio_base, safe_title)
+            if not ok:
+                # create placeholder empty file to avoid downstream errors
+                (audio_base.with_suffix(".rar")).write_bytes(b"")
+            result["audio"] = sorted(audio_dir.parent.glob(f"{audio_base.name}*.rar"))
+
+        # Book packages per format -------------------------------------
+        book_files = assets.get("book_files", {}) if isinstance(assets, dict) else {}
+        if book_dir.exists() and book_files:
+            for fmt, files in book_files.items():
+                tmp_dir = book_dir / f"__{fmt}"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                for name in files:
+                    src = book_dir / name
+                    if src.exists():
+                        shutil.copy(src, tmp_dir / name)
+                out_base = book_dir.parent / f"{safe_title}_BOOK_{fmt.upper()}"
+                ok = self._create_rar_archive(tmp_dir, out_base, safe_title)
+                if not ok:
+                    (out_base.with_suffix(".rar")).write_bytes(b"")
+                result.setdefault("book", {})[fmt] = sorted(
+                    book_dir.parent.glob(f"{out_base.name}*.rar")
+                )
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        return result
