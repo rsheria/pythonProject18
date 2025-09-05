@@ -5,6 +5,8 @@ import logging
 from PyQt5.QtCore import QThread, pyqtSignal
 from threading import Lock
 
+from models.operation_status import OperationStatus, OpStage, OpType
+
 class WorkerThread(QThread):
     """
     يتابع المواضيع (threads) في فئة معيّنة:
@@ -13,6 +15,7 @@ class WorkerThread(QThread):
     """
     update_threads = pyqtSignal(str, dict)  # category_name, new_threads
     finished = pyqtSignal(str)             # category_name when done
+    progress_update = pyqtSignal(object)   # OperationStatus
 
     def __init__(self, bot, bot_lock, category_manager,
                  category_name, date_filters, page_from, page_to, mode):
@@ -26,6 +29,7 @@ class WorkerThread(QThread):
         self.page_from       = page_from
         self.page_to         = page_to
         self.mode            = mode
+        self.section         = "Tracking"
 
         self.is_paused       = False
         self.is_cancelled    = False
@@ -35,6 +39,20 @@ class WorkerThread(QThread):
     def run(self):
         """Main thread loop for monitoring the category."""
         logging.info(f"🚀 Starting WorkerThread for category '{self.category_name}'")
+
+        # Notify UI that this category has been queued
+        try:
+            self.progress_update.emit(
+                OperationStatus(
+                    section=self.section,
+                    item=self.category_name,
+                    op_type=OpType.POST,
+                    stage=OpStage.QUEUED,
+                    progress=0,
+                )
+            )
+        except Exception:
+            pass
         
         # WORKER STATE RESET: Ensure clean start state
         logging.info(f" Resetting worker state for '{self.category_name}'")
@@ -123,74 +141,81 @@ class WorkerThread(QThread):
                 logging.info(f"🛑 WorkerThread for '{self.category_name}' stopping, aborting navigation")
                 return []
 
-        # Initialize variables
         lock_acquired = False
-        success = False
-        
+        threads = {}
+
         try:
-            # 🔒 SAFE BOT LOCK: Try to acquire lock with timeout to prevent infinite hanging
             logging.info(f"🔒 Attempting to acquire bot_lock for '{self.category_name}'")
-            
-            lock_acquired = self.bot_lock.tryLock(10000)  # Wait max 10 seconds for lock
+            lock_acquired = self.bot_lock.tryLock(10000)
             if not lock_acquired:
-                logging.error(f"❌ Failed to acquire bot_lock within 10 seconds for '{self.category_name}' - aborting")
-                return []
-            
+                logging.error(
+                    f"❌ Failed to acquire bot_lock within 10 seconds for '{self.category_name}' - aborting"
+                )
+                self.progress_update.emit(
+                    OperationStatus(
+                        section=self.section,
+                        item=self.category_name,
+                        op_type=OpType.POST,
+                        stage=OpStage.ERROR,
+                        message="driver busy",
+                    )
+                )
+                return {}
+
             logging.info(f"✅ Successfully acquired bot_lock for '{self.category_name}'")
-            
-            # Double-check if thread should stop while waiting for lock
-            with self.control_lock:
-                if not self._is_running or self.is_cancelled:
-                    logging.info(f"🛑 WorkerThread for '{self.category_name}' stopping after acquiring bot lock")
-                    return []
-            
-            # 🔍 HEALTH CHECK: Verify WebDriver is responsive before navigation
-            logging.info(f"🔍 Checking WebDriver health before tracking '{self.category_name}'")
-            try:
-                # Simple health check - get current URL to verify driver responsiveness
-                current_url = self.bot.driver.current_url if hasattr(self.bot, 'driver') and self.bot.driver else None
-                if current_url:
-                    logging.info(f"✅ WebDriver is responsive for '{self.category_name}' (current URL: {current_url[:50]}...)")
-                else:
-                    logging.warning(f"⚠️ WebDriver may not be initialized for '{self.category_name}'")
-            except Exception as driver_check_error:
-                logging.error(f"❌ WebDriver health check failed for '{self.category_name}': {driver_check_error}")
-                # Don't return here - let navigate_to_url handle driver issues
-            
-            success = self.bot.navigate_to_url(
-                base_url,
-                df_param,
-                page_from,
-                page_to
-            )
-        except Exception as e:
-            logging.error(f"Exception during navigating to URL: {e}", exc_info=True)
-            return []
+
+            total_pages = page_to - page_from + 1
+            for idx, page in enumerate(range(page_from, page_to + 1), 1):
+                with self.control_lock:
+                    if not self._is_running or self.is_cancelled:
+                        logging.info(
+                            f"🛑 WorkerThread for '{self.category_name}' stopping after acquiring bot lock"
+                        )
+                        break
+                try:
+                    success = self.bot.navigate_to_url(
+                        base_url,
+                        df_param,
+                        page,
+                        page,
+                    )
+                    if success:
+                        threads.update(self.bot.extracted_threads.copy())
+                except Exception as e:
+                    logging.error(
+                        f"Exception during navigating to URL: {e}", exc_info=True
+                    )
+                    self.progress_update.emit(
+                        OperationStatus(
+                            section=self.section,
+                            item=self.category_name,
+                            op_type=OpType.POST,
+                            stage=OpStage.ERROR,
+                            message=str(e)[:80],
+                        )
+                    )
+                    return {}
+                self.progress_update.emit(
+                    OperationStatus(
+                        section=self.section,
+                        item=self.category_name,
+                        op_type=OpType.POST,
+                        stage=OpStage.RUNNING,
+                        message=f"Scanning p {idx}/{total_pages}",
+                        progress=int(idx * 100 / total_pages),
+                    )
+                )
         finally:
-            # 🔓 CRITICAL: Always unlock bot_lock if it was acquired
             if lock_acquired:
                 try:
                     self.bot_lock.unlock()
                     logging.info(f"🔓 Released bot_lock for '{self.category_name}'")
                 except Exception as unlock_error:
-                    logging.warning(f"⚠️ Failed to release bot_lock for '{self.category_name}': {unlock_error}")
+                    logging.warning(
+                        f"⚠️ Failed to release bot_lock for '{self.category_name}': {unlock_error}"
+                    )
 
-        if not success:
-            logging.warning(f"Failed to navigate to '{self.category_name}' with filters '{df_param}'")
-            return []
-
-        # Check again if thread should stop before returning results
-        with self.control_lock:
-            if not self._is_running or self.is_cancelled:
-                logging.info(f"🛑 WorkerThread for '{self.category_name}' stopping, discarding results")
-                return []
-
-        # Extract and return whatever the bot found
-        try:
-            return self.bot.extracted_threads.copy()
-        except Exception as e:
-            logging.error(f"Error copying extracted threads: {e}")
-            return []
+        return threads
 
     def track_once(self):
         logging.info(f"🔍 WorkerThread: Starting track_once for '{self.category_name}'")
@@ -241,20 +266,103 @@ class WorkerThread(QThread):
             if hasattr(signal, 'alarm'):
                 signal.alarm(0)
         
-        logging.info(f"🌐 Navigating to category '{self.category_name}' with filters: {self.date_filters}, pages: {self.page_from}-{self.page_to}")
+        logging.info(
+            f"🌐 Navigating to category '{self.category_name}' with filters: {self.date_filters}, pages: {self.page_from}-{self.page_to}"
+        )
         new_threads = self.navigate_to_category(self.page_from, self.page_to)
-        
+
         if new_threads:
-            logging.info(f"✅ Found {len(new_threads)} new threads for '{self.category_name}'")
+            logging.info(
+                f"✅ Found {len(new_threads)} new threads for '{self.category_name}'"
+            )
+            for tid, info in new_threads.items():
+                title = info.get("thread_title") or str(tid)
+                url = info.get("thread_url", "")
+                label = f"{self.category_name} — {title}"
+                self.progress_update.emit(
+                    OperationStatus(
+                        section=self.section,
+                        item=label,
+                        op_type=OpType.POST,
+                        stage=OpStage.RUNNING,
+                        message="Found",
+                        progress=0,
+                        thread_id=str(tid),
+                    )
+                )
+                self.progress_update.emit(
+                    OperationStatus(
+                        section=self.section,
+                        item=label,
+                        op_type=OpType.POST,
+                        stage=OpStage.FINISHED,
+                        message="Done",
+                        progress=100,
+                        thread_id=str(tid),
+                        final_url=url,
+                    )
+                )
             self.update_threads.emit(self.category_name, new_threads)
         else:
-            logging.info(f"ℹ️ No new threads found for '{self.category_name}'")
+            logging.info(
+                f"ℹ️ No new threads found for '{self.category_name}'"
+            )
+
+        summary = f"{len(new_threads)} new / 0 updated / 0 skipped" if new_threads else "0 new / 0 updated / 0 skipped"
+        self.progress_update.emit(
+            OperationStatus(
+                section=self.section,
+                item=self.category_name,
+                op_type=OpType.POST,
+                stage=OpStage.FINISHED,
+                message=summary,
+                progress=100,
+            )
+        )
 
     def keep_tracking(self):
         logging.info(f"WorkerThread: Keep tracking '{self.category_name}'.")
         new_threads = self.navigate_to_category(1, 1)
         if new_threads:
+            for tid, info in new_threads.items():
+                title = info.get("thread_title") or str(tid)
+                url = info.get("thread_url", "")
+                label = f"{self.category_name} — {title}"
+                self.progress_update.emit(
+                    OperationStatus(
+                        section=self.section,
+                        item=label,
+                        op_type=OpType.POST,
+                        stage=OpStage.RUNNING,
+                        message="Found",
+                        progress=0,
+                        thread_id=str(tid),
+                    )
+                )
+                self.progress_update.emit(
+                    OperationStatus(
+                        section=self.section,
+                        item=label,
+                        op_type=OpType.POST,
+                        stage=OpStage.FINISHED,
+                        message="Done",
+                        progress=100,
+                        thread_id=str(tid),
+                        final_url=url,
+                    )
+                )
             self.update_threads.emit(self.category_name, new_threads)
+        summary = f"{len(new_threads)} new / 0 updated / 0 skipped" if new_threads else "0 new / 0 updated / 0 skipped"
+        self.progress_update.emit(
+            OperationStatus(
+                section=self.section,
+                item=self.category_name,
+                op_type=OpType.POST,
+                stage=OpStage.FINISHED,
+                message=summary,
+                progress=100,
+            )
+        )
 
     def stop(self):
         """لإيقاف الحلقة في وضع Keep Tracking."""
@@ -337,6 +445,7 @@ class MegaThreadsWorkerThread(QThread):
     """
     update_megathreads = pyqtSignal(str, dict)  # category_name, new_versions
     finished          = pyqtSignal(str)
+    progress_update   = pyqtSignal(object)
 
     def __init__(self, bot, bot_lock, category_manager,
                  category_name, date_filters, mode,
@@ -355,9 +464,19 @@ class MegaThreadsWorkerThread(QThread):
         self.is_paused        = False
         self.is_cancelled     = False
         self.control_lock     = Lock()
+        self.section          = "Megathreads"
 
     def run(self):
         try:
+            self.progress_update.emit(
+                OperationStatus(
+                    section=self.section,
+                    item=self.category_name,
+                    op_type=OpType.POST,
+                    stage=OpStage.QUEUED,
+                    progress=0,
+                )
+            )
             while self._is_running and not self.is_cancelled:
                 if self.mode == 'Track Once':
                     self.track_once()
@@ -400,6 +519,15 @@ class MegaThreadsWorkerThread(QThread):
                 logging.error(
                     f"❌ Failed to acquire bot_lock for megathreads '{self.category_name}'"
                 )
+                self.progress_update.emit(
+                    OperationStatus(
+                        section=self.section,
+                        item=self.category_name,
+                        op_type=OpType.POST,
+                        stage=OpStage.ERROR,
+                        message="driver busy",
+                    )
+                )
                 return
 
             # 🔍 HEALTH CHECK: Verify WebDriver is responsive before navigation
@@ -431,18 +559,81 @@ class MegaThreadsWorkerThread(QThread):
                     f"No URL for megathreads '{self.category_name}'"
                 )
                 return
-            try:
-                new_versions = self.bot.navigate_to_megathread_category(
-                    url, self.date_filters, self.page_from, self.page_to
+            total_pages = self.page_to - self.page_from + 1
+            all_versions = {}
+            for idx, page in enumerate(
+                range(self.page_from, self.page_to + 1), 1
+            ):
+                try:
+                    new_versions = self.bot.navigate_to_megathread_category(
+                        url, self.date_filters, page, page
+                    )
+                    if isinstance(new_versions, dict):
+                        all_versions.update(new_versions)
+                except Exception as e:
+                    logging.error(
+                        f"Error in navigate_to_megathread_category: {e}",
+                        exc_info=True,
+                    )
+                    self.progress_update.emit(
+                        OperationStatus(
+                            section=self.section,
+                            item=self.category_name,
+                            op_type=OpType.POST,
+                            stage=OpStage.ERROR,
+                            message=str(e)[:80],
+                        )
+                    )
+                    return
+                self.progress_update.emit(
+                    OperationStatus(
+                        section=self.section,
+                        item=self.category_name,
+                        op_type=OpType.POST,
+                        stage=OpStage.RUNNING,
+                        message=f"Scanning p {idx}/{total_pages}",
+                        progress=int(idx * 100 / total_pages),
+                    )
                 )
-            except Exception as e:
-                logging.error(
-                    f"Error in navigate_to_megathread_category: {e}",
-                    exc_info=True,
+            if all_versions:
+                for title, info in all_versions.items():
+                    label = f"{self.category_name} — {info.get('version_title', title)}"
+                    url = info.get("thread_url", "")
+                    self.progress_update.emit(
+                        OperationStatus(
+                            section=self.section,
+                            item=label,
+                            op_type=OpType.POST,
+                            stage=OpStage.RUNNING,
+                            message="Found",
+                            progress=0,
+                        )
+                    )
+                    self.progress_update.emit(
+                        OperationStatus(
+                            section=self.section,
+                            item=label,
+                            op_type=OpType.POST,
+                            stage=OpStage.FINISHED,
+                            message="Done",
+                            progress=100,
+                            final_url=url,
+                        )
+                    )
+                self.update_megathreads.emit(self.category_name, all_versions)
+                summary = f"{len(all_versions)} new / 0 updated / 0 skipped"
+            else:
+                summary = "0 new / 0 updated / 0 skipped"
+            self.progress_update.emit(
+                OperationStatus(
+                    section=self.section,
+                    item=self.category_name,
+                    op_type=OpType.POST,
+                    stage=OpStage.FINISHED,
+                    message=summary,
+                    progress=100,
                 )
-                return
-            if isinstance(new_versions, dict) and new_versions:
-                self.update_megathreads.emit(self.category_name, new_versions)
+            )
         finally:
             if lock_acquired:
                 try:
@@ -470,12 +661,21 @@ class MegaThreadsWorkerThread(QThread):
                 logging.error(
                     f"❌ Failed to acquire bot_lock for megathreads '{self.category_name}'"
                 )
+                self.progress_update.emit(
+                    OperationStatus(
+                        section=self.section,
+                        item=self.category_name,
+                        op_type=OpType.POST,
+                        stage=OpStage.ERROR,
+                        message="driver busy",
+                    )
+                )
                 return
 
             key = f"Megathreads_{self.category_name}"
             existing = self.gui.megathreads_process_threads.get(key, {})
             if not isinstance(existing, dict):
-                return
+                existing = {}
             try:
                 updates = self.bot.check_megathreads_for_updates(existing)
             except Exception as e:
@@ -483,9 +683,55 @@ class MegaThreadsWorkerThread(QThread):
                     f"Error in check_megathreads_for_updates: {e}",
                     exc_info=True,
                 )
+                self.progress_update.emit(
+                    OperationStatus(
+                        section=self.section,
+                        item=self.category_name,
+                        op_type=OpType.POST,
+                        stage=OpStage.ERROR,
+                        message=str(e)[:80],
+                    )
+                )
                 return
             if isinstance(updates, dict) and updates:
+                for title, info in updates.items():
+                    label = f"{self.category_name} — {info.get('version_title', title)}"
+                    url = info.get("thread_url", "")
+                    self.progress_update.emit(
+                        OperationStatus(
+                            section=self.section,
+                            item=label,
+                            op_type=OpType.POST,
+                            stage=OpStage.RUNNING,
+                            message="Found",
+                            progress=0,
+                        )
+                    )
+                    self.progress_update.emit(
+                        OperationStatus(
+                            section=self.section,
+                            item=label,
+                            op_type=OpType.POST,
+                            stage=OpStage.FINISHED,
+                            message="Done",
+                            progress=100,
+                            final_url=url,
+                        )
+                    )
                 self.update_megathreads.emit(self.category_name, updates)
+                summary = f"{len(updates)} new / 0 updated / 0 skipped"
+            else:
+                summary = "0 new / 0 updated / 0 skipped"
+            self.progress_update.emit(
+                OperationStatus(
+                    section=self.section,
+                    item=self.category_name,
+                    op_type=OpType.POST,
+                    stage=OpStage.FINISHED,
+                    message=summary,
+                    progress=100,
+                )
+            )
         finally:
             if lock_acquired:
                 try:

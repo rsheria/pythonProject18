@@ -1159,35 +1159,36 @@ class StatusWidget(QWidget):
             # Store URL
             self._posted_urls[tuple(key_tuple)] = url or ""
 
-            # Update UI: set Stage/Message and apply green background
-            model = self.table.model()
-            stage_col = self._col_map.get("Stage")
-            msg_col = self._col_map.get("Message")
-            if stage_col is not None:
-                self._ensure_item(row, stage_col).setText("Finished")
-                idx = model.index(row, stage_col)
-                model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
-            if msg_col is not None:
-                self._ensure_item(row, msg_col).setText("Posted")
-                idx = model.index(row, msg_col)
-                model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
+            if section == "Posting":
+                # Update UI: set Stage/Message and apply green background
+                model = self.table.model()
+                stage_col = self._col_map.get("Stage")
+                msg_col = self._col_map.get("Message")
+                if stage_col is not None:
+                    self._ensure_item(row, stage_col).setText("Finished")
+                    idx = model.index(row, stage_col)
+                    model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
+                if msg_col is not None:
+                    self._ensure_item(row, msg_col).setText("Posted")
+                    idx = model.index(row, msg_col)
+                    model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
 
-            # Also set a status key for consistency with other delegates
-            item_col = self._col_map.get("Item")
-            if item_col is not None:
-                it = self._ensure_item(row, item_col)
-                it.setData(Qt.UserRole, "status-posted")
-                idx = model.index(row, item_col)
-                model.dataChanged.emit(idx, idx, [Qt.DisplayRole, Qt.UserRole])
+                # Also set a status key for consistency with other delegates
+                item_col = self._col_map.get("Item")
+                if item_col is not None:
+                    it = self._ensure_item(row, item_col)
+                    it.setData(Qt.UserRole, "status-posted")
+                    idx = model.index(row, item_col)
+                    model.dataChanged.emit(idx, idx, [Qt.DisplayRole, Qt.UserRole])
 
-            # Recolor row using FINISHED stage
-            try:
-                self._color_row(row, OpStage.FINISHED)
-                tl = model.index(row, 0)
-                br = model.index(row, self.table.columnCount() - 1)
-                model.dataChanged.emit(tl, br, [Qt.BackgroundRole])
-            except Exception:
-                pass
+                # Recolor row using FINISHED stage
+                try:
+                    self._color_row(row, OpStage.FINISHED)
+                    tl = model.index(row, 0)
+                    br = model.index(row, self.table.columnCount() - 1)
+                    model.dataChanged.emit(tl, br, [Qt.BackgroundRole])
+                except Exception:
+                    pass
 
             self._schedule_status_save()
         except Exception:
@@ -1200,8 +1201,6 @@ class StatusWidget(QWidget):
             if sec_col is None:
                 return
             sec = self.table.item(row, sec_col).text() if self.table.item(row, sec_col) else ""
-            if sec != "Posting":
-                return
             key_tuple = self._resolve_key_for_row(row)
             url = self._posted_urls.get(tuple(key_tuple)) if key_tuple else None
             if not url:

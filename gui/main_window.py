@@ -8659,6 +8659,7 @@ class ForumBotGUI(QMainWindow):
             worker.finished.connect(
                 self.megathreads_monitoring_finished, Qt.QueuedConnection
             )
+            self.register_worker(worker)
             self.megathreads_workers[category_name] = worker
             worker.start()
 
@@ -8959,8 +8960,9 @@ class ForumBotGUI(QMainWindow):
             )
 
             # 2) شبّك الإشارات
-            worker.update_threads.connect(self.handle_new_threads)
-            worker.finished.connect(self.monitoring_finished)
+            worker.update_threads.connect(self.handle_new_threads, Qt.QueuedConnection)
+            worker.finished.connect(self.monitoring_finished, Qt.QueuedConnection)
+            self.register_worker(worker)
 
             # 3) خزّنه علشان ما يتمش حذفه من الـ Python GC
             self.category_workers[category_name] = worker
