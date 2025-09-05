@@ -814,42 +814,42 @@ class DownloadWorker(QThread):
                 info["thread_title"],
                 password,
             )
-
+            # Normalize processing result => List[Path]
+            produced_paths: list[Path] = []
             if processed:
                 if isinstance(processed, tuple):
                     root_dir, produced_files = processed
-                    produced_files = [str(p) for p in produced_files]
-                    main = produced_files[0] if produced_files else None
-                else:
+                    try:
+                        produced_paths = [Path(p) for p in produced_files]
+                    except Exception:
+                        produced_paths = [Path(str(p)) for p in produced_files]
+                elif isinstance(processed, (list, tuple, set)):
+                    produced_paths = [Path(p) for p in processed]
                     root_dir = td
-                    produced_files = processed
-                    main = max(produced_files, key=lambda p: os.path.getsize(p))
+                elif isinstance(processed, (str, Path)):
+                    produced_paths = [Path(processed)]
+                    root_dir = td
+                else:
+                    produced_paths = []
+
+            if produced_paths:
+                # Choose main (largest) for persistence
+                try:
+                    main_path = max(produced_paths, key=lambda p: p.stat().st_size if p.exists() else -1)
+                except ValueError:
+                    main_path = produced_paths[0]
                 self.file_progress.emit(row, 100)
                 entry = self.gui.process_threads[info["category_name"]][
                     info["thread_title"]
                 ]
-                if main:
-                    entry.update({"file_name": os.path.basename(main), "file_path": str(main)})
+                if main_path:
+                    entry.update({"file_name": os.path.basename(str(main_path)), "file_path": str(main_path)})
                 self.gui.save_process_threads_data()
                 logging.info(
-                    "Processed main file for '%s': %s", info["thread_title"], main
+                    "Processed files for '%s': %d", info["thread_title"], len(produced_paths)
                 )
-                if isinstance(processed, tuple):
-                    logging.info("ROOT=%s, FILES=%d", root_dir, len(produced_files))
-                    try:
-                        hosts = getattr(self.gui, "active_upload_hosts", [])
-                        upload_worker = UploadWorker(
-                            self.bot,
-                            row,
-                            root_dir,
-                            thread_id,
-                            upload_hosts=hosts,
-                            files=produced_files,
-                        )
-                        self.gui.register_worker(upload_worker)
-                        upload_worker.start()
-                    except Exception as e:
-                        logging.error("Failed to enqueue upload: %s", e)
+                # Do NOT auto-upload here in normal Download flow.
+                # Upload is triggered explicitly by the user or by Auto-Process.
                 proc_status.stage = OpStage.FINISHED
                 proc_status.message = "Processing complete"
                 proc_status.progress = 100

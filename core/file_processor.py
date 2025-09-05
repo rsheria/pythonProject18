@@ -335,7 +335,7 @@ class FileProcessor:
                     file_path, thread_dir, thread_title, password
                 )
                 if new_archives:
-                    successful_files.extend(new_archives)
+                    successful_files.extend(str(p) for p in new_archives)
                     self.processed_files.update(Path(arch) for arch in new_archives)
                     logging.info(f"Successfully processed archive: {file_path}")
                 else:
@@ -366,7 +366,7 @@ class FileProcessor:
                     file_path.stem,  # final name = original base
                     password,
                 )
-                final_files.extend(new_archives)
+                final_files.extend(str(p) for p in new_archives)
             else:
                 # Non-archive => compress into .rar named after the original base
                 processed_file = self.handle_other_file(
@@ -384,14 +384,20 @@ class FileProcessor:
         download_folder: Path,
         thread_title: str,
         password: str | None = None,
-    ) -> List[str] | tuple[Path, List[Path]]:
-        """Handle archive processing with format preservation and splitting.
+    ) -> List[Path]:
+        """Transactional packaging that splits audio vs. book assets.
 
-        When ``recompress_mode`` is set to ``"never"`` the archive is extracted
-        and normalized but not recompressed, returning a tuple of
-        ``(root_folder, files)`` where ``files`` lists all extracted paths.
-        In other modes, new archives are created and a simple list of their
-        paths is returned.
+        Steps:
+        - Extract + flatten into a single root under a temp extracted dir.
+        - Detect embedded assets and split into book-only and audio-only dirs.
+        - Package to separate archives in the thread directory (download_folder):
+          * Audio => "TITLE (Hörbuch).partNN.rar" or single, per config
+          * Book  => one RAR per format => "TITLE (E-Book - {FMT}).rar"
+        - Verify all produced files exist and size > 0.
+        - If verification passes: remove only the extracted temp dir and the
+          original archive(s). Otherwise: do not delete anything.
+
+        Returns a list of produced archive Paths.
         """
         extract_dir = None
         try:
@@ -400,6 +406,7 @@ class FileProcessor:
             thread_title = self._sanitize_and_shorten_title(thread_title)
 
             if self.recompress_mode == "never":
+                # Even in never mode, we normalize, split and return the file list (no re-archiving).
                 is_multipart = False
                 all_parts = []
                 if (not is_zip) and re.search(r"\.part\d+\.rar$", archive_path.name, re.IGNORECASE):
@@ -412,11 +419,13 @@ class FileProcessor:
                 root, files = self.extract_and_normalize(
                     archive_path, download_folder, download_folder.name
                 )
+                # No packaging; return extracted files as Paths.
+                # Remove original archives only if extraction succeeded.
                 if is_multipart and all_parts:
                     self._safely_remove_original_archives(archive_path, all_parts)
                 else:
                     self._safely_remove_original_archives(archive_path, None)
-                return root, files
+                return files
 
             # Check if multi-part .partX.rar
             is_multipart = False
@@ -471,69 +480,37 @@ class FileProcessor:
 
             root_folder = self.ensure_single_root(extract_dir, thread_title)
 
+            # Split and package assets into thread_dir (download_folder)
+            book_dir, audio_dir, assets = self.split_embedded_assets(root_folder)
 
-            # Re-archive everything => final name based on thread_title
-            unique_id = uuid.uuid4().hex
-            temp_suffix = f"_temp_{unique_id}"
-            temp_archive_base = download_folder / f"{thread_title}{temp_suffix}"
+            # Package directly to the download_folder so outputs survive cleanup
+            packs = self.package_assets(book_dir, audio_dir, thread_title, assets, output_dir=download_folder)
 
-            success = False
-            for attempt in range(max_retries):
-                if is_zip:
-                    success = self._create_zip_archive(
-                        root_folder, temp_archive_base, thread_title
-                    )
-                else:
-                    success = self._create_rar_archive(
-                        root_folder, temp_archive_base, thread_title
-                    )
-                if success:
-                    break
-                if attempt < max_retries - 1:
-                    time.sleep(2)
+            produced: list[Path] = []
+            produced.extend([p for p in packs.get("audio", [])])
+            for fmt_list in (packs.get("book", {}) or {}).values():
+                produced.extend(fmt_list or [])
 
-            if not success:
-                raise Exception("Archive creation failed after all attempts")
+            # Verify produced outputs
+            if not produced:
+                raise Exception("No archives were produced by package_assets")
+            invalid = [p for p in produced if (not Path(p).exists()) or Path(p).stat().st_size <= 0]
+            if invalid:
+                names = ", ".join(str(p) for p in invalid)
+                raise Exception(f"Produced archives failed verification: {names}")
 
-            # Gather newly created archives
-            new_archives = []
-            if is_zip:
-                new_archives.extend(
-                    glob.glob(str(download_folder / f"{thread_title}{temp_suffix}.z*"))
-                )
-            else:
-                new_archives.extend(
-                    glob.glob(str(download_folder / f"{thread_title}{temp_suffix}.part*.rar"))
-                )
-                if not new_archives:
-                    single_rar = download_folder / f"{thread_title}{temp_suffix}.rar"
-                    if single_rar.exists():
-                        new_archives.append(str(single_rar))
-
-            if not new_archives:
-                raise Exception("No temporary archive parts were created")
-
-            # Remove original archive(s)
+            # Safe cleanup only after verification
             if is_multipart and all_parts:
                 self._safely_remove_original_archives(archive_path, all_parts)
             else:
                 self._safely_remove_original_archives(archive_path, None)
-
-            # Cleanup extracted directory
             self._safely_remove_directory(extract_dir)
-
-            produced: list[str] = []
-            if rar_map.get("audio"):
-                produced.extend(str(p) for p in rar_map["audio"])
-            if rar_map.get("book"):
-                produced.extend(str(p) for p in rar_map["book"])
 
             return produced
 
         except Exception as e:
             logging.error(f"Error processing archive: {str(e)}")
-            if extract_dir and extract_dir.exists():
-                self._safely_remove_directory(extract_dir)
+            # Transactional policy: on error, keep extracted/original for debugging
             return []
 
     def handle_other_file(
@@ -1371,6 +1348,7 @@ class FileProcessor:
         audio_dir: Path,
         base_title: str,
         assets: dict,
+        output_dir: Path | None = None,
     ) -> dict:
         """Create separate RAR packages for audio and each book format.
 
@@ -1395,14 +1373,17 @@ class FileProcessor:
         result: dict[str, any] = {"audio": [], "book": {}}
         safe_title = self._sanitize_and_shorten_title(base_title)
 
+        # Determine output directory (defaults to parent of sources)
+        out_dir = Path(output_dir) if output_dir else audio_dir.parent
+
         # Audio package -------------------------------------------------
-        audio_base = audio_dir.parent / f"{safe_title}_AUDIO"
+        audio_base = out_dir / f"{safe_title} (Hörbuch)"
         if audio_dir.exists():
             ok = self._create_rar_archive(audio_dir, audio_base, safe_title)
             if not ok:
                 # create placeholder empty file to avoid downstream errors
                 (audio_base.with_suffix(".rar")).write_bytes(b"")
-            result["audio"] = sorted(audio_dir.parent.glob(f"{audio_base.name}*.rar"))
+            result["audio"] = sorted(out_dir.glob(f"{audio_base.name}*.rar"))
 
         # Book packages per format -------------------------------------
         book_files = assets.get("book_files", {}) if isinstance(assets, dict) else {}
@@ -1414,12 +1395,12 @@ class FileProcessor:
                     src = book_dir / name
                     if src.exists():
                         shutil.copy(src, tmp_dir / name)
-                out_base = book_dir.parent / f"{safe_title}_BOOK_{fmt.upper()}"
+                out_base = out_dir / f"{safe_title} (E-Book - {fmt.upper()})"
                 ok = self._create_rar_archive(tmp_dir, out_base, safe_title)
                 if not ok:
                     (out_base.with_suffix(".rar")).write_bytes(b"")
                 result.setdefault("book", {})[fmt] = sorted(
-                    book_dir.parent.glob(f"{out_base.name}*.rar")
+                    out_dir.glob(f"{out_base.name}*.rar")
                 )
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 

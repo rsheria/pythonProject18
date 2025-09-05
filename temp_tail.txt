@@ -1,0 +1,200 @@
+            if self._is_archive_file(file_path):
+                # Process it like single item but use the file's original stem
+                new_archives = self.handle_archive_file(
+                    file_path,
+                    thread_dir,
+                    file_path.stem,  # final name = original base
+                    password,
+                )
+                final_files.extend(new_archives)
+            else:
+                # Non-archive => compress into .rar named after the original base
+                processed_file = self.handle_other_file(
+                    file_path,
+                    thread_dir,
+                    file_path.stem
+                )
+                if processed_file:
+                    final_files.append(processed_file)
+        return final_files
+
+    def handle_archive_file(
+        self,
+        archive_path: Path,
+        download_folder: Path,
+        thread_title: str,
+        password: str | None = None,
+    ) -> List[str] | tuple[Path, List[Path]]:
+        """Handle archive processing with format preservation and splitting.
+
+        When ``recompress_mode`` is set to ``"never"`` the archive is extracted
+        and normalized but not recompressed, returning a tuple of
+        ``(root_folder, files)`` where ``files`` lists all extracted paths.
+        In other modes, new archives are created and a simple list of their
+        paths is returned.
+        """
+        extract_dir = None
+        try:
+            original_format = archive_path.suffix.lower()
+            is_zip = (original_format == '.zip')
+            thread_title = self._sanitize_and_shorten_title(thread_title)
+
+            if self.recompress_mode == "never":
+                is_multipart = False
+                all_parts = []
+                if (not is_zip) and re.search(r"\.part\d+\.rar$", archive_path.name, re.IGNORECASE):
+                    base_name = re.sub(r"\.part\d+\.rar$", "", archive_path.name, flags=re.IGNORECASE)
+                    part1_path = download_folder / f"{base_name}.part1.rar"
+                    if part1_path.exists():
+                        archive_path = part1_path
+                        is_multipart = True
+                        all_parts = sorted(download_folder.glob(f"{base_name}.part*.rar"))
+                root, files = self.extract_and_normalize(
+                    archive_path, download_folder, download_folder.name
+                )
+                if is_multipart and all_parts:
+                    self._safely_remove_original_archives(archive_path, all_parts)
+                else:
+                    self._safely_remove_original_archives(archive_path, None)
+                return root, files
+
+            # Check if multi-part .partX.rar
+            is_multipart = False
+            all_parts = []
+            if (not is_zip) and re.search(r'\.part\d+\.rar$', archive_path.name, re.IGNORECASE):
+                base_name = re.sub(r'\.part\d+\.rar$', '', archive_path.name, flags=re.IGNORECASE)
+                part1_path = download_folder / f"{base_name}.part1.rar"
+                if part1_path.exists():
+                    archive_path = part1_path
+                    is_multipart = True
+                    all_parts = sorted(download_folder.glob(f"{base_name}.part*.rar"))
+                    logging.info(f"Detected multi-part archive with {len(all_parts)} parts")
+
+            if is_multipart:
+                original_name = base_name
+            else:
+                original_name = archive_path.stem
+            
+            extract_dir_name = f"{original_name}_extracted"
+            extract_dir = download_folder / extract_dir_name
+            if extract_dir.exists():
+                self._safely_remove_directory(extract_dir)
+            extract_dir.mkdir(exist_ok=True)
+
+            max_retries = 3
+            extract_success = False
+            for attempt in range(max_retries):
+                logging.info(
+                    f"Extracting {original_format} archive: {archive_path} (Attempt {attempt + 1})"
+                )
+                extract_success = self._extract_archive(
+                    archive_path, extract_dir, password
+                )
+                if extract_success:
+                    self._flatten_extracted_directory(extract_dir)
+                    break
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+
+            if not extract_success:
+                raise Exception("Archive extraction failed after all attempts")
+
+            self._modify_files_for_hash_safely(extract_dir)
+            self._remove_banned_files_safely(extract_dir)
+
+            total_size = sum(
+                f.stat().st_size
+                for f in extract_dir.rglob('*')
+                if f.is_file() and f.name.lower() != 'desktop.ini'
+            )
+            logging.info(f"Total size of extracted files: {total_size / self.GIGABYTE:.2f} GB")
+
+            root_folder = self.ensure_single_root(extract_dir, thread_title)
+
+
+            # Re-archive everything => final name based on thread_title
+            unique_id = uuid.uuid4().hex
+            temp_suffix = f"_temp_{unique_id}"
+            temp_archive_base = download_folder / f"{thread_title}{temp_suffix}"
+
+            success = False
+            for attempt in range(max_retries):
+                if is_zip:
+                    success = self._create_zip_archive(
+                        root_folder, temp_archive_base, thread_title
+                    )
+                else:
+                    success = self._create_rar_archive(
+                        root_folder, temp_archive_base, thread_title
+                    )
+                if success:
+                    break
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+
+            if not success:
+                raise Exception("Archive creation failed after all attempts")
+
+            # Gather newly created archives
+            new_archives = []
+            if is_zip:
+                new_archives.extend(
+                    glob.glob(str(download_folder / f"{thread_title}{temp_suffix}.z*"))
+                )
+            else:
+                new_archives.extend(
+                    glob.glob(str(download_folder / f"{thread_title}{temp_suffix}.part*.rar"))
+                )
+                if not new_archives:
+                    single_rar = download_folder / f"{thread_title}{temp_suffix}.rar"
+                    if single_rar.exists():
+                        new_archives.append(str(single_rar))
+
+            if not new_archives:
+                raise Exception("No temporary archive parts were created")
+
+            # Remove original archive(s)
+            if is_multipart and all_parts:
+                self._safely_remove_original_archives(archive_path, all_parts)
+            else:
+                self._safely_remove_original_archives(archive_path, None)
+
+            # Cleanup extracted directory
+            self._safely_remove_directory(extract_dir)
+
+            produced: list[str] = []
+            if rar_map.get("audio"):
+                produced.extend(str(p) for p in rar_map["audio"])
+            if rar_map.get("book"):
+                produced.extend(str(p) for p in rar_map["book"])
+
+            return produced
+
+        except Exception as e:
+            logging.error(f"Error processing archive: {str(e)}")
+            if extract_dir and extract_dir.exists():
+                self._safely_remove_directory(extract_dir)
+            return []
+
+    def handle_other_file(
+        self,
+        file_path: Path,
+        target_dir: Path,
+        thread_title: str
+    ) -> Optional[str]:
+        """
+        For a single file scenario, re-archive a non-archive file
+        into a .rar named after thread_title, then remove the original file.
+        (Also used in multi-distinct logic, with thread_title = original filename's stem.)
+        """
+        try:
+            archive_path = target_dir / f"{thread_title}.rar"
+
+            # Add random bytes for hash
+            if file_path.stat().st_size >= 10:
+                try:
+                    with open(file_path, 'ab') as f:
+                        f.write(os.urandom(random.randint(1, 32)))
+                except Exception as e:
+                    logging.warning(f"Could not modify file hash for {file_path}: {str(e)}")
+
