@@ -26,8 +26,7 @@ def run_diagnostics() -> Path:
     logger.setLevel(logging.INFO)
     handler = logging.FileHandler(log_file, encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    if not any(isinstance(h, logging.FileHandler) and h.baseFilename == str(log_file)
-               for h in logger.handlers):
+    if not any(isinstance(h, logging.FileHandler) and h.baseFilename == str(log_file) for h in logger.handlers):
         logger.addHandler(handler)
 
     logger.info("=== Diagnostics Start ===")
@@ -52,9 +51,18 @@ def run_diagnostics() -> Path:
     java = shutil.which("java")
     logger.info("Java runtime: %s", java or "not found")
 
+    # WinRAR must be available for the packaging pipeline
+    winrar = shutil.which("winrar") or shutil.which("rar")
+    if winrar:
+        logger.info("WinRAR: %s", winrar)
+    else:  # pragma: no cover - configuration issue
+        msg = "WinRAR executable not found – please install WinRAR and ensure it is on PATH"
+        logger.error(msg)
+        raise FileNotFoundError(msg)
+
     try:
         import selenium  # type: ignore
-        logger.info("Selenium: %s", getattr(selenium, '__version__', 'unknown'))
+        logger.info("Selenium: %s", getattr(selenium, "__version__", "unknown"))
     except Exception:
         logger.warning("Selenium not installed")
 

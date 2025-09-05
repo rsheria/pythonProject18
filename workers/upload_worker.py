@@ -42,6 +42,7 @@ class UploadWorker(QThread):
             keeplinks_url: Optional[str] = None,
             cancel_event=None,
             files: Optional[List[str]] = None,
+            package_label: str = "audio",
     ):
         super().__init__()  # QThread init
         self.bot = bot
@@ -50,6 +51,7 @@ class UploadWorker(QThread):
         self.thread_id = thread_id
         self.config = bot.config  # Store config reference for quick access
         self.section = section
+        self.package_label = package_label
         # إذا كنا نعيد الرفع لروابط موجودة مسبقاً في Keeplinks،
         # نمرّر الرابط القديم كي لا يتم إنشاء رابط جديد.
         self.keeplinks_url = keeplinks_url
@@ -479,6 +481,7 @@ class UploadWorker(QThread):
 
         return {
             "thread_id": str(getattr(self, "thread_id", "")),
+            "package": self.package_label,
             **canonical,
         }
 

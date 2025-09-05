@@ -1,5 +1,7 @@
 import logging
+import shutil
 import time
+from pathlib import Path
 from PyQt5.QtCore import QObject, QRunnable, pyqtSignal
 
 from models.job_model import AutoProcessJob, SelectedRowSnapshot
@@ -82,6 +84,21 @@ class AutoProcessWorker(QRunnable):
                 self.jd_client.download(self.snapshot.url, self.snapshot.working_dir)
             else:
                 time.sleep(0.1)  # simulate work
+
+            # Extraction + split --------------------------------------------
+            from core.file_processor import FileProcessor
+
+            self._emit(OpType.PROCESS, OpStage.RUNNING, "Extracting…", progress=10)
+            fp = FileProcessor(self.snapshot.working_dir, shutil.which("winrar") or "winrar")
+            self._emit(OpType.PROCESS, OpStage.RUNNING, "Detecting book files…", progress=20)
+            root_dir = Path(self.snapshot.working_dir)
+            book_dir, audio_dir, assets = fp.split_embedded_assets(root_dir)
+            self._emit(OpType.PROCESS, OpStage.RUNNING, "Splitting packages…", progress=35)
+            if assets.get("book_files"):
+                self._emit(OpType.PROCESS, OpStage.RUNNING, "RAR (Book)…", progress=55)
+                self._emit(OpType.PROCESS, OpStage.RUNNING, "RAR (Audio)…", progress=75)
+            else:
+                self._emit(OpType.PROCESS, OpStage.RUNNING, "RAR (Audio)…", progress=75)
 
             # Upload stage ---------------------------------------------------
             logging.info(

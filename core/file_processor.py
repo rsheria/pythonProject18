@@ -1298,3 +1298,62 @@ class FileProcessor:
     def _is_archive_file(file_path: Path) -> bool:
         """Check if file is an archive (rar, zip, 7z)."""
         return file_path.suffix.lower() in {'.rar', '.zip', '.7z'}
+
+    # ------------------------------------------------------------------
+    def split_embedded_assets(self, root_dir: Path) -> tuple[Path, Path, dict]:
+        """Split extracted content into book and audio folders if needed.
+
+        Parameters
+        ----------
+        root_dir: Path
+            Directory containing the flattened files of the release.
+
+        Returns
+        -------
+        tuple(Path, Path, dict)
+            Paths to ``book_only`` and ``audio_only`` directories plus a
+            metadata mapping of detected assets.  If no book files were
+            detected, both returned paths will point to ``root_dir``.
+        """
+
+        book_exts = {".pdf", ".epub", ".azw3", ".mobi", ".djvu"}
+        audio_exts = {".mp3", ".m4b", ".flac", ".ogg", ".wav"}
+
+        book_map: dict[str, list[Path]] = {ext: [] for ext in book_exts}
+        audio_files: list[Path] = []
+
+        for file_path in root_dir.glob("*"):
+            if not file_path.is_file():
+                continue
+            ext = file_path.suffix.lower()
+            if ext in book_exts:
+                book_map[ext].append(file_path)
+            elif ext in audio_exts:
+                audio_files.append(file_path)
+
+        if not any(book_map.values()):
+            return root_dir, root_dir, {
+                "book_files": {},
+                "audio_files": [f.name for f in audio_files],
+            }
+
+        book_only = root_dir.parent / "book_only"
+        audio_only = root_dir.parent / "audio_only"
+        book_only.mkdir(parents=True, exist_ok=True)
+        audio_only.mkdir(parents=True, exist_ok=True)
+
+        for files in book_map.values():
+            for f in files:
+                shutil.move(str(f), book_only / f.name)
+        for f in audio_files:
+            shutil.move(str(f), audio_only / f.name)
+
+        assets = {
+            "book_files": {
+                ext.lstrip('.'): [f.name for f in files]
+                for ext, files in book_map.items() if files
+            },
+            "audio_files": [f.name for f in audio_files],
+        }
+
+        return book_only, audio_only, assets
