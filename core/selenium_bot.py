@@ -856,6 +856,149 @@ class ForumBotSelenium:
     # -------------------------------
     # HTTP reply helpers (no Selenium)
     # -------------------------------
+    def _get_driver_user_agent(self) -> str:
+        try:
+            return self.driver.execute_script("return navigator.userAgent") or ""
+        except Exception:
+            return ""
+
+    def _debug_log_identity_and_sync(self, session):
+        """Log Selenium vs requests identity and cookie coverage; force UA match if needed."""
+        import logging
+        try:
+            caps = getattr(self.driver, "capabilities", {}) or {}
+        except Exception:
+            caps = {}
+        driver_ua = self._get_driver_user_agent()  # already defined
+        req_ua = session.headers.get("User-Agent", "")
+
+        logging.info(
+            f"🧭 WebDriver: {caps.get('browserName', '?')} {caps.get('browserVersion', '?')} | UA={driver_ua[:120]}")
+        logging.info(f"📦 Requests: UA={req_ua[:120]}")
+
+        if driver_ua and (req_ua != driver_ua):
+            session.headers["User-Agent"] = driver_ua
+            logging.info("✅ Forced requests User-Agent to match WebDriver UA")
+
+        # Compare cookie presence/domains
+        names = ["bbuserid", "bbsessionhash", "bbpassword", "bblastvisit", "bblastactivity"]
+        try:
+            wd_list = self.driver.get_cookies() or []
+        except Exception:
+            wd_list = []
+        wd = {c.get("name"): c for c in wd_list}
+        rq = {c.name: c for c in session.cookies}
+
+        def _dom(obj):
+            try:
+                return getattr(obj, "domain", None) or obj.get("domain") or ""
+            except Exception:
+                return ""
+
+        for n in names:
+            logging.info(
+                f"🔑 {n}: webdriver={'set' if n in wd else '(missing)'}@{(wd.get(n) or {}).get('domain', '-')} | "
+                f"requests={'set' if n in rq else '(missing)'}@{_dom(rq.get(n))}"
+            )
+
+        uid = (self._get_cookie_value(session, "bbuserid") or "").strip()
+        sh = (self._get_cookie_value(session, "bbsessionhash") or "").strip()
+        logging.info(f"🔒 Sync check → bbuserid={uid or '(none)'} | bbsessionhash={'set' if sh else '(missing)'}")
+
+    def _sync_cookies_to_requests(self, session, *, add_www_alias: bool = True) -> None:
+        from requests.cookies import create_cookie
+        from urllib.parse import urlparse
+        if not getattr(self, "driver", None):
+            return
+        # Determine our target host to decide if aliasing is needed
+        try:
+            host = (urlparse(getattr(self, "forum_url", "").strip() or "").hostname or "").lstrip(".")
+        except Exception:
+            host = ""
+        base_host = host[4:] if host.startswith("www.") else host
+
+        try:
+            cookies = self.driver.get_cookies() or []
+        except Exception:
+            cookies = []
+
+        def add_if_missing(name, value, domain, path, secure):
+            # Avoid inserting exact duplicates (same name/domain/path)
+            for cj in session.cookies:
+                if getattr(cj, "name", None) == name and getattr(cj, "domain", None) == domain and getattr(cj, "path", None) == path:
+                    return
+            session.cookies.set_cookie(create_cookie(name=name, value=value, domain=domain, path=path, secure=secure))
+
+        for c in cookies:
+            name = c.get("name"); value = c.get("value")
+            orig_domain = c.get("domain") or ""
+            path = c.get("path") or "/"
+            secure = bool(c.get("secure"))
+
+            # Always keep the original cookie domain semantics
+            try:
+                add_if_missing(name, value, orig_domain, path, secure)
+            except Exception:
+                pass
+
+            # Only add an alias if the original domain wouldn't match our target host
+            if not add_www_alias or not host or not name:
+                continue
+            try:
+                no_dot = orig_domain.lstrip(".")
+                # If original domain already matches host (host-only or dot-superdomain), skip aliasing
+                matches = False
+                if orig_domain.startswith(".") and host.endswith(no_dot):
+                    matches = True
+                if (not orig_domain.startswith(".")) and (host == orig_domain):
+                    matches = True
+                if matches:
+                    continue
+
+                # If cookie is set for base_host only (host-only cookie), add explicit www alias for www.base_host
+                if no_dot == base_host and host == ("www." + base_host):
+                    try:
+                        add_if_missing(name, value, "www." + base_host, path, secure)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    def _get_cookie_value(self, session, name: str) -> str:
+        """
+        Safely get a cookie by name from a Requests session without raising
+        CookieConflictError when multiple domains/paths exist. Prefers cookies
+        matching the current forum host.
+        """
+        try:
+            from urllib.parse import urlparse
+            host = (urlparse(getattr(self, "forum_url", "").strip() or "").hostname or "").lstrip(".")
+            base_host = host[4:] if host.startswith("www.") else host
+            candidates = [c for c in session.cookies if getattr(c, "name", None) == name]
+            if not candidates:
+                return ""
+            def score(c):
+                dom = (getattr(c, "domain", "") or "").lstrip(".")
+                s = 0
+                if dom == host:
+                    s += 100
+                if dom == ("www." + base_host):
+                    s += 90
+                if dom == base_host:
+                    s += 80
+                if dom.endswith("." + base_host) and dom != base_host:
+                    s += 70
+                s += len(getattr(c, "path", "/") or "/")
+                if getattr(c, "secure", False):
+                    s += 1
+                return s
+            candidates.sort(key=score, reverse=True)
+            return candidates[0].value or ""
+        except Exception:
+            try:
+                return session.cookies.get(name) or ""
+            except Exception:
+                return ""
     def get_requests_session(self):
         """
         Build a requests.Session from the live Selenium driver:
@@ -887,6 +1030,12 @@ class ForumBotSelenium:
             pass
         s.headers.update({"User-Agent": ua, "Accept": "*/*"})
 
+        # Sync selenium cookies including www aliasing for host-only cookies
+        try:
+            self._sync_cookies_to_requests(s, add_www_alias=True)
+        except Exception:
+            pass
+
         # Copy cookies from Selenium
         try:
             for c in (self.driver.get_cookies() or []):
@@ -904,7 +1053,7 @@ class ForumBotSelenium:
 
         return s
 
-    def _extract_reply_form(self, html: str, base_url: str) -> tuple[str, dict]:
+    def _extract_reply_form_legacy(self, html: str, base_url: str) -> tuple[str, dict]:
         """
         Parse vBulletin newreply form and return (action_url, data_dict with hidden inputs).
         """
@@ -954,6 +1103,99 @@ class ForumBotSelenium:
 
         return action, data
 
+    def _extract_reply_form(self, html: str, base_url: str) -> tuple[str, dict]:
+        """
+        Parse vBulletin newreply form and return (action_url, data_dict with hidden inputs).
+        Uses heuristics to avoid unrelated forms like search.php.
+        """
+        import re
+        from urllib.parse import urljoin
+        action = urljoin(base_url, "newreply.php?do=postreply")
+        data: dict = {}
+
+        # Try BeautifulSoup with scoring to pick the correct form
+        try:
+            from bs4 import BeautifulSoup  # type: ignore
+            soup = BeautifulSoup(html or "", "html.parser")
+
+            def score_form(f) -> tuple[int, str]:
+                a = (f.get("action") or "").strip()
+                aurl = urljoin(base_url, a) if a else urljoin(base_url, "")
+                s = 0
+                fid = (f.get("id") or f.get("name") or "").lower()
+                if fid in {"qrform", "vbform", "postform", "vb_post", "quick_reply_form"}:
+                    s += 50
+                if "newreply.php" in aurl.lower():
+                    s += 100
+                if "postreply" in (aurl.lower() + " " + (f.get("onsubmit") or "").lower()):
+                    s += 60
+                if f.find("textarea", attrs={"name": "message"}) or f.find("input", attrs={"name": "message"}):
+                    s += 60
+                if f.find("input", attrs={"name": "securitytoken"}):
+                    s += 20
+                if f.find("input", attrs={"name": "t"}):
+                    s += 20
+                al = aurl.lower()
+                if "search.php" in al:
+                    s -= 200
+                if any(x in al for x in ["login.php", "register.php", "private.php", "usercp.php"]):
+                    s -= 100
+                # Strongly penalize unrelated actions that sometimes appear on the page
+                if "profile.php?do=dst" in al or "profile.php" in al:
+                    s -= 500
+                # If no message field and no newreply/postreply hints, treat as unrelated
+                if ("newreply.php" not in al and "postreply" not in al) and not (
+                    f.find("textarea", attrs={"name": "message"}) or f.find("input", attrs={"name": "message"})
+                ):
+                    s -= 200
+                return s, aurl
+
+            best = None
+            best_score = -10**9
+            best_action = action
+            for f in soup.find_all("form"):
+                sc, aurl = score_form(f)
+                if sc > best_score:
+                    best = f
+                    best_score = sc
+                    best_action = aurl
+
+            form = best
+            # Only accept if it looks like a reply form; otherwise keep default action
+            accept = False
+            try:
+                al = (best_action or "").lower()
+                has_msg = bool(form and (form.find("textarea", attrs={"name": "message"}) or form.find("input", attrs={"name": "message"})))
+                accept = ("newreply.php" in al) or ("postreply" in al) or has_msg
+            except Exception:
+                accept = False
+            if form and accept:
+                action = best_action or action
+                for inp in form.find_all(["input", "textarea"]):
+                    n = inp.get("name")
+                    if not n:
+                        continue
+                    v = inp.text if inp.name == "textarea" else inp.get("value")
+                    if v is not None:
+                        data[n] = v
+        except Exception:
+            pass
+
+        # Regex fallback for token
+        if "securitytoken" not in data:
+            m = re.search(r'name="securitytoken"\s+value="([^"]+)"', html or "", re.I)
+            if m:
+                data["securitytoken"] = m.group(1)
+
+        # Defaults
+        data.setdefault("fromquickreply", "1")
+        data.setdefault("parseurl", "1")
+        data.setdefault("signature", "1")
+        data.setdefault("wysiwyg", "0")
+        data.setdefault("styleid", "0")
+
+        return action, data
+
     def _reply_via_requests_old(self, thread_id=None, thread_url=None, message_html="", subject=""):
         """
         HTTP reply to a thread (no Selenium interaction).
@@ -983,7 +1225,7 @@ class ForumBotSelenium:
 
         # STEP 0: figure referer + loggedin user id (for payload)
         showthread = f"{base}/showthread.php?t={tid}"
-        logged_uid = session.cookies.get("bbuserid") or ""
+        logged_uid = self._get_cookie_value(session, "bbuserid") or ""
 
         # STEP 1: fetch reply form (securitytoken, etc.)
         newreply_url = f"{base}/newreply.php?do=newreply&t={tid}"
@@ -1097,123 +1339,435 @@ class ForumBotSelenium:
         return {"ok": bool(ok), "url": verified_url or final_url,
                 "error": "" if ok else "Verification failed after POST"}
 
+    def _resolve_thread_id_any(self, session, base, key):
+        """
+        Resolve a vBulletin thread id (t) from mixed inputs:
+          - Numeric id
+          - URLs: showthread?t=, showpost?p=, newreply?do=newreply&p=
+          - SEO pages and rel=canonical linking back to the canonical thread
+        Returns "" if it cannot be determined.
+        """
+        try:
+            # Numeric input: could be a thread id (t) or a post id (p).
+            # First try as thread id by fetching showthread; if invalid, try as post id via showpost/newreply.
+            if isinstance(key, (int, float)) or (isinstance(key, str) and key.isdigit()):
+                num = None
+                try:
+                    num = str(int(key)) if not isinstance(key, str) else (key.lstrip("0") or "0")
+                except Exception:
+                    num = str(key).strip()
+
+                # Try as thread id directly
+                try:
+                    rtest = session.get(f"{base}/showthread.php?t={num}", timeout=15)
+                    txt = rtest.text or ""
+                    bad = ("Invalid Thema specified" in txt) or ("Invalid Thread specified" in txt)
+                    if (rtest.status_code == 200) and (not bad):
+                        return num
+                except Exception:
+                    pass
+
+                # Try as post id -> resolve t via showpost/newreply
+                import re as _re
+                try:
+                    r = session.get(f"{base}/showpost.php?p={num}", timeout=20, allow_redirects=True)
+                    # final URL may include t
+                    try:
+                        from urllib.parse import urlparse, parse_qs
+                        qs = parse_qs(urlparse(getattr(r, "url", "")).query)
+                        cand = (qs.get("t", [""])[0] or "").strip()
+                        if cand.isdigit():
+                            return cand
+                    except Exception:
+                        pass
+                    # body fallback
+                    m = _re.search(r"showthread\.php\?t=(\d+)", r.text or "", _re.I)
+                    if m:
+                        return m.group(1)
+                    # SEO post page might end with -post.html
+                    try:
+                        final_u = getattr(r, "url", "") or ""
+                        if final_u.endswith("-post.html"):
+                            r2 = session.get(final_u, timeout=20)
+                            m2 = _re.search(r"showthread\.php\?t=(\d+)", r2.text or "", _re.I)
+                            if m2:
+                                return m2.group(1)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+                # newreply by p hidden input
+                try:
+                    rnr = session.get(f"{base}/newreply.php?do=newreply&p={num}", timeout=20)
+                    try:
+                        from urllib.parse import urlparse, parse_qs
+                        qs3 = parse_qs(urlparse(getattr(rnr, "url", "")).query)
+                        cand = (qs3.get("t", [""])[0] or "").strip()
+                        if cand.isdigit():
+                            return cand
+                    except Exception:
+                        pass
+                    try:
+                        from bs4 import BeautifulSoup  # type: ignore
+                        soup = BeautifulSoup(rnr.text or "", "html.parser")
+                        form = soup.find("form")
+                        if form:
+                            inp = form.find("input", attrs={"name": "t"})
+                            if inp:
+                                cand = (inp.get("value") or "").strip()
+                                if cand.isdigit():
+                                    return cand
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                # Could not interpret numeric, fall through to return ""
+
+            # URL parsing
+            from urllib.parse import urlparse, parse_qs
+            import re as _re
+            if isinstance(key, str) and key.lower().startswith("http"):
+                try:
+                    qs = parse_qs(urlparse(key).query)
+                    t = (qs.get("t", [""])[0] or "").strip()
+                    if t.isdigit():
+                        return t
+                    p = (qs.get("p", [""])[0] or "").strip()
+                except Exception:
+                    t = ""; p = ""
+
+                # If it's a showpost link, follow and scrape
+                try:
+                    if p:
+                        r = session.get(f"{base}/showpost.php?p={p}", timeout=20, allow_redirects=True)
+                        # Try from final URL first
+                        try:
+                            qs2 = parse_qs(urlparse(getattr(r, "url", "")).query)
+                            cand = (qs2.get("t", [""])[0] or "").strip()
+                            if cand.isdigit():
+                                return cand
+                        except Exception:
+                            pass
+                        # Try from HTML body
+                        html = r.text or ""
+                        m = _re.search(r"showthread\.php\?t=(\d+)", html, _re.I)
+                        if m:
+                            return m.group(1)
+                        # SEO post page might end with -post.html → load and scan
+                        try:
+                            final_u = getattr(r, "url", "") or ""
+                            if final_u.endswith("-post.html"):
+                                r2 = session.get(final_u, timeout=20)
+                                m2 = _re.search(r"showthread\.php\?t=(\d+)", r2.text or "", _re.I)
+                                if m2:
+                                    return m2.group(1)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                # If it's a newreply-by-post link, read hidden input t
+                try:
+                    if p and ("newreply.php" in key or "do=newreply" in key):
+                        rnr = session.get(f"{base}/newreply.php?do=newreply&p={p}", timeout=20)
+                        # final URL may already include t
+                        try:
+                            qs3 = parse_qs(urlparse(getattr(rnr, "url", "")).query)
+                            cand = (qs3.get("t", [""])[0] or "").strip()
+                            if cand.isdigit():
+                                return cand
+                        except Exception:
+                            pass
+                        # otherwise parse form
+                        try:
+                            from bs4 import BeautifulSoup  # type: ignore
+                            soup = BeautifulSoup(rnr.text or "", "html.parser")
+                            form = soup.find("form")
+                            if form:
+                                inp = form.find("input", attrs={"name": "t"})
+                                if inp:
+                                    cand = (inp.get("value") or "").strip()
+                                    if cand.isdigit():
+                                        return cand
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                # Try fetching the page and reading rel=canonical or embedded showthread links
+                try:
+                    r0 = session.get(key, timeout=20, allow_redirects=True)
+                    # canonical link
+                    try:
+                        from bs4 import BeautifulSoup  # type: ignore
+                        soup0 = BeautifulSoup(r0.text or "", "html.parser")
+                        link = soup0.find("link", rel=lambda v: v and "canonical" in str(v).lower())
+                        href = (link.get("href") or "").strip() if link else ""
+                        if href:
+                            try:
+                                qs4 = parse_qs(urlparse(href).query)
+                                cand = (qs4.get("t", [""])[0] or "").strip()
+                                if cand.isdigit():
+                                    return cand
+                            except Exception:
+                                pass
+                        # search any showthread?t= within HTML
+                        m3 = _re.search(r"showthread\.php\?t=(\d+)", r0.text or "", _re.I)
+                        if m3:
+                            return m3.group(1)
+                    except Exception:
+                        pass
+                    # As a last resort, inspect the final URL itself for SEO variants that keep t in query
+                    try:
+                        qs5 = parse_qs(urlparse(getattr(r0, "url", "")).query)
+                        cand = (qs5.get("t", [""])[0] or "").strip()
+                        if cand.isdigit():
+                            return cand
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+        except Exception:
+            pass
+        return ""
+
     def reply_via_requests(self, thread_id=None, thread_url=None, message_html="", subject=""):
         """
-        Post a reply via HTTP only (no Selenium here).
-        Steps:
-          a) GET newreply.php?do=newreply&t=<tid> -> extract hidden inputs incl. securitytoken/posthash/poststarttime/s
-          b) GET showthread.php?t=<tid> -> extract ajax_lastpost and capture pre lastpostid + post count
-          c) POST newreply.php?do=postreply&t=<tid> with required form-data and AJAX headers
-          d) Strict verify via showthread.php?t=<tid>&goto=lastpost
+        HTTP reply only (no Selenium).
+        - يقبل t= أو p= أو رقم مجرد.
+        - يحل ThreadID من PostID تلقائياً.
+        - يفشل مبكراً إن لم تكن Logged-In (securitytoken=guest).
+        - لا يعيد POST مرة ثانية داخل نفس الدالة.
         Returns: {"ok": bool, "url": str, "error": str}
         """
-        import re
-        import time
-        from urllib.parse import urlparse, parse_qs
+        import re, time, logging
+        from urllib.parse import urlparse, parse_qs, urljoin
 
-        base = getattr(self, "forum_url", "").rstrip("/") or "https://www.mygully.com"
+        base = (getattr(self, "forum_url", "") or "https://www.mygully.com").rstrip("/")
 
-        # Allow both calling styles: (id,url,msg,subject) or (key,msg,subject)
-        if thread_url:
-            # Called as (thread_key, message_html, subject) from GUI worker
-            # Detect non-URL or clearly message-like content and shift args
-            tn = str(thread_url)
-            if (not isinstance(thread_url, str)) or (not tn.lower().startswith("http")) or ("\n" in tn or " " in tn or "[" in tn or "<" in tn):
-                message_html, subject = thread_url, (message_html or subject)
+        # Back-compat: some callers pass 3 positional args
+        # (thread_key, message_html, subject) mapping to
+        # (thread_id, thread_url, message_html) here. Detect and normalize.
+        try:
+            if isinstance(thread_url, str) and thread_url and not thread_url.lower().startswith("http") and not thread_url.isdigit():
+                if not subject and isinstance(message_html, str):
+                    subject = message_html
+                message_html = thread_url
                 thread_url = None
+        except Exception:
+            pass
 
-        # Resolve thread id
-        tid = None
-        key = thread_id or thread_url
+        # 0) session متزامنة مع WebDriver (كوكيز/UA)
+        session = self.get_requests_session()
+        # Unified early resolution of thread id from id/url/canonical
+        key = thread_url if thread_url is not None else thread_id
+        tid_resolved = self._resolve_thread_id_any(session, base, key)
+        if not tid_resolved:
+            return {"ok": False, "url": "",
+                    "error": "No valid thread id/url. Could not resolve from post id via showpost/newreply/canonical"}
+        # Normalize URL so downstream parsing remains unchanged
+        thread_url = f"{base}/showthread.php?t={tid_resolved}"
+
+        # 1) استنتاج tid/pid من المدخل
+        tid, pid = None, None
+        key = thread_url or thread_id
         if key:
             if isinstance(key, (int, float)) or (isinstance(key, str) and key.isdigit()):
-                tid = str(int(key))
-            elif isinstance(key, str):
+                tid = str(int(key))  # رقم: نفترض t أولاً
+            elif isinstance(key, str) and key.lower().startswith("http"):
                 try:
                     qs = parse_qs(urlparse(key).query)
                     tid = (qs.get("t", [None])[0] or "").strip() or None
+                    pid = (qs.get("p", [None])[0] or "").strip() or None
                 except Exception:
-                    tid = None
-        if not tid:
-            return {"ok": False, "url": "", "error": "No thread id/url provided"}
+                    pass
 
-        session = self.get_requests_session()
-        logged_uid = (session.cookies.get("bbuserid") or "").strip()
+        def _resolve_tid_from_pid(p_value: str) -> str | None:
+            """حلّ t من showpost?p أو ...-post.html"""
+            try:
+                r = session.get(f"{base}/showpost.php?p={p_value}", timeout=20, allow_redirects=True)
+                # من URL النهائى
+                try:
+                    qs = parse_qs(urlparse(getattr(r, "url", "")).query)
+                    t = (qs.get("t", [""])[0] or "").strip()
+                    if t:
+                        return t
+                except Exception:
+                    pass
+                # من HTML
+                html = r.text or ""
+                m = re.search(r"showthread\.php\?t=(\d+)", html, re.I)
+                if m:
+                    return m.group(1)
+                # لو اتحول لـ ...-post.html
+                if r.url and r.url.endswith("-post.html"):
+                    r2 = session.get(r.url, timeout=20)
+                    html2 = r2.text or ""
+                    m2 = re.search(r"showthread\.php\?t=(\d+)", html2, re.I)
+                    if m2:
+                        return m2.group(1)
+            except Exception:
+                pass
+            return None
+
+        # جرّب الحلّ الأول من showpost
+        if not tid and pid:
+            tid = _resolve_tid_from_pid(pid)
+        if not tid and isinstance(key, str) and key.isdigit():
+            tid = _resolve_tid_from_pid(key)
+
+        # Fallback نهائى: افتح newreply?p=... واطلع t من الفورم
+        if not tid:
+            pid_local = None
+            try:
+                if isinstance(key, str):
+                    qs = parse_qs(urlparse(key).query)
+                    pid_local = (qs.get("p", [""])[0] or "").strip() or None
+                if (not pid_local) and isinstance(key, str) and key.isdigit():
+                    pid_local = key
+            except Exception:
+                pid_local = None
+
+            if pid_local:
+                newreply_by_p = f"{base}/newreply.php?do=newreply&p={pid_local}"
+                r_nr = session.get(newreply_by_p, timeout=30)
+                if r_nr.status_code == 200 and (r_nr.text or ""):
+                    # من URL النهائى
+                    try:
+                        qs2 = parse_qs(urlparse(getattr(r_nr, "url", "")).query)
+                        cand = (qs2.get("t", [""])[0] or "").strip()
+                        if cand.isdigit():
+                            tid = cand
+                    except Exception:
+                        pass
+                    # من الفورم مباشرة
+                    if not tid:
+                        try:
+                            from bs4 import BeautifulSoup  # type: ignore
+                            soup2 = BeautifulSoup(r_nr.text, "html.parser")
+                            form2 = soup2.find("form")
+                            if form2:
+                                inp_t = form2.find("input", attrs={"name": "t"})
+                                if inp_t:
+                                    cand = (inp_t.get("value") or "").strip()
+                                    if cand.isdigit():
+                                        tid = cand
+                        except Exception:
+                            pass
+
+        if not tid:
+            return {"ok": False, "url": "",
+                    "error": "No valid thread id/url. Could not resolve from post id via showpost or newreply form"}
+
         showthread_url = f"{base}/showthread.php?t={tid}"
         newreply_form_url = f"{base}/newreply.php?do=newreply&t={tid}"
 
-        # Helper: parse ajax_lastpost, lastpostid, and post count from showthread HTML
-        def parse_thread_meta(html: str) -> tuple[str | None, str | None, int]:
+        # 2) GET نموذج الرد + فحص لوج-إن (securitytoken)
+        r_form = session.get(newreply_form_url, timeout=30)
+        if r_form.status_code != 200 or not (r_form.text or ""):
+            return {"ok": False, "url": newreply_form_url, "error": f"GET newreply failed: HTTP {r_form.status_code}"}
+        final_form_url = getattr(r_form, "url", newreply_form_url) or newreply_form_url
+        if "login" in (final_form_url or "").lower():
+            return {"ok": False, "url": final_form_url, "error": "Not logged in (redirected to login)"}
+
+        html_form = r_form.text or ""
+        # سحب action + hidden inputs من الفورم
+        try:
+            action_url, form_data = self._extract_reply_form(html_form, base)  # helper عندك
+        except Exception:
+            from bs4 import BeautifulSoup  # type: ignore
+            soup = BeautifulSoup(html_form, "html.parser")
+            form = soup.find("form")
+            action = form.get("action") if form else None
+            action_url = urljoin(base + "/", action) if action else f"{base}/newreply.php?do=postreply&t={tid}"
+            form_data = {}
+            if form:
+                for inp in form.find_all("input"):
+                    name = inp.get("name")
+                    if not name:
+                        continue
+                    typ = (inp.get("type") or "").lower()
+                    val = inp.get("value") or ""
+                    if typ in ("checkbox", "radio"):
+                        if inp.has_attr("checked"):
+                            form_data[name] = val or "1"
+                    else:
+                        form_data[name] = val
+
+        # securitytoken guard
+        sec = (form_data.get("securitytoken") or "")
+        if not sec:
+            m = re.search(r'name="securitytoken"\s+value="([^"]+)"', html_form, re.I)
+            sec = m.group(1) if m else ""
+        if not sec or sec.strip().lower() == "guest":
+            return {"ok": False, "url": newreply_form_url, "error": "Not logged in (securitytoken=guest)"}
+        form_data["securitytoken"] = sec
+
+        # 3) Snapshot قبل POST (آخر بوست/عدّاد + ajax_lastpost)
+        def _parse_thread_meta(html: str):
             ajax_lp = None
             lastpost_id = None
-            post_ids = []
+            post_count = 0
             try:
                 from bs4 import BeautifulSoup  # type: ignore
                 soup = BeautifulSoup(html or "", "html.parser")
-                inp = soup.find("input", attrs={"name": "ajax_lastpost"}) or \
-                      soup.find("input", attrs={"id": "ajax_lastpost"})
-                if inp and inp.get("value"):
-                    ajax_lp = (inp.get("value") or "").strip()
-                for tag in soup.find_all(id=re.compile(r"^(post_message_|postcount)(\d+)$")):
+                inp = soup.find("input", attrs={"name": "ajax_lastpost"}) \
+                      or soup.find("input", attrs={"id": "ajax_lastpost"})
+                if inp:
+                    ajax_lp = (inp.get("value") or "").strip() or None
+                ids = []
+                for tag in soup.find_all(id=True):
                     m = re.search(r"(post_message_|postcount)(\d+)$", tag.get("id", ""))
                     if m:
                         try:
-                            post_ids.append(int(m.group(2)))
+                            ids.append(int(m.group(2)))
                         except Exception:
                             pass
+                if ids:
+                    lastpost_id = str(max(ids));
+                    post_count = len(ids)
             except Exception:
                 pass
-            # Regex fallbacks
-            if not ajax_lp:
-                m = re.search(r"ajax_lastpost[^\d]*(\d{10,})", html or "", re.I)
-                if m:
-                    ajax_lp = m.group(1)
-            if not post_ids:
-                post_ids = [int(x) for x in re.findall(r"id=\"post_message_(\d+)\"", html or "")]
-                if not post_ids:
-                    post_ids = [int(x) for x in re.findall(r"id=\"postcount(\d+)\"", html or "")]
-            if post_ids:
-                lastpost_id = str(max(post_ids))
-            return ajax_lp, lastpost_id, len(post_ids)
+            return ajax_lp, lastpost_id, post_count
 
-        # a) GET newreply form
-        r_form = session.get(newreply_form_url, timeout=30)
-        if r_form.status_code != 200:
-            return {"ok": False, "url": newreply_form_url, "error": f"GET newreply failed: HTTP {r_form.status_code}"}
-        action_url, form_data = self._extract_reply_form(r_form.text or "", base)
-
-        # b) GET showthread (pre meta and ajax_lastpost)
         r_thread = session.get(showthread_url, timeout=30)
         if r_thread.status_code != 200:
             return {"ok": False, "url": showthread_url, "error": f"GET showthread failed: HTTP {r_thread.status_code}"}
-        ajax_lastpost, pre_lastpostid, pre_post_count = parse_thread_meta(r_thread.text or "")
+        if ("Invalid Thema specified" in (r_thread.text or "")) or (
+                "Invalid Thread specified" in (r_thread.text or "")):
+            return {"ok": False, "url": showthread_url, "error": "Invalid thread specified or no permission"}
 
-        # Build payload per spec
+        ajax_lastpost, pre_lastpostid, pre_count = _parse_thread_meta(r_thread.text or "")
+
+        # 4) Build payload من الفورم + حقولنا وإرسال POST (مرة واحدة فقط)
         payload = dict(form_data)
         payload.update({
             "do": "postreply",
             "t": str(tid),
             "message": message_html or "",
-            "fromquickreply": "1",
-            "parseurl": "1",
-            "signature": "1",
-            "wysiwyg": "0",
-            "styleid": payload.get("styleid", "0"),
-            "loggedinuser": logged_uid or payload.get("loggedinuser", ""),
-            "ajax": "1",
-            "ajax_lastpost": ajax_lastpost or str(int(time.time()) - 60),
-            "specifiedpost": "0",
-            "p": payload.get("p", ""),
-            "sbutton": "Antworten",
+            "fromquickreply": payload.get("fromquickreply", "1"),
+            "parseurl": payload.get("parseurl", "1"),
+            "signature": payload.get("signature", "1"),
+            "wysiwyg": payload.get("wysiwyg", "0"),
+            "ajax": payload.get("ajax", "1"),
+            "ajax_lastpost": ajax_lastpost or payload.get("ajax_lastpost") or str(int(time.time()) - 60),
+            "specifiedpost": payload.get("specifiedpost", "0"),
+            "sbutton": payload.get("sbutton", "Antworten"),
         })
-        if subject:
-            payload["title"] = subject
+        if subject and "title" in payload:
+            payload["title"] = subject.strip()
+        payload.pop("s", None)  # لا ترسل vB session فى الـURL
 
-        # Log payload (without dumping full message)
+        uid = (self._get_cookie_value(session, "bbuserid") or "").strip()
+        if uid:
+            payload.setdefault("loggedinuser", uid)
+
         logging.info(
             f"Build payload: t={tid}, title={'yes' if bool(subject) else 'no'}, "
-            f"message_len={len(payload.get('message',''))}, ajax_lastpost={payload.get('ajax_lastpost')}, "
-            f"loggedinuser={payload.get('loggedinuser','')}"
+            f"message_len={len(payload.get('message', ''))}, ajax_lastpost={payload.get('ajax_lastpost')}, "
+            f"loggedinuser={payload.get('loggedinuser', '')}"
         )
 
         headers = {
@@ -1221,72 +1775,86 @@ class ForumBotSelenium:
             "Origin": base,
             "Referer": showthread_url,
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "Accept": "*/*",
         }
+
+        # Ensure thread id is present in action URL for servers that require it
+        try:
+            if "t=" not in (action_url or ""):
+                action_url = action_url + ("&" if "?" in action_url else "?") + f"t={tid}"
+        except Exception:
+            pass
 
         logging.info(f"POST reply -> {action_url}")
         r_post = session.post(action_url, data=payload, headers=headers, timeout=45, allow_redirects=True)
         post_final_url = getattr(r_post, "url", action_url) or action_url
 
-        # Pre-verify snapshot
-        logging.info(f"Verify pre: lastpostid={pre_lastpostid}, post_count={pre_post_count}")
+        # 5) محاولة استخراج رسالة vBulletin إن لاقت
+        server_side_error = ""
+        try:
+            from bs4 import BeautifulSoup  # type: ignore
+            soup = BeautifulSoup(r_post.text or "", "html.parser")
+            box = soup.find(id="standard_error") or soup.find(class_="standard_error")
+            if not box:
+                for n in soup.find_all(["div", "td"]):
+                    t = (n.get_text(" ", strip=True) or "").lower()
+                    if "vbulletin message" in t:
+                        box = n;
+                        break
+            if box:
+                server_side_error = (box.get_text(" ", strip=True) or "")[:300]
+        except Exception:
+            pass
 
-        def strip_bbcode(txt: str) -> str:
+        # 6) VERIFY (一次) – لا نعيد POST تانى هنا
+        def _strip_bbcode(txt: str) -> str:
             t = re.sub(r"\[/?[^\]]+\]", " ", txt or "")
             t = re.sub(r"\s+", " ", t).strip()
             return t
 
-        # d) Verify after
         verify_url = f"{base}/showthread.php?t={tid}&goto=lastpost"
         r_verify = session.get(verify_url, timeout=30)
         verify_final_url = getattr(r_verify, "url", verify_url)
         page = r_verify.text or ""
-        _, post_lastpostid, post_count = parse_thread_meta(page)
+        _, post_lastpostid, post_count = _parse_thread_meta(page)
 
-        # (a) lastpost changed or count increased
-        changed = False
+        # If we know a specific lastpost id, prefer a permalink to that post
         try:
-            changed = (post_lastpostid and post_lastpostid != (pre_lastpostid or "")) or (post_count > pre_post_count)
-        except Exception:
-            changed = False
-
-        # (b) author is our uid OR page contains >=15-char snippet of message
-        ok_author = False
-        ok_snippet = False
-        try:
-            if (session.cookies.get("bbuserid") or "").strip():
-                uid = (session.cookies.get("bbuserid") or "").strip()
-                try:
-                    from bs4 import BeautifulSoup  # type: ignore
-                    soup = BeautifulSoup(page, "html.parser")
-                    posts = soup.find_all(id=re.compile(r"^(post_message_|postcount)(\d+)$"))
-                    container = posts[-1].parent if posts else soup
-                    for a in container.find_all("a", href=True):
-                        if f"member.php?u={uid}" in a.get("href", ""):
-                            ok_author = True
-                            break
-                except Exception:
-                    ok_author = (f"member.php?u={uid}" in page)
-            # Snippet
-            plain = strip_bbcode(message_html or "")
-            token = (plain[:512] or "").strip()
-            if len(token) >= 15:
-                ok_snippet = token.lower() in page.lower()
+            if post_lastpostid:
+                verify_final_url = f"{base}/showthread.php?p={post_lastpostid}#post{post_lastpostid}"
         except Exception:
             pass
 
-        ok = bool(changed and (ok_author or ok_snippet))
-        logging.info(
-            f"Verify post: changed={changed} (pre_id={pre_lastpostid}, post_id={post_lastpostid}, "
-            f"pre_count={pre_post_count}, post_count={post_count}), author_match={ok_author}, snippet_match={ok_snippet}"
-        )
+        changed = False
+        try:
+            changed = (post_lastpostid and post_lastpostid != (pre_lastpostid or "")) or (post_count > pre_count)
+        except Exception:
+            changed = False
 
+        ok_author = False
+        ok_snippet = False
+        try:
+            if uid and f"member.php?u={uid}" in page:
+                ok_author = True
+            token = _strip_bbcode(message_html or "")
+            token = token if len(token) >= 15 else ""
+            ok_snippet = bool(token and (token.lower() in page.lower()))
+        except Exception:
+            pass
+
+        # Only consider success if thread content actually changed
+        # or our message snippet is visible. Presence of our user link alone
+        # (ok_author) can be true when we previously posted in the thread.
+        ok = bool(changed or ok_snippet)
         if ok:
-            return {"ok": True, "url": verify_final_url, "error": ""}
+            return {"ok": True, "url": verify_final_url or post_final_url, "post_id": post_lastpostid or "", "error": ""}
 
-        # On failure print first 200 chars of r_post.text
-        snippet = (r_post.text or "")[:200]
-        err = f"Reply verification failed. HTTP={r_post.status_code}. Body[:200]={snippet!r}"
-        return {"ok": False, "url": post_final_url, "error": err}
+        # فشل التحقق: لا نعيد POST مرة ثانية – رجّع سبب واضح
+        short_head = (r_post.text or "")[:200].replace("\r", " ").replace("\n", " ")
+        reason = server_side_error or f"Reply verification failed. HTTP={r_post.status_code}. Body[:200]='{short_head}'"
+        if (sec.strip().lower() == "guest") or ("login" in (verify_final_url or "").lower()):
+            reason = "Not logged in (session/cookies invalid). " + reason
+        return {"ok": False, "url": post_final_url, "error": reason}
 
     def safe_navigate(self, url, timeout=30):
         """
