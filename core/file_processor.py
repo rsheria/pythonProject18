@@ -3,13 +3,13 @@ import logging
 import shutil
 import subprocess
 import re
-import glob
 import uuid
 import time
 import random
 from pathlib import Path
 from typing import List, Optional, Set
 from config.config import DATA_DIR    # ← استيراد DATA_DIR
+from ui_notifier import ui_notifier
 
 
 class FileProcessor:
@@ -388,10 +388,10 @@ class FileProcessor:
         """Handle archive processing with format preservation and splitting.
 
         When ``recompress_mode`` is set to ``"never"`` the archive is extracted
-        and normalized but not recompressed.  The method then returns a tuple of
+        and normalized but not recompressed. The method then returns a tuple of
         ``(root_folder, files)`` where ``files`` is a list of all extracted
-        file paths.  In other modes it returns a list of paths to newly created
-        archives.
+        file paths. In other modes it returns ``(download_folder, files)``
+        where ``files`` are paths to newly created archives.
         """
         extract_dir = None
         try:
@@ -471,47 +471,15 @@ class FileProcessor:
 
             root_folder = self.ensure_single_root(extract_dir, thread_title)
 
-
-            # Re-archive everything => final name based on thread_title
-            unique_id = uuid.uuid4().hex
-            temp_suffix = f"_temp_{unique_id}"
-            temp_archive_base = download_folder / f"{thread_title}{temp_suffix}"
-
-            success = False
-            for attempt in range(max_retries):
-                if is_zip:
-                    success = self._create_zip_archive(
-                        root_folder, temp_archive_base, thread_title
-                    )
-                else:
-                    success = self._create_rar_archive(
-                        root_folder, temp_archive_base, thread_title
-                    )
-                if success:
-                    break
-                if attempt < max_retries - 1:
-                    time.sleep(2)
-
-            if not success:
-                raise Exception("Archive creation failed after all attempts")
-
-            # Gather newly created archives
-            new_archives = []
-            if is_zip:
-                new_archives.extend(
-                    glob.glob(str(download_folder / f"{thread_title}{temp_suffix}.z*"))
-                )
-            else:
-                new_archives.extend(
-                    glob.glob(str(download_folder / f"{thread_title}{temp_suffix}.part*.rar"))
-                )
-                if not new_archives:
-                    single_rar = download_folder / f"{thread_title}{temp_suffix}.rar"
-                    if single_rar.exists():
-                        new_archives.append(str(single_rar))
-
-            if not new_archives:
-                raise Exception("No temporary archive parts were created")
+            # Split extracted assets into book/audio groups and package separately
+            book_dir, audio_dir, assets = self.split_embedded_assets(root_folder)
+            rar_map = self.package_assets(
+                book_dir,
+                audio_dir,
+                thread_title,
+                assets,
+                password=password,
+            )
 
             # Remove original archive(s)
             if is_multipart and all_parts:
@@ -519,13 +487,16 @@ class FileProcessor:
             else:
                 self._safely_remove_original_archives(archive_path, None)
 
-            # Rename the temp ones => remove the _temp_uuid portion
-            final_archives = self._safely_rename_archives(new_archives, temp_suffix)
-
-            # Cleanup
+            # Cleanup extracted directory
             self._safely_remove_directory(extract_dir)
 
-            return final_archives
+            produced = []
+            if rar_map.get("audio"):
+                produced.extend(rar_map["audio"])
+            if rar_map.get("book"):
+                produced.extend(rar_map["book"])
+
+            return download_folder, produced
 
         except Exception as e:
             logging.error(f"Error processing archive: {str(e)}")
@@ -701,7 +672,13 @@ class FileProcessor:
             logging.error(f"Extraction error: {str(e)}")
             return False
 
-    def _create_rar_archive(self, source_dir: Path, output_base: Path, root_name: str) -> bool:
+    def _create_rar_archive(
+        self,
+        source_dir: Path,
+        output_base: Path,
+        root_name: str,
+        password: str | None = None,
+    ) -> bool:
         """Create a RAR archive using current settings and clean root folder."""
         try:
             folder_prefix = root_name
@@ -709,6 +686,8 @@ class FileProcessor:
             cmd = [str(self.winrar_path), 'a']
             if self.split_bytes > 0:
                 cmd.append(f'-v{self.split_bytes // (1024 * 1024)}m')
+            if password:
+                cmd.append(f'-p{password}')
             cmd.extend([
                 f'-m{self.comp_level}',
                 '-ep1',
@@ -1368,8 +1347,9 @@ class FileProcessor:
         audio_dir: Path,
         base_title: str,
         assets: dict,
+        password: str | None = None,
     ) -> dict:
-        """Create separate RAR packages for audio and each book format.
+        """Create separate RAR packages for audio and book files.
 
         Parameters
         ----------
@@ -1385,39 +1365,36 @@ class FileProcessor:
         Returns
         -------
         dict
-            ``{"audio": [Path, ...], "book": {fmt: [Path, ...]}}``
+            Mapping of ``{"audio": [Path, ...], "book": [Path, ...]}``
             listing all created archive paths.
         """
-
-        result: dict[str, any] = {"audio": [], "book": {}}
+        result: dict[str, list[Path]] = {"audio": [], "book": []}
         safe_title = self._sanitize_and_shorten_title(base_title)
 
         # Audio package -------------------------------------------------
-        audio_base = audio_dir.parent / f"{safe_title}_AUDIO"
-        if audio_dir.exists():
-            ok = self._create_rar_archive(audio_dir, audio_base, safe_title)
+        audio_base = audio_dir.parent / f"{safe_title} (Hörbuch)"
+        if audio_dir.exists() and any(audio_dir.iterdir()):
+            ui_notifier.info("", "📦 Packaging Hörbuch …")
+            ok = self._create_rar_archive(
+                audio_dir, audio_base, safe_title, password=password
+            )
             if not ok:
-                # create placeholder empty file to avoid downstream errors
                 (audio_base.with_suffix(".rar")).write_bytes(b"")
-            result["audio"] = sorted(audio_dir.parent.glob(f"{audio_base.name}*.rar"))
+            result["audio"] = sorted(
+                audio_dir.parent.glob(f"{audio_base.name}*.rar")
+            )
 
-        # Book packages per format -------------------------------------
-        book_files = assets.get("book_files", {}) if isinstance(assets, dict) else {}
-        if book_dir.exists() and book_files:
-            for fmt, files in book_files.items():
-                tmp_dir = book_dir / f"__{fmt}"
-                tmp_dir.mkdir(parents=True, exist_ok=True)
-                for name in files:
-                    src = book_dir / name
-                    if src.exists():
-                        shutil.copy(src, tmp_dir / name)
-                out_base = book_dir.parent / f"{safe_title}_BOOK_{fmt.upper()}"
-                ok = self._create_rar_archive(tmp_dir, out_base, safe_title)
-                if not ok:
-                    (out_base.with_suffix(".rar")).write_bytes(b"")
-                result.setdefault("book", {})[fmt] = sorted(
-                    book_dir.parent.glob(f"{out_base.name}*.rar")
-                )
-                shutil.rmtree(tmp_dir, ignore_errors=True)
+        # Book package --------------------------------------------------
+        if book_dir.exists() and any(book_dir.iterdir()):
+            ui_notifier.info("", "📦 Packaging E-Book …")
+            book_base = book_dir.parent / f"{safe_title} (E-Book)"
+            ok = self._create_rar_archive(
+                book_dir, book_base, safe_title, password=password
+            )
+            if not ok:
+                (book_base.with_suffix(".rar")).write_bytes(b"")
+            result["book"] = sorted(
+                book_dir.parent.glob(f"{book_base.name}*.rar")
+            )
 
         return result

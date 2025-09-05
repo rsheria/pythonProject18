@@ -163,7 +163,7 @@ def _cleanup_separators(s: str) -> str:
 
 def _append_multi_block(blocks: List[str], label: str, urls: List[str]) -> None:
     parts = " ‖ ".join("[url=%s]%02d[/url]" % (u, i + 1) for i, u in enumerate(urls))
-    blocks.append(f"[center][size=2][b]{label}:[/b] {parts}[/size][/center]")
+    blocks.append(f"[center][size=3][b]{label}:[/b] {parts}[/size][/center]")
 
 # ----------------------------- main API ------------------------------------
 
