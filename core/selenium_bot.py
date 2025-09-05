@@ -1086,13 +1086,20 @@ class ForumBotSelenium:
                 chrome_options.add_argument("--disable-gpu")
                 chrome_options.add_argument("--ignore-certificate-errors")
                 chrome_options.add_argument("--disable-extensions")
+                chrome_options.add_argument("--disable-notifications")
+                chrome_options.add_argument("--disable-infobars")
                 chrome_options.add_argument("--no-sandbox")
                 chrome_options.add_argument("--disable-dev-shm-usage")  # Prevents crashes in headless mode
                 chrome_options.add_argument("--disable-background-timer-throttling")  # Better performance
                 chrome_options.add_argument("--disable-renderer-backgrounding")  # Better performance
                 chrome_options.add_argument("--disable-backgrounding-occluded-windows")  # Better performance
                 if self.headless:
-                    chrome_options.add_argument("--headless")
+                    chrome_options.add_argument("--headless=new")
+                    prefs = {
+                        "profile.managed_default_content_settings.images": 2,
+                        "profile.managed_default_content_settings.fonts": 2,
+                    }
+                    chrome_options.add_experimental_option("prefs", prefs)
                 
                 # Initialize WebDriver
                 self.driver = webdriver.Chrome(service=service, options=chrome_options)

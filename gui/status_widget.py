@@ -3,8 +3,8 @@ import logging
 import os
 import threading
 import time
-from PyQt5.QtCore import QTimer, Qt, QSize, QEvent, QObject, pyqtSignal, QItemSelectionModel, pyqtSlot, QUrl
-from PyQt5.QtGui import QColor, QPalette, QBrush, QKeySequence, QDesktopServices
+from PyQt5.QtCore import QTimer, Qt, QSize, QEvent, QObject, pyqtSignal, QItemSelectionModel, pyqtSlot
+from PyQt5.QtGui import QColor, QPalette, QBrush, QKeySequence
 
 from PyQt5.QtWidgets import (
     QAbstractScrollArea,
@@ -130,6 +130,7 @@ class StatusWidget(QWidget):
     copyJDLinkRequested = pyqtSignal(list)
     resumePendingRequested = pyqtSignal(list)
     reuploadAllRequested = pyqtSignal(list)
+    openPostedUrl = pyqtSignal(str)
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
@@ -1205,7 +1206,7 @@ class StatusWidget(QWidget):
             url = self._posted_urls.get(tuple(key_tuple)) if key_tuple else None
             if not url:
                 return
-            QDesktopServices.openUrl(QUrl(url))
+            self.openPostedUrl.emit(url)
         except Exception:
             log.error("Failed to open posted URL on double-click", exc_info=True)
 
@@ -1939,6 +1940,16 @@ class StatusWidget(QWidget):
                             meta = maybe
                             break
                     self.populate_links_by_tid(tid, links, keeplinks, meta)
+                if (
+                    getattr(op, "stage", None) == OpStage.FINISHED
+                    and getattr(op, "op_type", None) == OpType.POST
+                    and getattr(op, "final_url", None)
+                ):
+                    try:
+                        key = op.thread_id or op.item
+                        self.set_item_posted(op.section or "Posting", key, op.final_url)
+                    except Exception:
+                        pass
             except Exception:
                 # Do not propagate errors from our helper; the main status
                 # handling should proceed regardless of link population.

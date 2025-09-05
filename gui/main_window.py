@@ -12,6 +12,7 @@ from workers.download_worker import DownloadWorker
 from workers.upload_worker import UploadWorker
 from workers.worker_thread import WorkerThread, MegaThreadsWorkerThread
 from workers.proceed_template_worker import ProceedTemplateWorker
+from workers.headless_post_worker import HeadlessPostWorker
 from ui_notifier import ui_notifier, suppress_popups
 
 from .themes import style_manager, theme_manager, apply_theme
@@ -779,6 +780,9 @@ class ForumBotGUI(QMainWindow):
         self.status_widget.openInJDRequested.connect(
             self._on_open_in_jd, Qt.QueuedConnection
         )
+        self.status_widget.openPostedUrl.connect(
+            self._on_open_posted_url, Qt.QueuedConnection
+        )
         self.status_widget.copyJDLinkRequested.connect(
             self._on_copy_jd_link, Qt.QueuedConnection
         )
@@ -862,7 +866,7 @@ class ForumBotGUI(QMainWindow):
     # Reply batch management
     # ----------------------
     def start_reply_batch(self, tasks: list, rate_limit_secs: int = 30):
-        """Start a batch of HTTP replies using ReplyBatchWorker.
+        """Start a batch of Selenium replies using HeadlessPostWorker.
 
         Args:
             tasks: list of dicts with keys: thread_id or thread_url, message_html, subject, title(optional)
@@ -879,7 +883,7 @@ class ForumBotGUI(QMainWindow):
         except Exception:
             pass
 
-        self.reply_worker = ReplyBatchWorker(self.bot, list(tasks or []), rate_limit_secs)
+        self.reply_worker = HeadlessPostWorker(self.bot, self.bot_lock, list(tasks or []), rate_limit_secs)
 
         # Route progress through orchestrator via register_worker
         self.register_worker(self.reply_worker)
@@ -6081,6 +6085,17 @@ class ForumBotGUI(QMainWindow):
             if link:
                 QDesktopServices.openUrl(QUrl(link))
         self.status_widget._schedule_status_save()
+
+    def _on_open_posted_url(self, url: str):
+        try:
+            if not url:
+                return
+            from PyQt5.QtCore import QMutexLocker
+            with QMutexLocker(self.bot_lock):
+                if hasattr(self, "bot") and self.bot:
+                    self.bot.safe_navigate(url)
+        except Exception:
+            logging.error("Failed to open posted URL", exc_info=True)
 
     def _on_copy_jd_link(self, keys):
         logging.info(f"Copy JD link for {keys}")
