@@ -980,29 +980,64 @@ class DownloadWorker(QThread):
                 refreshed.extend(up for up in unpacked_ebooks if up.exists())
                 produced_paths = refreshed
 
+            # ---- derive grouping hints for later link allocation ----
+            audio_archives = [
+                p
+                for p in produced_paths
+                if p.exists()
+                and p.suffix.lower() in {".rar", ".zip", ".7z"}
+                and not _is_ebook_file(p)
+            ]
+            ebook_files = [
+                p for p in produced_paths if p.exists() and _is_ebook_file(p)
+            ]
+            audio_parts = len(audio_archives)
+            ebook_counts: dict[str, int] = {}
+            for ef in ebook_files:
+                fmt = ef.suffix.lstrip(".").upper()
+                ebook_counts[fmt] = ebook_counts.get(fmt, 0) + 1
+            group_hints = {"audio_parts": audio_parts, "ebook_counts": ebook_counts}
+
+            entry = None
+            try:
+                entry = self.gui.process_threads[info["category_name"]][
+                    info["thread_title"]
+                ]
+                entry["group_hints"] = group_hints
+                entry["audio_upload_files"] = [str(p) for p in audio_archives]
+                entry["ebook_upload_files"] = [str(p) for p in ebook_files]
+                self.gui.save_process_threads_data()
+            except Exception:
+                entry = None
+
             # ---- finish & persist main file path (unchanged external signatures) ----
             if produced_paths:
                 try:
-                    main_path = max(produced_paths, key=lambda p: p.stat().st_size if p.exists() else -1)
+                    main_path = max(
+                        produced_paths,
+                        key=lambda p: p.stat().st_size if p.exists() else -1,
+                    )
                 except ValueError:
                     main_path = produced_paths[0]
 
                 self.file_progress.emit(row, 100)
-                try:
-                    entry = self.gui.process_threads[info["category_name"]][info["thread_title"]]
-                    if main_path:
-                        entry.update({
-                            "file_name": os.path.basename(str(main_path)),
-                            "file_path": str(main_path),
-                        })
-                    # (Optional) stash separated groups for later upload logic if needed:
-                    # entry["ebook_upload_files"] = [str(p) for p in produced_paths if p.exists() and _is_ebook_file(p)]
-                    # entry["audio_upload_files"]  = [str(p) for p in produced_paths if p.exists() and not _is_ebook_file(p)]
-                    self.gui.save_process_threads_data()
-                except Exception:
-                    pass
+                if entry is not None and main_path:
+                    try:
+                        entry.update(
+                            {
+                                "file_name": os.path.basename(str(main_path)),
+                                "file_path": str(main_path),
+                            }
+                        )
+                        self.gui.save_process_threads_data()
+                    except Exception:
+                        pass
 
-                logging.info("Processed files for '%s': %d", info["thread_title"], len(produced_paths))
+                logging.info(
+                    "Processed files for '%s': %d",
+                    info["thread_title"],
+                    len(produced_paths),
+                )
                 proc_status.stage = OpStage.FINISHED
                 proc_status.message = "Processing complete"
                 proc_status.progress = 100

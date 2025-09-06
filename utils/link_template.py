@@ -301,50 +301,64 @@ def apply_links_template(template: str, links: dict) -> str:
     # ---------- وضع (أ): استبدال توكنز {LINK_*} إن وُجدت ----------
     has_token_mode = any(("{LINK_" in template) for _ in (0,))
     if has_token_mode:
-        # جهّز قيمة كل توكن: أول رابط متاح لهذا المضيف (Keeplinks: النص نفسه)
-        token_value: dict[str, str] = {}
+        host_values: dict[str, list[str]] = {}
         for host, tok in HOST_TOKENS.items():
             if host == "keeplinks":
-                val = (canon.get("keeplinks") or [])
-                token_value[tok] = val[0] if val else ""
+                host_values[host] = canon.get("keeplinks") or []
             else:
-                val = canon.get(host) or []
-                token_value[tok] = val[0] if val else ""
+                host_values[host] = canon.get(host) or []
 
-        # دالة: إزالة مرساة مضيف فاضية بالكامل مع الفواصل المحيطة
         def _strip_host_placeholder(line: str, token: str) -> str:
             sep = r"[‖\|\-•·]"
-            # [url={LINK_X}]...[/url] مع فواصل قبل/بعد
             pat = r"\s*(?:%s\s*)?\[url=\{LINK_%s\}\][^\[]*?\[/url\]\s*(?:%s\s*)?" % (sep, token, sep)
             line = re.sub(pat, " ", line, flags=re.I)
-            # ولو كان التوكن موجود لوحده
             line = line.replace("{LINK_%s}" % token, "")
-            # نظافة فواصل متبقية
             line = re.sub(r"(?:\s*%s\s*){2,}" % sep, " - ", line)
             line = re.sub(r"^\s*%s\s*|\s*%s\s*$" % (sep, sep), "", line)
             return re.sub(r"[ \t]{2,}", " ", line).strip()
 
-        # طبّق الاستبدال/الإزالة سطرًا بسطر
-        out_lines = []
-        for ln in template.splitlines():
-            changed = ln
-            for host, tok in HOST_TOKENS.items():
-                placeholder = "{LINK_%s}" % tok
-                if placeholder in changed:
-                    val = token_value.get(tok, "")
-                    if val:
-                        changed = changed.replace(placeholder, val)
-                    else:
-                        changed = _strip_host_placeholder(changed, tok)
-            out_lines.append(changed)
+        out_lines: list[str] = []
+        if "{PART}" in template:
+            max_parts = max(
+                [len(v) for h, v in host_values.items() if h != "keeplinks"]
+                or [1]
+            )
+            for part in range(max_parts):
+                for ln in template.splitlines():
+                    changed = ln.replace("{PART}", str(part + 1))
+                    for host, tok in HOST_TOKENS.items():
+                        placeholder = "{LINK_%s}" % tok
+                        if placeholder in changed:
+                            urls = host_values.get(host, [])
+                            if part < len(urls):
+                                changed = changed.replace(placeholder, urls[part])
+                            else:
+                                changed = _strip_host_placeholder(changed, tok)
+                    out_lines.append(changed)
+        else:
+            token_value = {
+                tok: (vals[0] if vals else "")
+                for host, tok in HOST_TOKENS.items()
+                for vals in (host_values.get(host, []),)
+            }
+            for ln in template.splitlines():
+                changed = ln
+                for host, tok in HOST_TOKENS.items():
+                    placeholder = "{LINK_%s}" % tok
+                    if placeholder in changed:
+                        val = token_value.get(tok, "")
+                        if val:
+                            changed = changed.replace(placeholder, val)
+                        else:
+                            changed = _strip_host_placeholder(changed, tok)
+                out_lines.append(changed)
+
         result = "\n".join(out_lines)
 
-        # تنظيف عام + تكبير حجم الخط
         tmp, stash = _protect_urls(result)
         tmp = _sanitize_specials(tmp)
         tmp = _bump_font_sizes(tmp)
         result = _restore_urls(tmp, stash)
-        # لا نولّد أقسام إضافية فى وضع التوكنز (لتجنب الازدواجية)
         return result.strip()
 
     # ---------- وضع (ب): الأقسام الذكية ----------
@@ -352,9 +366,12 @@ def apply_links_template(template: str, links: dict) -> str:
     def _render_host_block(host: str, url_list: list[str]) -> str:
         if not url_list:
             return ""
-        label = HOST_LABELS.get(_norm_host(host), host)
-        parts = " - ".join(f"[url={u}]{str(i+1).zfill(2)}[/url]" for i, u in enumerate(url_list))
-        return f"[b]{label}:[/b] {parts}"
+        token = HOST_TOKENS.get(_norm_host(host), host)
+        parts = []
+        for i, u in enumerate(url_list, 1):
+            label = token if i == 1 else f"{token}-{i}"
+            parts.append(f"[url={u}]{label}[/url]")
+        return " ‖ ".join(parts)
 
     # نحاول قراءة الصيغ/الأجزاء إن كانت موجودة
     def _normalize_grouped(src: dict) -> dict:
@@ -414,7 +431,7 @@ def apply_links_template(template: str, links: dict) -> str:
                 any_line = True
         return "\n".join(lines) if any_line else ""
 
-    audio_block = _render_section("Audiobook", grouped["audio"])
+    audio_block = _render_section("Hörbuch", grouped["audio"])
     # E-Book مع كل صيغة على حدة
     ebook_block = ""
     if grouped["ebook"]:
@@ -430,7 +447,7 @@ def apply_links_template(template: str, links: dict) -> str:
 
     episodes_block = ""
     if grouped["episodes"]:
-        parts = ["[size=3][b]Episodes[/b][/size]"]
+        parts = ["[size=3][b]Episoden[/b][/size]"]
         for label in sorted(grouped["episodes"].keys()):
             parts.append(f"[b]{label}[/b]")
             by_host = grouped["episodes"][label]
@@ -460,6 +477,16 @@ def apply_links_template(template: str, links: dict) -> str:
         result = result.replace("{LINKS}", combined)
     else:
         combined = "\n\n".join([b for b in (audio_block, ebook_block, episodes_block) if b.strip()]) or mirrors_block
+        if combined.strip():
+            header_lines = []
+            keepl = canon.get("keeplinks") or []
+            if keepl:
+                header_lines.append(
+                    f"[center][size=3][url={keepl[0]}]Keeplinks[/url][/size][/center]"
+                )
+            header_lines.append("[center][size=3][b]Download-Links[/b][/size][/center]")
+            header_lines.append(combined)
+            combined = "\n".join(header_lines)
         result = result.rstrip() + ("\n\n" + combined if combined.strip() else "")
 
     # تنظيف أخير
@@ -469,6 +496,8 @@ def apply_links_template(template: str, links: dict) -> str:
     tmp = _sanitize_specials(tmp)
     tmp = _bump_font_sizes(tmp)
     result = _restore_urls(tmp, stash)
+    result = result.replace("Download - Links", "Download-Links")
+    result = result.replace("E - Book", "E-Book")
     return result.strip()
 
 # ---------------------------------------------------------------------------
