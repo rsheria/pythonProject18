@@ -777,17 +777,16 @@ class DownloadWorker(QThread):
     def process_thread_files(self, thread_id):
         if self._is_cancelled():
             return
+
         info = self.thread_info_map[thread_id]
         row = info["row"]
-        
-        # Check both downloaded_files (legacy) and new_files (JDownloader)
+
+        # Use any available list (legacy/new) and keep them in sync
         files = info.get("downloaded_files", []) or info.get("new_files", [])
-        
-        # Sync both for consistency
         if files:
             info["downloaded_files"] = files
             info["new_files"] = files
-            
+
         if not files:
             self.status_update.emit(f"No files for '{info['thread_title']}', skipping.")
             return
@@ -801,21 +800,30 @@ class DownloadWorker(QThread):
             message="Processing files",
         )
         self.progress_update.emit(proc_status)
+
         try:
+            from pathlib import Path
+            import os
+            import logging
+
             td = Path(self._save_to_for(info["category_name"], thread_id))
             password = (
                 self.gui.process_threads.get(info["category_name"], {})
                 .get(info["thread_title"], {})
                 .get("password")
             )
+
+            # ---- core processing (extract/split/compress according to app settings) ----
             processed = self.file_processor.process_downloads(
                 td,
                 files,
                 info["thread_title"],
                 password,
             )
-            # Normalize processing result => List[Path]
-            produced_paths: list[Path] = []
+
+            # ---- normalize result to (root_dir, produced_paths) without changing signatures/imports ----
+            root_dir = td
+            produced_paths = []
             if processed:
                 if isinstance(processed, tuple):
                     root_dir, produced_files = processed
@@ -825,31 +833,176 @@ class DownloadWorker(QThread):
                         produced_paths = [Path(str(p)) for p in produced_files]
                 elif isinstance(processed, (list, tuple, set)):
                     produced_paths = [Path(p) for p in processed]
-                    root_dir = td
                 elif isinstance(processed, (str, Path)):
                     produced_paths = [Path(processed)]
-                    root_dir = td
-                else:
-                    produced_paths = []
 
+            # =========================
+            # AUDIOBOOK SPECIAL HANDLING
+            # =========================
+            # Requirement: In audiobook categories, ensure ANY eBook content ends up UNCOMPRESSED,
+            # even if app settings say "always compress". If an eBook was packed by the processor,
+            # we unpack it and delete the eBook archive. Audio stays as-is (compressed).
+            def _is_audio_category(name: str) -> bool:
+                s = (name or "").lower()
+                return any(k in s for k in ["hörbuch", "hörspiel", "hoerbuch", "audiobook", "كتب صوتية"])
+
+            def _is_ebook_file(p: Path) -> bool:
+                return p.suffix.lower() in {".epub", ".pdf", ".mobi", ".azw3", ".djvu", ".fb2", ".cbz", ".cbr", ".txt"}
+
+            def _looks_ebook_archive_name(p: Path) -> bool:
+                n = p.name.lower()
+                if p.suffix.lower() not in {".rar", ".zip", ".7z"}:
+                    return False
+                tokens = ("ebook", "e-book", " (e-book", " (epub", " (pdf", " epub", " pdf")
+                return any(t in n for t in tokens)
+
+            def _extract_archive(archive_path: Path, out_dir: Path) -> list[Path]:
+                out = []
+                # Try rar
+                try:
+                    if archive_path.suffix.lower() == ".rar":
+                        import rarfile  # type: ignore
+                        if rarfile.is_rarfile(str(archive_path)):
+                            with rarfile.RarFile(str(archive_path)) as rf:
+                                for m in rf.infolist():
+                                    if getattr(m, "is_dir", lambda: False)():
+                                        continue
+                                    rf.extract(m, path=str(out_dir))
+                                    out.append(out_dir / m.filename)
+                            return out
+                except Exception:
+                    pass
+                # Try zip
+                try:
+                    import zipfile
+                    if zipfile.is_zipfile(str(archive_path)):
+                        with zipfile.ZipFile(str(archive_path)) as zf:
+                            for m in zf.infolist():
+                                if m.is_dir():
+                                    continue
+                                zf.extract(m, path=str(out_dir))
+                                out.append(out_dir / m.filename)
+                        return out
+                except Exception:
+                    pass
+                # Try 7z
+                try:
+                    if archive_path.suffix.lower() == ".7z":
+                        import py7zr  # type: ignore
+                        with py7zr.SevenZipFile(str(archive_path), mode="r") as z:
+                            z.extractall(path=str(out_dir))
+                        for p in out_dir.rglob("*"):
+                            if p.is_file():
+                                out.append(p)
+                        return out
+                except Exception:
+                    pass
+                return out
+
+            def _move_to_dir(p: Path, target_dir: Path) -> Path:
+                target_dir.mkdir(parents=True, exist_ok=True)
+                dst = target_dir / p.name
+                if dst.exists():
+                    stem, suf = dst.stem, dst.suffix
+                    idx = 1
+                    while (target_dir / f"{stem}_{idx}{suf}").exists():
+                        idx += 1
+                    dst = target_dir / f"{stem}_{idx}{suf}"
+                try:
+                    p.replace(dst)
+                except Exception:
+                    try:
+                        import shutil
+                        shutil.copy2(str(p), str(dst))
+                        try:
+                            p.unlink()
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                return dst
+
+            def _remove_empty_dirs(base: Path) -> None:
+                try:
+                    dirs = sorted((d for d in base.rglob("*") if d.is_dir()), key=lambda x: len(str(x)), reverse=True)
+                    for d in dirs:
+                        try:
+                            next(d.iterdir())
+                        except StopIteration:
+                            try:
+                                d.rmdir()
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            if produced_paths and _is_audio_category(info.get("category_name", "")) and root_dir and Path(
+                    root_dir).exists():
+                rootp = Path(root_dir)
+
+                # 1) If the processor produced "ebook archives", unpack them and delete the archives.
+                ebook_archives = [p for p in produced_paths if p.exists() and _looks_ebook_archive_name(p)]
+                unpacked_ebooks: list[Path] = []
+                for arc in ebook_archives:
+                    extracted = _extract_archive(arc, rootp)
+                    if extracted:
+                        # keep only recognized ebook files; move them to root (flat)
+                        for f in extracted:
+                            if f.is_file() and _is_ebook_file(f):
+                                moved = _move_to_dir(f, rootp)
+                                unpacked_ebooks.append(moved)
+                        try:
+                            arc.unlink()
+                        except Exception:
+                            pass
+                        logging.info("EBook archive unpacked & removed: %s", arc)
+
+                # 2) Scan inside root for ebook files that might be still nested, move them to root.
+                for f in list(rootp.rglob("*")):
+                    if f.is_file() and _is_ebook_file(f) and f.parent != rootp:
+                        _move_to_dir(f, rootp)
+
+                # 3) Remove now-empty directories created for ebooks
+                _remove_empty_dirs(rootp)
+
+                # 4) Rebuild produced_paths to ensure ebooks are UNCOMPRESSED artifacts (files), not archives
+                #    Keep any audio archives the processor produced; drop ebook archives we removed.
+                refreshed: list[Path] = []
+                for p in produced_paths:
+                    if p.exists():
+                        # We removed ebook archives; don't re-append them.
+                        if _looks_ebook_archive_name(p):
+                            continue
+                        refreshed.append(p)
+                # plus unpacked ebook files
+                refreshed.extend(up for up in unpacked_ebooks if up.exists())
+                produced_paths = refreshed
+
+            # ---- finish & persist main file path (unchanged external signatures) ----
             if produced_paths:
-                # Choose main (largest) for persistence
                 try:
                     main_path = max(produced_paths, key=lambda p: p.stat().st_size if p.exists() else -1)
                 except ValueError:
                     main_path = produced_paths[0]
+
                 self.file_progress.emit(row, 100)
-                entry = self.gui.process_threads[info["category_name"]][
-                    info["thread_title"]
-                ]
-                if main_path:
-                    entry.update({"file_name": os.path.basename(str(main_path)), "file_path": str(main_path)})
-                self.gui.save_process_threads_data()
-                logging.info(
-                    "Processed files for '%s': %d", info["thread_title"], len(produced_paths)
-                )
-                # Do NOT auto-upload here in normal Download flow.
-                # Upload is triggered explicitly by the user or by Auto-Process.
+                try:
+                    entry = self.gui.process_threads[info["category_name"]][info["thread_title"]]
+                    if main_path:
+                        entry.update({
+                            "file_name": os.path.basename(str(main_path)),
+                            "file_path": str(main_path),
+                        })
+                    # (Optional) stash separated groups for later upload logic if needed:
+                    # entry["ebook_upload_files"] = [str(p) for p in produced_paths if p.exists() and _is_ebook_file(p)]
+                    # entry["audio_upload_files"]  = [str(p) for p in produced_paths if p.exists() and not _is_ebook_file(p)]
+                    self.gui.save_process_threads_data()
+                except Exception:
+                    pass
+
+                logging.info("Processed files for '%s': %d", info["thread_title"], len(produced_paths))
                 proc_status.stage = OpStage.FINISHED
                 proc_status.message = "Processing complete"
                 proc_status.progress = 100
@@ -863,7 +1016,8 @@ class DownloadWorker(QThread):
 
         except Exception as e:
             err = f"Error processing '{info['thread_title']}': {e}"
-            logging.error(err, exc_info=True)
+            import logging as _lg
+            _lg.error(err, exc_info=True)
             self.status_update.emit(err)
             proc_status.stage = OpStage.ERROR
             proc_status.message = err

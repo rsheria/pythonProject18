@@ -291,58 +291,153 @@ def apply_template(
     *,
     thread_title: str = "",
 ) -> str:
-    """Fill the template with parsed data.
-
-    thread_title: Optional title from the GUI overriding the parsed one.
-    """
+    """Fill the template with parsed data, then sanitize output for forum safety."""
     cfg = _load_cfg(category, author)
     prompt = cfg.get("prompt", load_global_prompt())
     data = parse_bbcode_ai(bbcode, prompt)
 
     final_title = thread_title or data["title"]
 
+    # Build header (author + title if available)
+    header = final_title.strip()
+    author_name = cfg.get("author_name") or author or ""
+    if author_name and author_name.lower() not in header.lower():
+        header = f"{author_name} — {header}".strip(" —")
+
+    # Compose description/body with flexible order (keep existing behavior)
+    desc = data.get("desc", "").strip()
+    body = data.get("body", "").strip()
+
+    # Load template for this (category, author)
+    template: str = cfg.get("template", "") or "{TITLE}\n\n{COVER}\n\n{DESC}\n\n{BODY}\n\n{LINKS}"
+
+    # Fill basic placeholders (leave {LINKS} for later replacement by caller/convert)
     filled = (
-        cfg["template"]
-        .replace("{TITLE}", final_title)
-        .replace("{COVER}", data["cover"])
-        .replace("{DESC}", data["desc"])
-        .replace("{BODY}", data["body"])
+        template.replace("{TITLE}", header)
+        .replace("{COVER}", data.get("cover", "").strip())
+        .replace("{DESC}", desc)
+        .replace("{BODY}", body)
     )
 
-    # Leave the {LINKS} placeholder untouched so that the caller can insert
-    # freshly uploaded links (via the SettingsWidget template) later on.
-    if "{LINKS}" not in cfg["template"]:
-        links_block = "\n".join(data.get("links", []))
-        if links_block:
-            if filled and not filled.endswith("\n"):
-                filled += "\n"
-            filled += links_block
+    # If template does not contain {LINKS}, but AI parsed links, append them as raw fallback
+    if "{LINKS}" not in filled:
+        raw_links = "\n".join(data.get("links", []) or [])
+        if raw_links:
+            filled += "\n\n" + raw_links
+
+    # Forum safety & cosmetics:
+    #  - replace forbidden/special characters (e.g. ‖) with safe dash
+    #  - normalize BBCode font size: [size=2] → [size=3]
+    #  - never mutate URLs inside [url]...[/url] or bare http(s):// links
+    def _protect_urls(text: str) -> tuple[str, dict]:
+        repl = {}
+        idx = 0
+
+        def _stash(s: str) -> str:
+            nonlocal idx
+            key = f"__URL_PLACEHOLDER_{idx}__"
+            repl[key] = s
+            idx += 1
+            return key
+
+        # [url]...[/url] blocks
+        text = re.sub(r"\[url(?:=[^\]]+)?\].*?\[/url\]", lambda m: _stash(m.group(0)), text, flags=re.I | re.S)
+        # Bare http(s)://… sequences
+        text = re.sub(r"https?://[^\s\]]+", lambda m: _stash(m.group(0)), text, flags=re.I)
+        return text, repl
+
+    def _restore_urls(text: str, repl: dict) -> str:
+        for k, v in repl.items():
+            text = text.replace(k, v)
+        return text
+
+    def _sanitize_specials(text: str) -> str:
+        mapping = {
+            "‖": "-", "–": "-", "—": "-", "−": "-",
+            "•": "-", "●": "-", "►": "-", "▪": "-",
+            "│": "|", "¦": "|",
+            "…": "...", "⋯": "...",
+            "\u00A0": " ",  # non-breaking space
+        }
+        for bad, good in mapping.items():
+            text = text.replace(bad, good)
+        # collapse multiple spaces/dashes
+        text = re.sub(r"[ \t]{2,}", " ", text)
+        text = re.sub(r"-{3,}", "--", text)
+        return text
+
+    def _bump_font_sizes(text: str) -> str:
+        # [size=2] or [size="2"] → [size=3]
+        text = re.sub(r"\[size\s*=\s*['\"]?2['\"]?\s*\]", "[size=3]", text, flags=re.I)
+        text = re.sub(r"\[/size\]", "[/size]", text)  # idempotent, keeps tag
+        return text
+
+    tmp, stash = _protect_urls(filled)
+    tmp = _sanitize_specials(tmp)
+    tmp = _bump_font_sizes(tmp)
+    filled = _restore_urls(tmp, stash)
+
     return filled
+
+
 def convert(thread: dict, apply_hooks: bool = True) -> str:
+    import re
+
     category = str(thread.get("category", "")).lower()
     author = thread.get("author", "")
     bbcode = thread.get("bbcode_original") or ""
     if not category or not author:
         return bbcode
-    bbcode = apply_template(bbcode, category, author)
 
-    # Replace the {LINKS} placeholder using the user's template and the
-    # uploaded links associated with this thread.  If no links exist yet,
-    # insert a placeholder so that the caller can update it later.
+    bbcode = apply_template(bbcode, category, author, thread_title=thread.get("title", ""))
+
+    # احذف أى بلوكات روابط قديمة لتجنب التكرار
+    def _strip_old_links(text: str) -> str:
+        patterns = [
+            r"\[LINKS START\][\s\S]*?\[LINKS END\]",
+            r"\n\[b\]\s*(?:links|download links|روابط التحميل)\s*\[/b\][\s\S]*?$",
+            r"\n\[center\]\s*\[size=\d+\]\s*\[b\]\s*(?:links|download links|روابط التحميل)\s*\[/b\]\s*\[/size\]\s*\[/center\][\s\S]*?$",
+        ]
+        for pat in patterns:
+            text = re.sub(pat, "", text, flags=re.I | re.M)
+        return text
+
+    # أعد بناء كتلة الروابط فقط من المضيفين اللى ليهم URLs فعلاً
+    links_block = ""
     if "{LINKS}" in bbcode:
         try:
-            from utils import apply_links_template, LINK_TEMPLATE_PRESETS
-            from core.user_manager import get_user_manager
+            # prune أى فراغات فى الداتا
+            def _prune(o):
+                if isinstance(o, dict):
+                    d = {k: _prune(v) for k, v in o.items()}
+                    return {k: v for k, v in d.items() if v not in (None, "", [], {})}
+                if isinstance(o, (list, tuple, set)):
+                    return [x for x in o if x]
+                return o
 
-            links_dict = thread.get("links", {}) or {}
+            links_dict = _prune(thread.get("links", {}) or {})
+            from utils import apply_links_template, LINK_TEMPLATE_PRESETS  # :contentReference[oaicite:0]{index=0}
+            from core.user_manager import get_user_manager
             user_mgr = get_user_manager()
             template = user_mgr.get_user_setting("links_template", LINK_TEMPLATE_PRESETS[0])
-            links_block = apply_links_template(template, links_dict).strip()
+            raw_block = apply_links_template(template, links_dict) or ""
         except Exception:
-            links_block = ""
+            raw_block = ""
 
-        if not links_block:
-            links_block = "[LINKS TBD]"
+        # تنظيف بسيط: إزالة [url=] الفارغة/الفواصل اليتيمة + تكبير حجم الخط
+        def _strip_empty_urls(t: str) -> str:
+            t = re.sub(r"\[url=\s*\](.*?)\[/url\]", r"\1", t, flags=re.I | re.S)
+            t = re.sub(r"\[url\]\s*\[/url\]", "", t, flags=re.I | re.S)
+            return t
+        def _bump(t: str) -> str:
+            return re.sub(r"(?i)\[size\s*=\s*2\]", "[size=3]", t)
+
+        lb = _strip_old_links(raw_block)
+        lb = _strip_empty_urls(lb)
+        lb = _bump(lb).strip()
+        links_block = lb or "[LINKS TBD]"
+
+        bbcode = _strip_old_links(bbcode)
         bbcode = bbcode.replace("{LINKS}", links_block)
 
     if apply_hooks:
@@ -352,4 +447,41 @@ def convert(thread: dict, apply_hooks: bool = True) -> str:
         link_hook = _HOOKS.get("rewrite_links")
         if link_hook:
             bbcode = link_hook(bbcode)
+
+    # تعقيم عام لسلامة المنتدى
+    def _protect_urls(text: str) -> tuple[str, dict]:
+        repl = {}
+        idx = 0
+        def _stash(m):
+            nonlocal idx
+            key = f"__URL_PLACEHOLDER_{idx}__"
+            repl[key] = m.group(0)
+            idx += 1
+            return key
+        text = re.sub(r"\[url(?:=[^\]]+)?\].*?\[/url\]", _stash, text, flags=re.I | re.S)
+        text = re.sub(r"https?://[^\s\]]+", _stash, text, flags=re.I)
+        return text, repl
+    def _restore_urls(text: str, repl: dict) -> str:
+        for k, v in repl.items():
+            text = text.replace(k, v)
+        return text
+    def _sanitize_specials(text: str) -> str:
+        text = text.replace("‖", "-").replace("\u00A0", " ")
+        text = re.sub(r"[ \t]{2,}", " ", text)
+        text = re.sub(r"(\s*[\|\–—]+\s*){2,}", " - ", text)
+        text = re.sub(r"\s*-\s*", " - ", text)
+        text = re.sub(r"(?:\s*-\s*){2,}", " - ", text)
+        text = re.sub(r"\s*-\s*$", "", text)
+        return text
+    def _bump_sizes(text: str) -> str:
+        return re.sub(r"(?i)\[size\s*=\s*['\"]?2['\"]?\s*\]", "[size=3]", text)
+
+    tmp, stash = _protect_urls(bbcode)
+    tmp = _sanitize_specials(tmp)
+    tmp = _bump_sizes(tmp)
+    bbcode = _restore_urls(tmp, stash)
     return bbcode
+
+
+
+

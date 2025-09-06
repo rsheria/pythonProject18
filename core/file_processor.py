@@ -1342,6 +1342,7 @@ class FileProcessor:
         return book_only, audio_only, assets
 
     # ------------------------------------------------------------------
+
     def package_assets(
         self,
         book_dir: Path,
@@ -1350,31 +1351,31 @@ class FileProcessor:
         assets: dict,
         output_dir: Path | None = None,
     ) -> dict:
-        """Create separate RAR packages for audio and each book format.
+        """Create packages for audio and handle books per category policy.
 
-        Parameters
-        ----------
-        book_dir: Path
-            Directory containing extracted book files.
-        audio_dir: Path
-            Directory containing extracted audio/other files.
-        base_title: str
-            Title used for resulting archive names (sanitized).
-        assets: dict
-            Mapping produced by :meth:`split_embedded_assets`.
+        - Always package AUDIO to RAR(s) as before.
+        - If the category is Hörbücher/Hörspiele (audio books), DO NOT compress book files:
+          copy them next to the audio archive as plain files (EPUB/PDF/…).
+        - Otherwise (non-audio-book categories), keep the old behavior and RAR each book format.
 
         Returns
         -------
         dict
-            ``{"audio": [Path, ...], "book": {fmt: [Path, ...]}}``
-            listing all created archive paths.
+            {"audio": [Path, ...], "book": {fmt: [Path, ...]}}
         """
-
         result: dict[str, any] = {"audio": [], "book": {}}
         safe_title = self._sanitize_and_shorten_title(base_title)
 
         # Determine output directory (defaults to parent of sources)
         out_dir = Path(output_dir) if output_dir else audio_dir.parent
+
+        # Detect audiobook category from the parent folder name (e.g. "Horbucher_und_Horspiele")
+        # This works for both "Hörbuch/ Hörspiele" and ASCII "Horbucher/ Horspiele"
+        parent_name = out_dir.parent.name.lower() if out_dir.parent else ""
+        is_audiobook_category = any(
+            kw in parent_name
+            for kw in ("hör", "horbuch", "hörbuch", "horspiel", "hörspiel")
+        )
 
         # Audio package -------------------------------------------------
         audio_base = out_dir / f"{safe_title} (Hörbuch)"
@@ -1385,9 +1386,41 @@ class FileProcessor:
                 (audio_base.with_suffix(".rar")).write_bytes(b"")
             result["audio"] = sorted(out_dir.glob(f"{audio_base.name}*.rar"))
 
-        # Book packages per format -------------------------------------
+        # Book handling -------------------------------------------------
         book_files = assets.get("book_files", {}) if isinstance(assets, dict) else {}
-        if book_dir.exists() and book_files:
+
+        if not book_dir.exists() or not book_files:
+            return result
+
+        if is_audiobook_category:
+            # ✅ New policy for audiobooks:
+            #   Do NOT compress books. Copy them out next to the audio archive.
+            for fmt, files in book_files.items():
+                produced: list[Path] = []
+                for idx, name in enumerate(files, start=1):
+                    src = book_dir / name
+                    if not src.exists():
+                        continue
+                    # If single file for format -> TITLE (E-Book - FMT).ext
+                    # If multiple -> TITLE (E-Book - FMT) [i].ext
+                    base = out_dir / f"{safe_title} (E-Book - {fmt.upper()})"
+                    if len(files) == 1:
+                        dst = base.with_suffix(Path(name).suffix)
+                    else:
+                        dst = out_dir / f"{base.name} [{idx}]{Path(name).suffix}"
+                    # Avoid overwriting by adding counter if needed
+                    final = dst
+                    counter = 1
+                    while final.exists():
+                        stem, suf = final.stem, final.suffix
+                        final = final.with_name(f"{stem}_{counter}{suf}")
+                        counter += 1
+                    shutil.copy2(src, final)
+                    produced.append(final)
+                if produced:
+                    result.setdefault("book", {})[fmt] = produced
+        else:
+            # Legacy behavior (non-audiobook categories): RAR each format
             for fmt, files in book_files.items():
                 tmp_dir = book_dir / f"__{fmt}"
                 tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -1405,3 +1438,4 @@ class FileProcessor:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
         return result
+

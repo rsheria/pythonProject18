@@ -167,88 +167,309 @@ def _append_multi_block(blocks: List[str], label: str, urls: List[str]) -> None:
 
 # ----------------------------- main API ------------------------------------
 
-def apply_links_template(template: str, links_dict: dict) -> str:
+def apply_links_template(template: str, links: dict) -> str:
     """
-    يطبّق التيمبلت بذكاء:
-      - {LINK_KEEP} يتبدّل بأول Keeplinks لو موجود (مرة واحدة فقط).
-      - لباقي المضيفين {LINK_DDL}/{LINK_RG}/{LINK_KF}/{LINK_NF}/{LINK_MEGA}:
-          * 0 لينك  => يمسح العنصر بالكامل.
-          * 1 لينك  => يستبدل الـ placeholder بالرابط (لو داخل [url=...] هيفضل التنسيق).
-          * +1 لينك => يمسح العنصر من السطر الرئيسي ويضيف بلوك منفصل مرقّم 01..N تحت.
+    ذكي لتجهيز كتلة الروابط مع احترام التيمبلت المحفوظ:
+
+      • يدعم وضعين للتيمبلت:
+        (أ) وضع التوكنز البسيط: يستبدل {LINK_RG}/{LINK_DDL}/... داخل
+            وسوم [url=...] ويشيل المضيفين اللى مفيش لهم روابط بالكامل.
+        (ب) وضع الأقسام: {AUDIO}/{EBOOK}/{EPISODES} + {LINKS} المجمّع.
+
+      • يرتّب المضيفين حسب utils/host_priority.py
+      • يخفى أى مضيف مفيهوش روابط فعلية.
+      • لا يلمس عناوين الـ URLs إطلاقاً (يحميها أثناء التعقيم).
+      • يستبدل الرموز الممنوعة (‖ → -) ويرفع [size=2] إلى [size=3].
+      • يتعامل مع Keeplinks كرابط واحد (من غير ترقيم أحرف!).
+
+    يقبل أشكال links المختلفة (المسطّح/المجمّع/الكانوني).
     """
-    # 1) طبّع وفهرس الروابط
-    jd = _normalize_links_dict(links_dict)
+    import re
+    from collections import defaultdict
 
-    if "{PART}" in template:
-        lines: List[str] = []
-        tmpl_lines = template.splitlines()
-        max_parts = max((len(jd.get(h, [])) for h in jd if h != "keeplinks"), default=0)
-        for idx in range(max_parts):
-            for line in tmpl_lines:
-                skip = False
-                out_line = line
-                for host, token in HOST_TOKENS.items():
-                    placeholder = "{LINK_%s}" % token
-                    if placeholder in out_line:
-                        urls = jd.get(host, [])
-                        if idx < len(urls):
-                            out_line = out_line.replace(placeholder, urls[idx])
-                            out_line = out_line.replace("{PART}", str(idx + 1))
-                        else:
-                            skip = True
-                        break
-                if not skip:
-                    out_line = out_line.replace("{PART}", str(idx + 1))
-                    lines.append(out_line)
-        return "\n".join(lines).strip()
+    # ---------- إعدادات ورموز المضيفين ----------
+    HOST_TOKENS = {
+        "ddownload":  "DDL",
+        "rapidgator": "RG",
+        "katfile":    "KF",
+        "nitroflare": "NF",
+        "mega":       "MEGA",
+        "keeplinks":  "KEEP",
+    }
+    HOST_LABELS = {
+        "ddownload":  "DDownload",
+        "rapidgator": "Rapidgator",
+        "katfile":    "Katfile",
+        "nitroflare": "Nitroflare",
+        "mega":       "MEGA",
+    }
 
-    # 2) Keeplinks: استخدم أول واحد فقط
-    keep_urls = jd.get("keeplinks", [])
-    if keep_urls:
-        template = template.replace("{LINK_KEEP}", keep_urls[0])
-    else:
-        template = template.replace("{LINK_KEEP}", "")
+    # ترتيب المضيفين (لو متاح)
+    HOST_ORDER: list[str] = []
+    try:
+        from .host_priority import get_host_priority  # type: ignore
+        try:
+            HOST_ORDER = list(get_host_priority())
+        except Exception:
+            HOST_ORDER = []
+    except Exception:
+        try:
+            from .host_priority import HOST_PRIORITY  # type: ignore
+            HOST_ORDER = list(HOST_PRIORITY)
+        except Exception:
+            HOST_ORDER = []
+    HOST_INDEX = {h: i for i, h in enumerate(HOST_ORDER)}
+    def _norm_host(h: str) -> str:
+        h = (h or "").lower()
+        if "rapidgator" in h: return "rapidgator"
+        if "ddownload"  in h or h == "ddl": return "ddownload"
+        if "katfile"    in h: return "katfile"
+        if "nitroflare" in h: return "nitroflare"
+        if "mega"       in h: return "mega"
+        if "keeplink"   in h or "keeplinks" in h: return "keeplinks"
+        return h
+    def _sort_hosts(keys: list[str]) -> list[str]:
+        return sorted(keys, key=lambda k: HOST_INDEX.get(_norm_host(k), 10_000))
 
-    # 3) باقي المضيفين
-    multi_blocks: List[str] = []
-    for host in HOST_ORDER:
-        token = HOST_TOKENS[host]
-        label = HOST_LABELS[host]
-        urls = jd.get(host, []) or []
+    # ---------- حماية الروابط أثناء التعقيم ----------
+    def _protect_urls(text: str) -> tuple[str, dict]:
+        repl = {}
+        idx = 0
+        def _stash(m):
+            nonlocal idx
+            key = f"__URL_PLACEHOLDER_{idx}__"
+            repl[key] = m.group(0)
+            idx += 1
+            return key
+        text = re.sub(r"\[url(?:=[^\]]+)?\].*?\[/url\]", _stash, text, flags=re.I | re.S)
+        text = re.sub(r"https?://[^\s\]]+", _stash, text, flags=re.I)
+        return text, repl
+    def _restore_urls(text: str, repl: dict) -> str:
+        for k, v in repl.items():
+            text = text.replace(k, v)
+        return text
 
-        if not urls:
-            template = template.replace("{LINK_%s}" % token, "")
-            continue
+    def _sanitize_specials(text: str) -> str:
+        mapping = {"‖": "-", "–": "-", "—": "-", "−": "-", "\u00A0": " "}
+        for bad, good in mapping.items():
+            text = text.replace(bad, good)
+        text = re.sub(r"[ \t]{2,}", " ", text)
+        text = re.sub(r"(\s*[\|\-]\s*){2,}", " - ", text)
+        text = re.sub(r"\s*-\s*", " - ", text)
+        text = re.sub(r"(?:\s*-\s*){2,}", " - ", text)
+        text = re.sub(r"\s*-\s*$", "", text)
+        return text
+    def _bump_font_sizes(text: str) -> str:
+        return re.sub(r"(?i)\[size\s*=\s*['\"]?2['\"]?\s*\]", "[size=3]", text)
 
-        if len(urls) == 1:
-            # استبدل الـ placeholder لو موجود
-            placeholder = "{LINK_%s}" % token
-            if placeholder in template:
-                template = template.replace(placeholder, urls[0])
+    # ---------- توحيد links إلى شكل مفهوم ----------
+    # نحاول أولاً الاستفادة من الشكل الكانوني لو متوفر (rapidgator.net…)
+    canon: dict[str, list[str]] = {}
+    if isinstance(links, dict):
+        for k, v in links.items():
+            key = _norm_host(str(k))
+            if key == "keeplinks":
+                # نخزّنه منفصل (سلسلة واحدة)
+                canon["keeplinks"] = [v] if v else []
+                continue
+            # v ممكن يكون list/tuple/dict/str
+            urls: list[str] = []
+            if isinstance(v, (list, tuple, set)):
+                for x in v:
+                    if isinstance(x, dict):
+                        for kk in ("urls", "url", "link"):
+                            if kk in x and x[kk]:
+                                val = x[kk]
+                                if isinstance(val, (list, tuple, set)):
+                                    urls += [str(u) for u in val if u]
+                                elif val:
+                                    urls.append(str(val))
+                    elif x:
+                        urls.append(str(x))
+            elif isinstance(v, dict):
+                val = v.get("urls") or v.get("url") or v.get("link")
+                if isinstance(val, (list, tuple, set)):
+                    urls += [str(u) for u in val if u]
+                elif val:
+                    urls.append(str(val))
+            elif v:
+                urls.append(str(v))
+            if urls:
+                canon.setdefault(key, [])
+                canon[key] += [u for u in urls if u]
+
+    # ---------- وضع (أ): استبدال توكنز {LINK_*} إن وُجدت ----------
+    has_token_mode = any(("{LINK_" in template) for _ in (0,))
+    if has_token_mode:
+        # جهّز قيمة كل توكن: أول رابط متاح لهذا المضيف (Keeplinks: النص نفسه)
+        token_value: dict[str, str] = {}
+        for host, tok in HOST_TOKENS.items():
+            if host == "keeplinks":
+                val = (canon.get("keeplinks") or [])
+                token_value[tok] = val[0] if val else ""
             else:
-                # لو التيمبلت بيستخدم [url={LINK_TOKEN}]..[/url] هتتم المعالجة تلقائيًا
-                template = template.replace("{LINK_%s}" % token, urls[0])
-                template = template.replace("[url={LINK_%s}]" % token, "[url=%s]" % urls[0])
-        else:
-            # شيل من السطر الرئيسي وأضِف بلوك مرقّم
-            template = _strip_host_placeholder(template, token)
-            _append_multi_block(multi_blocks, label, urls)
+                val = canon.get(host) or []
+                token_value[tok] = val[0] if val else ""
 
-    # 4) نظافة عامة + إضافة بلوكات متعددة بعد أول [/center] لو موجود
-    template = re.sub(r"\{LINK_[A-Z_]+\}", "", template)  # أي placeholders متبقية
+        # دالة: إزالة مرساة مضيف فاضية بالكامل مع الفواصل المحيطة
+        def _strip_host_placeholder(line: str, token: str) -> str:
+            sep = r"[‖\|\-•·]"
+            # [url={LINK_X}]...[/url] مع فواصل قبل/بعد
+            pat = r"\s*(?:%s\s*)?\[url=\{LINK_%s\}\][^\[]*?\[/url\]\s*(?:%s\s*)?" % (sep, token, sep)
+            line = re.sub(pat, " ", line, flags=re.I)
+            # ولو كان التوكن موجود لوحده
+            line = line.replace("{LINK_%s}" % token, "")
+            # نظافة فواصل متبقية
+            line = re.sub(r"(?:\s*%s\s*){2,}" % sep, " - ", line)
+            line = re.sub(r"^\s*%s\s*|\s*%s\s*$" % (sep, sep), "", line)
+            return re.sub(r"[ \t]{2,}", " ", line).strip()
 
-    lower_t = template.lower()
-    if "[/center]" in lower_t and lower_t.strip().startswith("[center"):
-        idx = lower_t.rfind("[/center]")
-        idx = template.lower().rfind("[/center]")
-        head = template[: idx + len("[/center]")]
-        tail = template[idx + len("[/center]") :]
-        extra = ("\n" + "\n".join(multi_blocks) + "\n") if multi_blocks else ""
-        return (head + extra + tail).strip()
+        # طبّق الاستبدال/الإزالة سطرًا بسطر
+        out_lines = []
+        for ln in template.splitlines():
+            changed = ln
+            for host, tok in HOST_TOKENS.items():
+                placeholder = "{LINK_%s}" % tok
+                if placeholder in changed:
+                    val = token_value.get(tok, "")
+                    if val:
+                        changed = changed.replace(placeholder, val)
+                    else:
+                        changed = _strip_host_placeholder(changed, tok)
+            out_lines.append(changed)
+        result = "\n".join(out_lines)
+
+        # تنظيف عام + تكبير حجم الخط
+        tmp, stash = _protect_urls(result)
+        tmp = _sanitize_specials(tmp)
+        tmp = _bump_font_sizes(tmp)
+        result = _restore_urls(tmp, stash)
+        # لا نولّد أقسام إضافية فى وضع التوكنز (لتجنب الازدواجية)
+        return result.strip()
+
+    # ---------- وضع (ب): الأقسام الذكية ----------
+    # نبنى هيكل مجمّع: Audio/E-Book/Episodes/Other (لو مستخدم بيبعته)
+    def _render_host_block(host: str, url_list: list[str]) -> str:
+        if not url_list:
+            return ""
+        label = HOST_LABELS.get(_norm_host(host), host)
+        parts = " - ".join(f"[url={u}]{str(i+1).zfill(2)}[/url]" for i, u in enumerate(url_list))
+        return f"[b]{label}:[/b] {parts}"
+
+    # نحاول قراءة الصيغ/الأجزاء إن كانت موجودة
+    def _normalize_grouped(src: dict) -> dict:
+        out = {
+            "audio": defaultdict(list),
+            "ebook": defaultdict(lambda: defaultdict(list)),
+            "episodes": defaultdict(lambda: defaultdict(list)),
+            "other": defaultdict(list),
+        }
+        have_grouped = False
+        if isinstance(src, dict):
+            if any(k in src for k in ("audio", "ebook", "episodes", "mirrors")):
+                have_grouped = True
+        if not have_grouped:
+            # fallback: اعرض كل المضيفين المتاحة كمرايات "other"
+            for host, urls in (canon or {}).items():
+                if host == "keeplinks":
+                    continue
+                if urls:
+                    out["other"][host].extend(urls)
+            return out
+
+        # Grouped paths (لو اتبعت بهذا الشكل)
+        audio = (src.get("audio") or {}) if isinstance(src, dict) else {}
+        for host, urls in (audio.items() if isinstance(audio, dict) else []):
+            if urls:
+                out["audio"][host].extend([u for u in urls if u])
+
+        ebook = (src.get("ebook") or {}) if isinstance(src, dict) else {}
+        for fmt, by_host in (ebook.items() if isinstance(ebook, dict) else []):
+            for host, urls in (by_host.items() if isinstance(by_host, dict) else []):
+                if urls:
+                    out["ebook"][str(fmt).upper()][host].extend([u for u in urls if u])
+
+        episodes = (src.get("episodes") or {}) if isinstance(src, dict) else {}
+        for label, by_host in (episodes.items() if isinstance(episodes, dict) else []):
+            for host, urls in (by_host.items() if isinstance(by_host, dict) else []):
+                if urls:
+                    out["episodes"][label][host].extend([u for u in urls if u])
+
+        mirrors = (src.get("mirrors") or {}) if isinstance(src, dict) else {}
+        for host, urls in (mirrors.items() if isinstance(mirrors, dict) else []):
+            if urls:
+                out["other"][host].extend([u for u in urls if u])
+
+        return out
+
+    grouped = _normalize_grouped(links or {})
+
+    def _render_section(title: str, mapping: dict) -> str:
+        lines = [f"[size=3][b]{title}[/b][/size]"]
+        any_line = False
+        for host in _sort_hosts(list(mapping.keys())):
+            block = _render_host_block(host, mapping[host])
+            if block:
+                lines.append(f"[center]{block}[/center]")
+                any_line = True
+        return "\n".join(lines) if any_line else ""
+
+    audio_block = _render_section("Audiobook", grouped["audio"])
+    # E-Book مع كل صيغة على حدة
+    ebook_block = ""
+    if grouped["ebook"]:
+        parts = ["[size=3][b]E-Book[/b][/size]"]
+        for fmt in sorted(grouped["ebook"].keys()):
+            parts.append(f"[b]{fmt}[/b]")
+            by_host = grouped["ebook"][fmt]
+            for host in _sort_hosts(list(by_host.keys())):
+                block = _render_host_block(host, by_host[host])
+                if block:
+                    parts.append(f"[center]{block}[/center]")
+        ebook_block = "\n".join(parts)
+
+    episodes_block = ""
+    if grouped["episodes"]:
+        parts = ["[size=3][b]Episodes[/b][/size]"]
+        for label in sorted(grouped["episodes"].keys()):
+            parts.append(f"[b]{label}[/b]")
+            by_host = grouped["episodes"][label]
+            for host in _sort_hosts(list(by_host.keys())):
+                block = _render_host_block(host, by_host[host])
+                if block:
+                    parts.append(f"[center]{block}[/center]")
+        episodes_block = "\n".join(parts)
+
+    mirrors_block = ""
+    if grouped["other"]:
+        # لو مفيش Audio/Ebook/Episodes استعمل المرايات كبديل
+        parts = []
+        for host in _sort_hosts(list(grouped["other"].keys())):
+            block = _render_host_block(host, grouped["other"][host])
+            if block:
+                parts.append(f"[center]{block}[/center]")
+        mirrors_block = "\n".join(parts)
+
+    result = template
+    has_explicit = any(p in template for p in ("{AUDIO}", "{EBOOK}", "{EPISODES}", "{LINKS}"))
+    if has_explicit:
+        result = result.replace("{AUDIO}", audio_block)
+        result = result.replace("{EBOOK}", ebook_block)
+        result = result.replace("{EPISODES}", episodes_block)
+        combined = "\n\n".join([b for b in (audio_block, ebook_block, episodes_block) if b.strip()]) or mirrors_block
+        result = result.replace("{LINKS}", combined)
     else:
-        extra = ("\n" + "\n".join(multi_blocks)) if multi_blocks else ""
-        return (template + extra).strip()
+        combined = "\n\n".join([b for b in (audio_block, ebook_block, episodes_block) if b.strip()]) or mirrors_block
+        result = result.rstrip() + ("\n\n" + combined if combined.strip() else "")
 
+    # تنظيف أخير
+    tmp, stash = _protect_urls(result)
+    tmp = re.sub(r"\[center\]\s*\[/center\]", "", tmp, flags=re.I)
+    tmp = re.sub(r"(\n\s*){3,}", "\n\n", tmp)
+    tmp = _sanitize_specials(tmp)
+    tmp = _bump_font_sizes(tmp)
+    result = _restore_urls(tmp, stash)
+    return result.strip()
 
 # ---------------------------------------------------------------------------
 def render_links_german(links: dict, keeplinks: str | None = None) -> str:
