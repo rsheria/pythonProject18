@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 import logging
+import re
 
 log = logging.getLogger(__name__)
 
@@ -95,6 +96,23 @@ def _guess_host_from_url(url: str) -> str:
         return "mega"
     if "keeplinks" in u:
         return "keeplinks"
+    return ""
+
+
+def _ext_from_url(url: str) -> str:
+    """Return lowercase file extension (without dot) inferred from *url*.
+
+    Query strings or fragments are stripped before the extension is
+    determined.  If no extension can be determined an empty string is
+    returned.
+    """
+    try:
+        path = url.split("?", 1)[0].split("#", 1)[0]
+        m = re.search(r"\.([a-z0-9]{1,5})$", path.lower())
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
     return ""
 
 
@@ -203,35 +221,6 @@ def save_links(main_window: Any, category: str, title: str, links: Dict[str, Any
         for k, v in (hints.get("ebook_counts") or {}).items()
     }
 
-    # If no grouping hints are provided, persist the normalised flat map
-    # (per-host lists) instead of returning an empty grouped structure.
-    if audio_parts <= 0 and not any(ebook_counts.values()):
-        grouped = dict(flat)
-        if keeplink:
-            grouped["keeplinks"] = keeplink
-
-        # Passthrough already grouped episode links if present in the source
-        episodes_src = links.get("episodes") if isinstance(links, dict) else {}
-        episodes_grouped: Dict[str, Dict[str, List[str]]] = {}
-        for label, by_host in (episodes_src or {}).items():
-            for host, urls in (by_host or {}).items():
-                canon = _canonicalize_host(str(host)) or _guess_host_from_url(str(host))
-                url_list = _dedup(_as_list(urls))
-                if canon and url_list:
-                    episodes_grouped.setdefault(str(label), {})[canon] = url_list
-        if episodes_grouped:
-            grouped["episodes"] = episodes_grouped
-
-        try:
-            root_rec["links"] = grouped
-            if latest is not root_rec:
-                latest["links"] = grouped
-            main_window.save_process_threads_data()
-        except Exception:
-            log.exception("Failed to save links for %s/%s", category, title)
-
-        return grouped
-
     # ensure deterministic order for formats
     fmt_order = _FMT_ORDER + [f for f in ebook_counts.keys() if f not in _FMT_ORDER]
 
@@ -245,20 +234,38 @@ def save_links(main_window: Any, category: str, title: str, links: Dict[str, Any
     for host, urls in flat.items():
         if not urls:
             continue
-        idx = 0
+
+        remaining = list(urls)
+
         if audio_parts > 0:
-            aud = urls[idx : idx + audio_parts]
-            if aud:
-                audio_map[host] = aud
-            idx += audio_parts
+            selected: List[str] = []
+            for u in list(remaining):
+                if _ext_from_url(u) in {"rar", "zip", "7z"}:
+                    selected.append(u)
+                    remaining.remove(u)
+                    if len(selected) == audio_parts:
+                        break
+            while len(selected) < audio_parts and remaining:
+                selected.append(remaining.pop(0))
+            if selected:
+                audio_map[host] = selected
+
         for fmt in fmt_order:
             count = ebook_counts.get(fmt, 0)
             if count <= 0:
                 continue
-            seg = urls[idx : idx + count]
-            if seg:
-                ebook_map.setdefault(fmt, {})[host] = seg
-            idx += count
+            fmt_lower = fmt.lower()
+            selected: List[str] = []
+            for u in list(remaining):
+                if _ext_from_url(u) == fmt_lower:
+                    selected.append(u)
+                    remaining.remove(u)
+                    if len(selected) == count:
+                        break
+            while len(selected) < count and remaining:
+                selected.append(remaining.pop(0))
+            if selected:
+                ebook_map.setdefault(fmt, {})[host] = selected
 
     if audio_map:
         grouped["audio"] = audio_map

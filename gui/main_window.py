@@ -78,6 +78,7 @@ from utils.host_priority import (
 )
 from utils.link_cache import persist_link_replacement
 from utils.link_summary import LinkCheckSummary
+from utils.link_utils import save_links
 from workers.login_thread import LoginThread
 from workers.link_check_worker import LinkCheckWorker, CONTAINER_HOSTS, is_container_host
 
@@ -5919,17 +5920,15 @@ class ForumBotGUI(QMainWindow):
             # Emit a single dataChanged signal for the range of modified cells to reduce UI overhead
             model.dataChanged.emit(model.index(current_row, 3), model.index(current_row, 5))
 
-            # 4) تحديث الداتا الداخلية (مهم: الجذر + آخر نسخة)
-            #    علشان View Links و Proceed Template يقروا الروابط الجديدة فعلاً
-            thread_info["links"] = dict(merged_links)  # ← الجذر
-            if thread_info.get("versions"):
-                latest = thread_info["versions"][-1]
-                latest["links"] = dict(merged_links)  # ← آخر نسخة
-                latest["upload_status"] = True
-                latest["thread_id"] = tid
+            # 4) حَفِظ الروابط باستخدام أداة التجميع الجديدة
+            save_links(self, category_name, thread_title, merged_links)
 
             thread_info["upload_status"] = True
             thread_info["thread_id"] = tid
+            if thread_info.get("versions"):
+                latest = thread_info["versions"][-1]
+                latest["upload_status"] = True
+                latest["thread_id"] = tid
 
             # 5) باك-أب سيكشن
             if rg_backup:

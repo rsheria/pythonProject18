@@ -265,15 +265,14 @@ def apply_links_template(template: str, links: dict) -> str:
     # ---------- توحيد links إلى شكل مفهوم ----------
     # نحاول أولاً الاستفادة من الشكل الكانوني لو متوفر (rapidgator.net…)
     canon: dict[str, list[str]] = {}
-
-    def _merge_into_canon(src: dict) -> None:
-        """append URLs from ``src`` (host -> urls) into ``canon``"""
-        for k, v in (src or {}).items():
+    if isinstance(links, dict):
+        for k, v in links.items():
             key = _norm_host(str(k))
             if key == "keeplinks":
-                canon.setdefault("keeplinks", [])
-                canon["keeplinks"].extend(_as_list(v))
+                # نخزّنه منفصل (سلسلة واحدة)
+                canon["keeplinks"] = [v] if v else []
                 continue
+            # v ممكن يكون list/tuple/dict/str
             urls: list[str] = []
             if isinstance(v, (list, tuple, set)):
                 for x in v:
@@ -297,23 +296,7 @@ def apply_links_template(template: str, links: dict) -> str:
                 urls.append(str(v))
             if urls:
                 canon.setdefault(key, [])
-                canon[key].extend([u for u in urls if u])
-
-    if isinstance(links, dict):
-        _merge_into_canon(links)
-
-        audio = links.get("audio")
-        if isinstance(audio, dict):
-            _merge_into_canon(_normalize_links_dict(audio))
-
-        ebook = links.get("ebook")
-        if isinstance(ebook, dict):
-            for fmt_map in ebook.values():
-                if isinstance(fmt_map, dict):
-                    _merge_into_canon(_normalize_links_dict(fmt_map))
-
-    for host in list(canon.keys()):
-        canon[host] = _uniq_keep_order(canon[host])
+                canon[key] += [u for u in urls if u]
 
     # ---------- وضع (أ): استبدال توكنز {LINK_*} إن وُجدت ----------
     has_token_mode = any(("{LINK_" in template) for _ in (0,))
@@ -343,31 +326,39 @@ def apply_links_template(template: str, links: dict) -> str:
             for part in range(max_parts):
                 for ln in template.splitlines():
                     changed = ln.replace("{PART}", str(part + 1))
+                    line_has_link = False
                     for host, tok in HOST_TOKENS.items():
                         placeholder = "{LINK_%s}" % tok
                         if placeholder in changed:
                             urls = host_values.get(host, [])
                             if part < len(urls):
                                 changed = changed.replace(placeholder, urls[part])
+                                line_has_link = True
                             else:
                                 changed = _strip_host_placeholder(changed, tok)
-                    out_lines.append(changed)
+                    if line_has_link and changed.strip():
+                        out_lines.append(changed)
         else:
-            token_value = {
-                tok: (vals[0] if vals else "")
-                for host, tok in HOST_TOKENS.items()
-                for vals in (host_values.get(host, []),)
-            }
             for ln in template.splitlines():
                 changed = ln
                 for host, tok in HOST_TOKENS.items():
                     placeholder = "{LINK_%s}" % tok
-                    if placeholder in changed:
-                        val = token_value.get(tok, "")
-                        if val:
-                            changed = changed.replace(placeholder, val)
-                        else:
-                            changed = _strip_host_placeholder(changed, tok)
+                    pattern = r"\[url=\{LINK_%s\}\]([^\[]*?)\[/url\]" % tok
+                    urls = host_values.get(host, [])
+                    if urls:
+                        def _repl(m):
+                            label = m.group(1) or HOST_LABELS.get(host, tok)
+                            parts = []
+                            for i, u in enumerate(urls, 1):
+                                lab = label if i == 1 else f"{label}-{i}"
+                                parts.append(f"[url={u}]{lab}[/url]")
+                            return " ‖ ".join(parts)
+                        changed = re.sub(pattern, _repl, changed)
+                        if placeholder in changed:
+                            changed = changed.replace(placeholder, " ‖ ".join(urls))
+                    else:
+                        changed = re.sub(pattern, "", changed)
+                        changed = _strip_host_placeholder(changed, tok)
                 out_lines.append(changed)
 
         result = "\n".join(out_lines)
@@ -375,6 +366,7 @@ def apply_links_template(template: str, links: dict) -> str:
         tmp, stash = _protect_urls(result)
         tmp = _sanitize_specials(tmp)
         tmp = _bump_font_sizes(tmp)
+        tmp = _cleanup_separators(tmp)
         result = _restore_urls(tmp, stash)
         return result.strip()
 
@@ -436,9 +428,6 @@ def apply_links_template(template: str, links: dict) -> str:
 
         return out
 
-    has_grouped_input = isinstance(links, dict) and any(
-        k in links for k in ("audio", "ebook")
-    )
     grouped = _normalize_grouped(links or {})
 
     def _render_section(title: str, mapping: dict) -> str:
@@ -496,9 +485,7 @@ def apply_links_template(template: str, links: dict) -> str:
         combined = "\n\n".join([b for b in (audio_block, ebook_block, episodes_block) if b.strip()]) or mirrors_block
         result = result.replace("{LINKS}", combined)
     else:
-        combined = "\n\n".join(
-            [b for b in (audio_block, ebook_block, episodes_block) if b.strip()]
-        ) or mirrors_block
+        combined = "\n\n".join([b for b in (audio_block, ebook_block, episodes_block) if b.strip()]) or mirrors_block
         if combined.strip():
             header_lines = []
             keepl = canon.get("keeplinks") or []
@@ -509,10 +496,7 @@ def apply_links_template(template: str, links: dict) -> str:
             header_lines.append("[center][size=3][b]Download-Links[/b][/size][/center]")
             header_lines.append(combined)
             combined = "\n".join(header_lines)
-        if has_grouped_input:
-            result = combined
-        else:
-            result = result.rstrip() + ("\n\n" + combined if combined.strip() else "")
+        result = result.rstrip() + ("\n\n" + combined if combined.strip() else "")
 
     # تنظيف أخير
     tmp, stash = _protect_urls(result)
