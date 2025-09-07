@@ -1006,7 +1006,8 @@ class DownloadWorker(QThread):
                 entry["group_hints"] = group_hints
                 entry["audio_upload_files"] = [str(p) for p in audio_archives]
                 entry["ebook_upload_files"] = [str(p) for p in ebook_files]
-                self.gui.save_process_threads_data()
+                # Force-save so a sudden restart restores these hints
+                self.gui.save_process_threads_data(force=True)
             except Exception:
                 entry = None
 
@@ -1029,7 +1030,8 @@ class DownloadWorker(QThread):
                                 "file_path": str(main_path),
                             }
                         )
-                        self.gui.save_process_threads_data()
+                        # Persist immediately to survive potential crashes
+                        self.gui.save_process_threads_data(force=True)
                     except Exception:
                         pass
 

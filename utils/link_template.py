@@ -336,7 +336,8 @@ def apply_links_template(template: str, links: dict) -> str:
                                 line_has_link = True
                             else:
                                 changed = _strip_host_placeholder(changed, tok)
-                    if line_has_link and changed.strip():
+                    # Keep the line if any placeholder was replaced or static text remains
+                    if changed.strip():
                         out_lines.append(changed)
         else:
             for ln in template.splitlines():
@@ -485,7 +486,9 @@ def apply_links_template(template: str, links: dict) -> str:
         combined = "\n\n".join([b for b in (audio_block, ebook_block, episodes_block) if b.strip()]) or mirrors_block
         result = result.replace("{LINKS}", combined)
     else:
-        combined = "\n\n".join([b for b in (audio_block, ebook_block, episodes_block) if b.strip()]) or mirrors_block
+        combined = "\n\n".join(
+            [b for b in (audio_block, ebook_block, episodes_block) if b.strip()]
+        ) or mirrors_block
         if combined.strip():
             header_lines = []
             keepl = canon.get("keeplinks") or []
@@ -495,8 +498,10 @@ def apply_links_template(template: str, links: dict) -> str:
                 )
             header_lines.append("[center][size=3][b]Download-Links[/b][/size][/center]")
             header_lines.append(combined)
-            combined = "\n".join(header_lines)
-        result = result.rstrip() + ("\n\n" + combined if combined.strip() else "")
+            result = "\n".join(header_lines)
+        else:
+            # No grouped links; return the original template stripped
+            result = template.strip()
 
     # تنظيف أخير
     tmp, stash = _protect_urls(result)

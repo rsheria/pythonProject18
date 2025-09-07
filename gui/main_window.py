@@ -3,6 +3,7 @@
 import hashlib
 import logging
 from pathlib import Path
+from typing import Any
 from integrations.jd_client import JDClient, hard_cancel
 from PyQt5.QtWidgets import QAction, QApplication, QPlainTextEdit
 
@@ -5599,6 +5600,49 @@ class ForumBotGUI(QMainWindow):
         if not links_dict:
             return "[LINKS TBD]"
 
+        def _merge_host(target: dict, host: str, data: Any) -> None:
+            """Merge host entries preserving URLs and flags."""
+            if not data:
+                return
+            existing = target.get(host)
+            if existing is None:
+                target[host] = data
+                return
+            existing_urls = self._as_list(existing if not isinstance(existing, dict) else existing.get("urls"))
+            new_urls = self._as_list(data if not isinstance(data, dict) else data.get("urls"))
+            merged_urls = list(dict.fromkeys(existing_urls + new_urls))
+            if isinstance(existing, dict):
+                existing["urls"] = merged_urls
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        if k == "urls":
+                            continue
+                        existing[k] = existing.get(k) or v
+            elif isinstance(data, dict):
+                d = data.copy()
+                d["urls"] = merged_urls
+                target[host] = d
+            else:
+                target[host] = merged_urls
+
+        flat_links: dict[str, Any] = {}
+        for host, data in links_dict.items():
+            if host in ("audio", "ebook"):
+                continue
+            _merge_host(flat_links, host, data)
+
+        audio_links = links_dict.get("audio", {})
+        if isinstance(audio_links, dict):
+            for host, data in audio_links.items():
+                _merge_host(flat_links, host, data)
+
+        ebook_links = links_dict.get("ebook", {})
+        if isinstance(ebook_links, dict):
+            for fmt_links in ebook_links.values():
+                if isinstance(fmt_links, dict):
+                    for host, data in fmt_links.items():
+                        _merge_host(flat_links, host, data)
+
         def _norm(h: str) -> str:
             return h.lower().replace("-", "").replace("_", "").replace(".", "")
 
@@ -5641,7 +5685,7 @@ class ForumBotGUI(QMainWindow):
                     result_lines.append(f"[url]{url}[/url]")
             result_lines.append("")  # blank line
 
-        # 3) خريطة من اسم المضيف في الإعدادات إلى (key في links_dict، label للعرض)
+        # 3) خريطة من اسم المضيف في الإعدادات إلى (key في flat_links، label للعرض)
         host_key_map = {
             "rapidgator": ("rapidgator.net", "Rapidgator"),
             "nitroflare": ("nitroflare.com", "Nitroflare"),
@@ -5661,10 +5705,10 @@ class ForumBotGUI(QMainWindow):
         # 5) لفّ على المضيفات بالترتيب من settings
         for host in filtered_hosts:
             key, label = host_key_map.get(host.lower(), (host.lower(), host.capitalize()))
-            entry = links_dict.get(key)
+            entry = flat_links.get(key)
             # Fallback to normalised key (strip suffixes)
             if entry is None:
-                entry = links_dict.get(key.replace(".net", "").replace(".com", ""))
+                entry = flat_links.get(key.replace(".net", "").replace(".com", ""))
             if entry is None:
                 continue
             # If entry is a dict with an 'is_backup' flag set to True, skip it entirely
@@ -5859,8 +5903,8 @@ class ForumBotGUI(QMainWindow):
             tid = str(urls_dict.get("thread_id", "")) if isinstance(urls_dict, dict) else ""
             current_row = self._row_for_tid(tid) if tid else row
             if current_row < 0:
-                logging.warning("Thread ID '%s' not found; skipping update", tid)
-                return
+                logging.warning("Thread ID '%s' not found; defaulting to row %s", tid, row)
+                current_row = row
 
             t_item = self.process_threads_table.item(current_row, 0)
             c_item = self.process_threads_table.item(current_row, 1)
@@ -9842,6 +9886,8 @@ class ForumBotGUI(QMainWindow):
         self.bot.save_processed_thread_ids()  # Save processed thread IDs on close
         # Save Process Threads data immediately (synchronous write)
         self.save_process_threads_data(force=True)
+        # Clear in-memory threads after forcing a save so debounce timers don't drop data
+        self.process_threads.clear()
         # Save Backup Threads data immediately (synchronous write)
         try:
             self.save_backup_threads_data(force=True)
@@ -10523,8 +10569,8 @@ class ForumBotGUI(QMainWindow):
                     f"🐛 DEBUG - Updated {status_type} = {completed} for thread '{thread_title}' (direct format)")
                 logging.info(f"🐛 DEBUG - Thread info data: {thread_info}")
 
-            # Save the updated data
-            self.save_process_threads_data()
+            # Save the updated data immediately so it's not lost if the app closes
+            self.save_process_threads_data(force=True)
             logging.info(f"🐛 DEBUG - Saved updated data for thread '{thread_title}'")
 
             # Emit signal for thread-safe UI update

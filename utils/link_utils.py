@@ -214,7 +214,10 @@ def save_links(main_window: Any, category: str, title: str, links: Dict[str, Any
         log.exception("save_links: thread not found for %s/%s", category, title)
         return {}
 
-    hints = latest.get("group_hints") if isinstance(latest, dict) else {}
+    # ``group_hints`` may be missing or ``None`` on older records; ensure we
+    # always work with a dictionary to avoid ``AttributeError`` when accessing
+    # hint values.
+    hints = (latest.get("group_hints") or {}) if isinstance(latest, dict) else {}
     audio_parts = int(hints.get("audio_parts") or 0)
     ebook_counts = {
         str(k).upper(): int(v)
@@ -288,7 +291,8 @@ def save_links(main_window: Any, category: str, title: str, links: Dict[str, Any
         root_rec["links"] = grouped
         if latest is not root_rec:
             latest["links"] = grouped
-        main_window.save_process_threads_data()
+        # Force persistence so process_threads survives abrupt restarts
+        main_window.save_process_threads_data(force=True)
     except Exception:
         log.exception("Failed to save links for %s/%s", category, title)
 
