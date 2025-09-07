@@ -404,18 +404,25 @@ def convert(thread: dict, apply_hooks: bool = True) -> str:
 
     # أعد بناء كتلة الروابط فقط من المضيفين اللى ليهم URLs فعلاً
     links_block = ""
-    if "{LINKS}" in bbcode:
-        try:
-            # prune أى فراغات فى الداتا
-            def _prune(o):
-                if isinstance(o, dict):
-                    d = {k: _prune(v) for k, v in o.items()}
-                    return {k: v for k, v in d.items() if v not in (None, "", [], {})}
-                if isinstance(o, (list, tuple, set)):
-                    return [x for x in o if x]
-                return o
+    try:
+        # prune أى فراغات فى الداتا
+        def _prune(o):
+            if isinstance(o, dict):
+                d = {k: _prune(v) for k, v in o.items()}
+                return {k: v for k, v in d.items() if v not in (None, "", [], {})}
+            if isinstance(o, (list, tuple, set)):
+                return [x for x in o if x]
+            return o
 
-            links_dict = _prune(thread.get("links", {}) or {})
+        links_dict = _prune(thread.get("links", {}) or {})
+    except Exception:
+        links_dict = {}
+
+    has_grouped = isinstance(links_dict, dict) and any(
+        k in links_dict for k in ("audio", "ebook")
+    )
+    if "{LINKS}" in bbcode or has_grouped:
+        try:
             from utils import apply_links_template, LINK_TEMPLATE_PRESETS  # :contentReference[oaicite:0]{index=0}
             from core.user_manager import get_user_manager
             user_mgr = get_user_manager()
@@ -438,7 +445,10 @@ def convert(thread: dict, apply_hooks: bool = True) -> str:
         links_block = lb or "[LINKS TBD]"
 
         bbcode = _strip_old_links(bbcode)
-        bbcode = bbcode.replace("{LINKS}", links_block)
+        if "{LINKS}" in bbcode:
+            bbcode = bbcode.replace("{LINKS}", links_block)
+        elif links_block:
+            bbcode = bbcode.rstrip() + ("\n\n" + links_block)
 
     if apply_hooks:
         img_hook = _HOOKS.get("rewrite_images")

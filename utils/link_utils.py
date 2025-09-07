@@ -203,6 +203,35 @@ def save_links(main_window: Any, category: str, title: str, links: Dict[str, Any
         for k, v in (hints.get("ebook_counts") or {}).items()
     }
 
+    # If no grouping hints are provided, persist the normalised flat map
+    # (per-host lists) instead of returning an empty grouped structure.
+    if audio_parts <= 0 and not any(ebook_counts.values()):
+        grouped = dict(flat)
+        if keeplink:
+            grouped["keeplinks"] = keeplink
+
+        # Passthrough already grouped episode links if present in the source
+        episodes_src = links.get("episodes") if isinstance(links, dict) else {}
+        episodes_grouped: Dict[str, Dict[str, List[str]]] = {}
+        for label, by_host in (episodes_src or {}).items():
+            for host, urls in (by_host or {}).items():
+                canon = _canonicalize_host(str(host)) or _guess_host_from_url(str(host))
+                url_list = _dedup(_as_list(urls))
+                if canon and url_list:
+                    episodes_grouped.setdefault(str(label), {})[canon] = url_list
+        if episodes_grouped:
+            grouped["episodes"] = episodes_grouped
+
+        try:
+            root_rec["links"] = grouped
+            if latest is not root_rec:
+                latest["links"] = grouped
+            main_window.save_process_threads_data()
+        except Exception:
+            log.exception("Failed to save links for %s/%s", category, title)
+
+        return grouped
+
     # ensure deterministic order for formats
     fmt_order = _FMT_ORDER + [f for f in ebook_counts.keys() if f not in _FMT_ORDER]
 

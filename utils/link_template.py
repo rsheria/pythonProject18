@@ -265,14 +265,15 @@ def apply_links_template(template: str, links: dict) -> str:
     # ---------- توحيد links إلى شكل مفهوم ----------
     # نحاول أولاً الاستفادة من الشكل الكانوني لو متوفر (rapidgator.net…)
     canon: dict[str, list[str]] = {}
-    if isinstance(links, dict):
-        for k, v in links.items():
+
+    def _merge_into_canon(src: dict) -> None:
+        """append URLs from ``src`` (host -> urls) into ``canon``"""
+        for k, v in (src or {}).items():
             key = _norm_host(str(k))
             if key == "keeplinks":
-                # نخزّنه منفصل (سلسلة واحدة)
-                canon["keeplinks"] = [v] if v else []
+                canon.setdefault("keeplinks", [])
+                canon["keeplinks"].extend(_as_list(v))
                 continue
-            # v ممكن يكون list/tuple/dict/str
             urls: list[str] = []
             if isinstance(v, (list, tuple, set)):
                 for x in v:
@@ -296,7 +297,23 @@ def apply_links_template(template: str, links: dict) -> str:
                 urls.append(str(v))
             if urls:
                 canon.setdefault(key, [])
-                canon[key] += [u for u in urls if u]
+                canon[key].extend([u for u in urls if u])
+
+    if isinstance(links, dict):
+        _merge_into_canon(links)
+
+        audio = links.get("audio")
+        if isinstance(audio, dict):
+            _merge_into_canon(_normalize_links_dict(audio))
+
+        ebook = links.get("ebook")
+        if isinstance(ebook, dict):
+            for fmt_map in ebook.values():
+                if isinstance(fmt_map, dict):
+                    _merge_into_canon(_normalize_links_dict(fmt_map))
+
+    for host in list(canon.keys()):
+        canon[host] = _uniq_keep_order(canon[host])
 
     # ---------- وضع (أ): استبدال توكنز {LINK_*} إن وُجدت ----------
     has_token_mode = any(("{LINK_" in template) for _ in (0,))
@@ -419,6 +436,9 @@ def apply_links_template(template: str, links: dict) -> str:
 
         return out
 
+    has_grouped_input = isinstance(links, dict) and any(
+        k in links for k in ("audio", "ebook")
+    )
     grouped = _normalize_grouped(links or {})
 
     def _render_section(title: str, mapping: dict) -> str:
@@ -476,7 +496,9 @@ def apply_links_template(template: str, links: dict) -> str:
         combined = "\n\n".join([b for b in (audio_block, ebook_block, episodes_block) if b.strip()]) or mirrors_block
         result = result.replace("{LINKS}", combined)
     else:
-        combined = "\n\n".join([b for b in (audio_block, ebook_block, episodes_block) if b.strip()]) or mirrors_block
+        combined = "\n\n".join(
+            [b for b in (audio_block, ebook_block, episodes_block) if b.strip()]
+        ) or mirrors_block
         if combined.strip():
             header_lines = []
             keepl = canon.get("keeplinks") or []
@@ -487,7 +509,10 @@ def apply_links_template(template: str, links: dict) -> str:
             header_lines.append("[center][size=3][b]Download-Links[/b][/size][/center]")
             header_lines.append(combined)
             combined = "\n".join(header_lines)
-        result = result.rstrip() + ("\n\n" + combined if combined.strip() else "")
+        if has_grouped_input:
+            result = combined
+        else:
+            result = result.rstrip() + ("\n\n" + combined if combined.strip() else "")
 
     # تنظيف أخير
     tmp, stash = _protect_urls(result)
