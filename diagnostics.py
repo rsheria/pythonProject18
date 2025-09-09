@@ -4,26 +4,6 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-_WINRAR_PATH: Optional[Path] = None
-
-
-def get_winrar_path() -> Path:
-    """Return the path to the WinRAR executable.
-
-    The first invocation searches the system for ``winrar`` or ``rar`` and
-    caches the result.  Subsequent calls reuse the cached path.  A
-    ``FileNotFoundError`` is raised if neither executable can be located.
-    """
-
-    global _WINRAR_PATH
-    if _WINRAR_PATH and _WINRAR_PATH.exists():
-        return _WINRAR_PATH
-    path = shutil.which("winrar") or shutil.which("rar")
-    if not path:
-        raise FileNotFoundError("WinRAR executable not found")
-    _WINRAR_PATH = Path(path)
-    return _WINRAR_PATH
-
 try:
     from appdirs import user_data_dir
 except Exception:  # pragma: no cover
@@ -72,16 +52,14 @@ def run_diagnostics() -> Path:
     logger.info("Java runtime: %s", java or "not found")
 
     # WinRAR must be available for the packaging pipeline
-    try:
-        winrar = get_winrar_path()
+    winrar = shutil.which("winrar") or shutil.which("rar")
+    if winrar:
         logger.info("WinRAR: %s", winrar)
-    except FileNotFoundError:
+    else:  # pragma: no cover - configuration issue
         # Do not abort startup if WinRAR is missing. Some environments may not
         # have it installed, but the application can still run. Log a warning
         # so users know packaging features will be unavailable.
-        msg = (
-            "WinRAR executable not found – please install WinRAR and ensure it is on PATH"
-        )
+        msg = "WinRAR executable not found – please install WinRAR and ensure it is on PATH"
         logger.warning(msg)
 
     try:
@@ -94,4 +72,4 @@ def run_diagnostics() -> Path:
     return log_file
 
 
-__all__ = ["run_diagnostics", "get_winrar_path"]
+__all__ = ["run_diagnostics"]

@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from enum import Enum
 from pathlib import Path
 from threading import Lock
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Dict
 
 from PyQt5.QtCore import QThread, pyqtSignal, pyqtSlot
 from integrations.jd_client import hard_cancel
@@ -42,36 +42,29 @@ class UploadWorker(QThread):
             keeplinks_url: Optional[str] = None,
             cancel_event=None,
             files: Optional[List[str]] = None,
+            files_data: Optional[Dict[str, Any]] = None,
             package_label: str = "audio",
     ):
-        super().__init__()  # QThread init
+        super().__init__()
         self.bot = bot
         self.row = row
         self.folder_path = Path(folder_path)
         self.thread_id = thread_id
-        self.config = bot.config  # Store config reference for quick access
+        self.config = bot.config
         self.section = section
         self.package_label = package_label
-        # إذا كنا نعيد الرفع لروابط موجودة مسبقاً في Keeplinks،
-        # نمرّر الرابط القديم كي لا يتم إنشاء رابط جديد.
         self.keeplinks_url = keeplinks_url
         self.keeplinks_sent = False
-        # تحكم بالإيقاف والإلغاء
         self.is_cancelled = False
         self.is_paused = False
         self.lock = Lock()
         self.cancel_event = cancel_event
-        # ThreadPool لرفع متوازٍ
         self.thread_pool = ThreadPoolExecutor(max_workers=5)
 
-        # استرجِع قائمة الهوستات
         if upload_hosts is None:
             upload_hosts = bot.config.get("upload_hosts", [])
-
         self.hosts = list(upload_hosts)
 
-
-        # Handlers (لمستضيفين لا يحتاجون مسار ملف عند الإنشاء)
         self.handlers: dict[str, Any] = {}
         if "nitroflare" in self.hosts:
             self.handlers["nitroflare"] = NitroflareUploadHandler(self.bot)
@@ -79,16 +72,38 @@ class UploadWorker(QThread):
             self.handlers["ddownload"] = DDownloadUploadHandler(self.bot)
         if "katfile" in self.hosts:
             self.handlers["katfile"] = KatfileUploadHandler(self.bot)
-        # ملاحظة: Rapidgator handler سيُنشأ لكل ملف على حدة داخل ‎_upload_single
 
-        # جمع الملفات
-        self.explicit_files = [Path(f) for f in files] if files else None
-        self.files = self.explicit_files or self._get_files()
-        self.total_files = len(self.files)
-        if not self.files:
+        # --- NEW: Content-Aware File Gathering ---
+        self.audio_files: List[Path] = []
+        self.book_files: Dict[str, List[Path]] = {}
+        self.files: List[Path] = []
+
+        if files_data and isinstance(files_data, dict):
+            self.audio_files = [Path(p) for p in files_data.get("audio", [])]
+            book_data = files_data.get("book", {})
+            for ext, paths in book_data.items():
+                self.book_files[ext] = [Path(p) for p in paths]
+        elif files:
+             self.files = [Path(f) for f in files]
+        else:
+            audio_dir = self.folder_path / "audio_only"
+            book_dir = self.folder_path / "book_only"
+            if audio_dir.exists() and audio_dir.is_dir():
+                self.audio_files = sorted([f for f in audio_dir.iterdir() if f.is_file()])
+            if book_dir.exists() and book_dir.is_dir():
+                for f in sorted(book_dir.iterdir()):
+                    if f.is_file():
+                        ext = f.suffix.lstrip('.').lower()
+                        self.book_files.setdefault(ext, []).append(f)
+            if not self.audio_files and not self.book_files:
+                self.files = sorted([f for f in self.folder_path.iterdir() if f.is_file()])
+
+        self.total_files = len(self.audio_files) + sum(len(v) for v in self.book_files.values()) + len(self.files)
+
+        if not self.total_files > 0:
             logging.warning("UploadWorker: لا توجد ملفات في المجلد %s", folder_path)
+        # -------------------------------------------
 
-        # تهيئة نتائج الرفع
         self.upload_results = {
             idx: {"status": "not_attempted", "urls": []}
             for idx in range(len(self.hosts))
@@ -155,10 +170,7 @@ class UploadWorker(QThread):
 
     def run(self):
         try:
-            logging.info(
-                "Uploading from %s with %d files", self.folder_path, self.total_files
-            )
-            if not self.files:
+            if not self.total_files > 0:
                 msg = "لا توجد ملفات للرفع."
                 self.upload_error.emit(self.row, msg)
                 self.upload_complete.emit(self.row, {"error": msg})
@@ -166,75 +178,64 @@ class UploadWorker(QThread):
 
             self._check_control()
 
-            # إطلاق رفع كل مستضيف بالتوازي بدون إنشاء صف "Batch" في جدول الحالة.
-            # سيتم تحديث جدول الحالة فقط لكل مستضيف على حدة أثناء رفع الملفات.
+            final_urls: Dict[str, Any] = {"audio": {}, "book": {}}
+            all_direct_links = []
 
-            # إطلاق رفع كل مستضيف بالتوازي
-            futures = {}
-            for idx, _ in enumerate(self.hosts):
-                self._check_control()
-                if self.upload_results.get(idx, {}).get("status") != "not_attempted":
-                    continue
-                futures[self.thread_pool.submit(self._upload_host_all, idx)] = idx
+            # --- 1. Upload Audio Files ---
+            if self.audio_files:
+                audio_results = self._upload_file_group(self.audio_files, "Audio")
+                if audio_results:
+                    final_urls["audio"] = audio_results
+                    all_direct_links.extend(url for urls in audio_results.values() for url in urls)
 
-            # جمع النتائج
-            completed = 0
-            total = len(futures)
-            for fut in as_completed(futures):
-                self._check_control()
-                idx = futures[fut]
-                if fut.result() == "success":
-                    self.upload_results[idx]["status"] = "success"
-                else:
-                    self.upload_results[idx]["status"] = "failed"
-                completed += 1
+            # --- 2. Upload Book Files ---
+            if self.book_files:
+                for ext, files in self.book_files.items():
+                    book_results = self._upload_file_group(files, f"Book ({ext})")
+                    if book_results:
+                        final_urls["book"].setdefault(ext, {}).update(book_results)
+                        all_direct_links.extend(url for urls in book_results.values() for url in urls)
 
+            # --- 3. Upload Regular Files (Fallback) ---
+            if self.files:
+                regular_results = self._upload_file_group(self.files, "Files")
+                if regular_results:
+                    final_urls["mirrors"] = regular_results  # Store as mirrors
+                    all_direct_links.extend(url for urls in regular_results.values() for url in urls)
 
-            # Prepare final URLs dict using canonical schema
-            final = self._prepare_final_urls()
+            self._check_control()
 
-            if "error" in final:
-                self.upload_error.emit(self.row, final["error"])
-                self.upload_complete.emit(self.row, final)
-                return
+            # --- 4. Handle Keeplinks ---
+            if all_direct_links and not self.keeplinks_sent:
+                if self.keeplinks_url:  # Update existing link
+                    logging.info(f"Updating existing Keeplinks URL: {self.keeplinks_url}")
+                    self.bot.update_keeplinks_links(self.keeplinks_url, all_direct_links)
+                    final_urls["keeplinks"] = self.keeplinks_url
+                else:  # Create new link
+                    logging.info(f"Sending {len(all_direct_links)} links to create new Keeplinks URL")
+                    k_url = self.bot.send_to_keeplinks(all_direct_links)
+                    if k_url:
+                        final_urls["keeplinks"] = k_url
+                self.keeplinks_sent = True
 
-            # Update host progress/finish statuses
-            self._emit_final_statuses(self.row)
+            final_urls["thread_id"] = self.thread_id
 
-            # Build links payload for OperationStatus using canonical keys
-            def _get_urls(key: str) -> list:
-                val = final.get(key)
-                if isinstance(val, dict):
-                    return val.get("urls", [])
-                return val or []
+            # --- 5. Emit Final Signals ---
+            any_failed = any(res["status"] == "failed" for res in self.upload_results.values())
+            if any_failed:
+                error_msg = "بعض مواقع الرفع فشلت، يرجى المحاولة مرة أخرى."
+                final_urls["error"] = error_msg
+                self.upload_error.emit(self.row, error_msg)
+            else:
+                self.upload_success.emit(self.row)
 
-            links_payload = {
-                "rapidgator": _get_urls("rapidgator.net"),
-                "ddownload": _get_urls("ddownload.com"),
-                "katfile": _get_urls("katfile.com"),
-                "nitroflare": _get_urls("nitroflare.com"),
-                "rapidgator_bak": _get_urls("rapidgator-backup"),
-            }
-            status = OperationStatus(
-                section=self.section,
-                item=self.package_label,
-                op_type=OpType.UPLOAD,
-                stage=OpStage.FINISHED,
-                message="Complete",
-                progress=100,
-                thread_id=final.get("thread_id", ""),
-                links=links_payload,
-                keeplinks_url=final.get("keeplinks", ""),
-            )
-            self.progress_update.emit(status)
-            self.upload_success.emit(self.row)
-            # Emit canonical final result
-            self.upload_complete.emit(self.row, final)
+            self.upload_complete.emit(self.row, final_urls)
             logging.info(
                 "Finished uploading from %s with %d files",
                 self.folder_path,
                 self.total_files,
             )
+
         except Exception as e:
             msg = str(e)
             if "cancelled" in msg.lower():
@@ -242,22 +243,53 @@ class UploadWorker(QThread):
                 self.upload_complete.emit(self.row, {"error": "أُلغي من المستخدم"})
             else:
                 logging.error("UploadWorker.run crashed: %s", msg, exc_info=True)
-                # تلوين كل الصفوف بالأحمر
-                for idx in range(len(self.hosts)):
-                    self.host_progress.emit(self.row, idx, 0, f"Error: {msg}", 0, 0)
                 self.upload_error.emit(self.row, msg)
                 self.upload_complete.emit(self.row, {"error": msg})
 
-    def _upload_host_all(self, host_idx: int) -> str:
-        urls = []
-        for f in self.files:
+    def _upload_file_group(self, files_to_upload: List[Path], group_name: str) -> Dict[str, List[str]]:
+        """Uploads a specific group of files (e.g., audio or a book format) to all hosts."""
+        logging.info(f"--- Starting upload for group: {group_name} ({len(files_to_upload)} files) ---")
+        group_results: Dict[str, List[str]] = {}
+
+        futures = {}
+        for host_idx, host in enumerate(self.hosts):
+            # Skip hosts that have already failed
+            if self.upload_results.get(host_idx, {}).get("status") == "failed":
+                continue
+
+            # Submit a task to upload all files in the group to this host
+            future = self.thread_pool.submit(self._upload_files_to_host, host_idx, files_to_upload, group_name)
+            futures[future] = host_idx
+
+        for fut in as_completed(futures):
             self._check_control()
-            u = self._upload_single(host_idx, f)
-            if u is None:
-                return "failed"
-            urls.append(u)
-        self.upload_results[host_idx]["urls"] = urls
-        return "success"
+            host_idx = futures[fut]
+            host_name = self.hosts[host_idx]
+
+            try:
+                urls = fut.result()
+                if urls is not None:
+                    group_results[host_name] = urls
+                    self.upload_results[host_idx]["status"] = "success"
+                else:
+                    self.upload_results[host_idx]["status"] = "failed"
+            except Exception as e:
+                logging.error(f"Error getting result for host {host_name}: {e}")
+                self.upload_results[host_idx]["status"] = "failed"
+
+        return group_results
+
+    def _upload_files_to_host(self, host_idx: int, files: List[Path], group_name: str) -> Optional[List[str]]:
+        """Uploads a list of files to a single specified host."""
+        urls = []
+        for file in files:
+            self._check_control()
+            url = self._upload_single(host_idx, file)
+            if url is None:
+                logging.error(f"Failed to upload {file.name} to {self.hosts[host_idx]} for group {group_name}.")
+                return None # Signal failure for the entire host
+            urls.append(url)
+        return urls
 
     # ---------------------------------------------------------------
     # 2) method  _upload_single
@@ -488,7 +520,7 @@ class UploadWorker(QThread):
     def _emit_final_statuses(self, row: int) -> None:
         """Emit final OperationStatus for each host so the UI recolors."""
         cancel_stage = getattr(OpStage, "CANCELLED", OpStage.ERROR)
-        item_name = self.package_label
+        item_name = self.files[0].name if self.files else ""
         for i, host in enumerate(self.hosts):
             res = self.upload_results.get(i, {}).get("status")
             if res == "success":
@@ -547,7 +579,7 @@ class UploadWorker(QThread):
                     # Emit a RUNNING status for UI recolor
                     status = OperationStatus(
                         section=self.section,
-                        item=self.package_label,
+                        item=self.files[0].name if self.files else "",
                         op_type=OpType.UPLOAD,
                         stage=OpStage.RUNNING,
                         message="Retrying",
@@ -593,7 +625,7 @@ class UploadWorker(QThread):
                 }
                 status = OperationStatus(
                     section=self.section,
-                    item=self.package_label,
+                    item=self.files[0].name if self.files else "",
                     op_type=OpType.UPLOAD,
                     stage=OpStage.FINISHED,
                     message="Complete",
@@ -629,7 +661,7 @@ class UploadWorker(QThread):
                     }
                     status = OperationStatus(
                         section=self.section,
-                        item=self.package_label,
+                        item=self.files[0].name if self.files else "",
                         op_type=OpType.UPLOAD,
                         stage=OpStage.FINISHED,
                         message="Complete",
@@ -645,7 +677,7 @@ class UploadWorker(QThread):
                 self.upload_results[i] = {"status": "not_attempted", "urls": []}
                 status = OperationStatus(
                     section=self.section,
-                    item=self.package_label,
+                    item=self.files[0].name if self.files else "",
                     op_type=OpType.UPLOAD,
                     stage=OpStage.RUNNING,
                     message="Resuming",
@@ -678,7 +710,7 @@ class UploadWorker(QThread):
                 }
                 status = OperationStatus(
                     section=self.section,
-                    item=self.package_label,
+                    item=self.files[0].name if self.files else "",
                     op_type=OpType.UPLOAD,
                     stage=OpStage.FINISHED,
                     message="Complete",
@@ -701,7 +733,7 @@ class UploadWorker(QThread):
                 self.upload_results[i] = {"status": "not_attempted", "urls": []}
                 status = OperationStatus(
                     section=self.section,
-                    item=self.package_label,
+                    item=self.files[0].name if self.files else "",
                     op_type=OpType.UPLOAD,
                     stage=OpStage.RUNNING,
                     message="Re-uploading",
@@ -734,7 +766,7 @@ class UploadWorker(QThread):
                 }
                 status = OperationStatus(
                     section=self.section,
-                    item=self.package_label,
+                    item=self.files[0].name if self.files else "",
                     op_type=OpType.UPLOAD,
                     stage=OpStage.FINISHED,
                     message="Complete",

@@ -8,7 +8,7 @@ import uuid
 import time
 import random
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Dict, Any
 from config.config import DATA_DIR    # ← استيراد DATA_DIR
 
 
@@ -168,99 +168,79 @@ class FileProcessor:
 
         files = sorted([p for p in root_dir.glob("*") if p.is_file()])
         return root_dir, files
+
     def process_downloads(
-        self,
-        thread_dir: Path,
-        downloaded_files: List[str],
-        thread_title: str,
-        password: str | None = None,
-    ) -> Optional[List[str] | tuple[str, List[str]]]:
+            self,
+            thread_dir: Path,
+            downloaded_files: List[str],
+            thread_title: str,
+            password: str | None = None,
+    ) -> Optional[Dict[str, Any]]:
         """
-        Process downloaded files and return list of processed file paths.
-        1) Move the downloaded files to the thread_dir.
-        2) If there's exactly one file or a multi-part scenario => rename final archive with thread_title.
-        3) If multiple distinct files => now re-process each one with its original name.
+        Processes downloaded files, separates assets, recompresses selectively,
+        and returns a structured dictionary of file paths ready for upload.
         """
         try:
-            # First sanitize & shorten the thread title to avoid Windows path issues
-            cleaned_thread_title = self._sanitize_and_shorten_title(thread_title)
-
-            # Make sure the thread directory exists
+            cleaned_title = self._sanitize_and_shorten_title(thread_title)
             thread_dir.mkdir(parents=True, exist_ok=True)
-
-            # Move downloaded files to the thread_dir
             moved_files = self._organize_downloads(downloaded_files, thread_dir)
             if not moved_files:
-                logging.error("No files were moved to the thread directory.")
                 return None
 
-            logging.info(
-                "Processing '%s' with settings: m%s split=%sB mode=%s",
-                thread_title,
-                self.comp_level,
-                self.split_bytes,
-                self.recompress_mode,
-            )
-
-            # Decide processing path based on recompress_mode
-            if self.recompress_mode == "never":
-                thread_id = thread_dir.name
-                root_dir = thread_dir
-                produced: List[Path] = []
+            # --- Step 1: Extract and Flatten Everything ---
+            # Use the first archive as the primary source for extraction
+            primary_archive = next((f for f in moved_files if self._is_archive_file(f)), None)
+            if not primary_archive:
+                logging.warning("No primary archive found to process in process_downloads.")
+                # Treat non-archive files as assets to be processed directly
+                # We create a temporary root dir to place them in for asset splitting
+                temp_root = thread_dir / f"temp_root_{uuid.uuid4().hex}"
+                temp_root.mkdir()
                 for f in moved_files:
-                    if self._is_archive_file(f):
-                        root_dir, files = self.extract_and_normalize(
-                            f, thread_dir, thread_id
-                        )
-                        produced.extend(files)
-                    else:
-                        root_dir.mkdir(parents=True, exist_ok=True)
-                        dest = root_dir / f.name
-                        counter = 1
-                        while dest.exists():
-                            dest = root_dir / f"{f.stem}_{counter}{f.suffix}"
-                            counter += 1
-                        shutil.move(str(f), dest)
-                        produced.append(dest)
-
-                    root_dir.mkdir(parents=True, exist_ok=True)
-
-                    keep = {root_dir.resolve()} | {p.resolve() for p in produced}
-                    for item in list(thread_dir.iterdir()):
-                        if item.resolve() not in keep:
-                            if item.is_dir():
-                                self._safely_remove_directory(item)
-                            else:
-                                self._safely_remove_file(item)
-
-                    logging.info("ROOT=%s, FILES=%d", root_dir, len(produced))
-                    return str(root_dir), [str(p) for p in produced]
-            elif (
-                self.recompress_mode == "if_needed"
-                and len(moved_files) == 1
-                and self._is_archive_file(moved_files[0])
-                and self.split_bytes == 0
-            ):
-                processed_files = [str(moved_files[0])]
-            elif self._detect_if_single_item(moved_files):
-                # Single item => rename final archived output to cleaned_thread_title
-                processed_files = self._process_as_single_item(
-                    moved_files, thread_dir, cleaned_thread_title, password
-                )
+                    shutil.copy(f, temp_root / f.name)
+                root_folder = temp_root
             else:
-                # Multiple distinct files => process each with its own original name
-                processed_files = self._process_multi_distinct(
-                    moved_files, thread_dir, password
-                )
-            
-            # 🧹 Final comprehensive cleanup - keep only processed files
-            if processed_files:
-                self._final_directory_cleanup(thread_dir, processed_files)
-                
-            return processed_files
+                root_folder, _ = self.extract_and_normalize(primary_archive, thread_dir, cleaned_title)
+
+            # --- Step 2: Split into Audio and Book Assets ---
+            book_dir, audio_dir, assets = self.split_embedded_assets(root_folder)
+
+            final_files = {"audio": [], "book": {}}
+
+            # --- Step 3: Selective Re-compression for Audio ---
+            if list(audio_dir.iterdir()):  # Check if audio_dir is not empty
+                if self.recompress_mode != "never":
+                    logging.info(f"Re-compressing audio assets for '{thread_title}'")
+                    audio_archive_base = thread_dir / cleaned_title
+                    if self._create_rar_archive(audio_dir, audio_archive_base, cleaned_title):
+                        # Find the created archive parts
+                        final_archives = list(thread_dir.glob(f"{cleaned_title}.part*.rar"))
+                        if not final_archives:
+                            single_rar = thread_dir / f"{cleaned_title}.rar"
+                            if single_rar.exists():
+                                final_archives.append(single_rar)
+                        final_files["audio"] = [str(p) for p in final_archives]
+                else:  # recompress_mode is "never"
+                    final_files["audio"] = [str(p) for p in audio_dir.iterdir() if p.is_file()]
+
+            # --- Step 4: Handle Book files (no re-compression) ---
+            if list(book_dir.iterdir()):
+                for ext, file_list in assets.get("book_files", {}).items():
+                    final_files["book"][ext] = [str(book_dir / fname) for fname in file_list]
+
+            # --- Final Cleanup ---
+            self._final_directory_cleanup(thread_dir,
+                                          final_files["audio"] + [f for files in final_files["book"].values() for f in
+                                                                  files]
+                                          )
+            # Cleanup temp_root if it was created
+            if 'temp_root' in locals() and temp_root.exists():
+                self._safely_remove_directory(temp_root)
+
+            return final_files
 
         except Exception as e:
-            logging.error(f"Error in process_downloads: {str(e)}")
+            logging.error(f"Error in process_downloads for '{thread_title}': {str(e)}", exc_info=True)
             return None
 
     def _sanitize_and_shorten_title(self, text: str, max_length: int = 60) -> str:
@@ -335,7 +315,7 @@ class FileProcessor:
                     file_path, thread_dir, thread_title, password
                 )
                 if new_archives:
-                    successful_files.extend(str(p) for p in new_archives)
+                    successful_files.extend(new_archives)
                     self.processed_files.update(Path(arch) for arch in new_archives)
                     logging.info(f"Successfully processed archive: {file_path}")
                 else:
@@ -366,7 +346,7 @@ class FileProcessor:
                     file_path.stem,  # final name = original base
                     password,
                 )
-                final_files.extend(str(p) for p in new_archives)
+                final_files.extend(new_archives)
             else:
                 # Non-archive => compress into .rar named after the original base
                 processed_file = self.handle_other_file(
@@ -379,139 +359,158 @@ class FileProcessor:
         return final_files
 
     def handle_archive_file(
-        self,
-        archive_path: Path,
-        download_folder: Path,
-        thread_title: str,
-        password: str | None = None,
-    ) -> List[Path]:
-        """Transactional packaging that splits audio vs. book assets.
+                self,
+                archive_path: Path,
+                download_folder: Path,
+                thread_title: str,
+                password: str | None = None,
+        ) -> List[str] | tuple[Path, List[Path]]:
+            """Handle archive processing with format preservation and splitting.
 
-        Steps:
-        - Extract + flatten into a single root under a temp extracted dir.
-        - Detect embedded assets and split into book-only and audio-only dirs.
-        - Package to separate archives in the thread directory (download_folder):
-          * Audio => "TITLE (Hörbuch).partNN.rar" or single, per config
-          * Book  => one RAR per format => "TITLE (E-Book - {FMT}).rar"
-        - Verify all produced files exist and size > 0.
-        - If verification passes: remove only the extracted temp dir and the
-          original archive(s). Otherwise: do not delete anything.
+            When ``recompress_mode`` is set to ``"never"`` the archive is extracted
+            and normalized but not recompressed.  The method then returns a tuple of
+            ``(root_folder, files)`` where ``files`` is a list of all extracted
+            file paths.  In other modes it returns a list of paths to newly created
+            archives.
+            """
+            extract_dir = None
+            try:
+                original_format = archive_path.suffix.lower()
+                is_zip = (original_format == '.zip')
+                thread_title = self._sanitize_and_shorten_title(thread_title)
 
-        Returns a list of produced archive Paths.
-        """
-        extract_dir = None
-        try:
-            original_format = archive_path.suffix.lower()
-            is_zip = (original_format == '.zip')
-            thread_title = self._sanitize_and_shorten_title(thread_title)
+                if self.recompress_mode == "never":
+                    is_multipart = False
+                    all_parts = []
+                    if (not is_zip) and re.search(r"\.part\d+\.rar$", archive_path.name, re.IGNORECASE):
+                        base_name = re.sub(r"\.part\d+\.rar$", "", archive_path.name, flags=re.IGNORECASE)
+                        part1_path = download_folder / f"{base_name}.part1.rar"
+                        if part1_path.exists():
+                            archive_path = part1_path
+                            is_multipart = True
+                            all_parts = sorted(download_folder.glob(f"{base_name}.part*.rar"))
+                    root, files = self.extract_and_normalize(
+                        archive_path, download_folder, download_folder.name
+                    )
+                    if is_multipart and all_parts:
+                        self._safely_remove_original_archives(archive_path, all_parts)
+                    else:
+                        self._safely_remove_original_archives(archive_path, None)
+                    return root, files
 
-            if self.recompress_mode == "never":
-                # Even in never mode, we normalize, split and return the file list (no re-archiving).
+                # Check if multi-part .partX.rar
                 is_multipart = False
                 all_parts = []
-                if (not is_zip) and re.search(r"\.part\d+\.rar$", archive_path.name, re.IGNORECASE):
-                    base_name = re.sub(r"\.part\d+\.rar$", "", archive_path.name, flags=re.IGNORECASE)
+                if (not is_zip) and re.search(r'\.part\d+\.rar$', archive_path.name, re.IGNORECASE):
+                    base_name = re.sub(r'\.part\d+\.rar$', '', archive_path.name, flags=re.IGNORECASE)
                     part1_path = download_folder / f"{base_name}.part1.rar"
                     if part1_path.exists():
                         archive_path = part1_path
                         is_multipart = True
                         all_parts = sorted(download_folder.glob(f"{base_name}.part*.rar"))
-                root, files = self.extract_and_normalize(
-                    archive_path, download_folder, download_folder.name
+                        logging.info(f"Detected multi-part archive with {len(all_parts)} parts")
+
+                if is_multipart:
+                    original_name = base_name
+                else:
+                    original_name = archive_path.stem
+
+                extract_dir_name = f"{original_name}_extracted"
+                extract_dir = download_folder / extract_dir_name
+                if extract_dir.exists():
+                    self._safely_remove_directory(extract_dir)
+                extract_dir.mkdir(exist_ok=True)
+
+                max_retries = 3
+                extract_success = False
+                for attempt in range(max_retries):
+                    logging.info(
+                        f"Extracting {original_format} archive: {archive_path} (Attempt {attempt + 1})"
+                    )
+                    extract_success = self._extract_archive(
+                        archive_path, extract_dir, password
+                    )
+                    if extract_success:
+                        self._flatten_extracted_directory(extract_dir)
+                        break
+                    if attempt < max_retries - 1:
+                        time.sleep(2)
+
+                if not extract_success:
+                    raise Exception("Archive extraction failed after all attempts")
+
+                self._modify_files_for_hash_safely(extract_dir)
+                self._remove_banned_files_safely(extract_dir)
+
+                total_size = sum(
+                    f.stat().st_size
+                    for f in extract_dir.rglob('*')
+                    if f.is_file() and f.name.lower() != 'desktop.ini'
                 )
-                # No packaging; return extracted files as Paths.
-                # Remove original archives only if extraction succeeded.
+                logging.info(f"Total size of extracted files: {total_size / self.GIGABYTE:.2f} GB")
+
+                root_folder = self.ensure_single_root(extract_dir, thread_title)
+
+                # Re-archive everything => final name based on thread_title
+                unique_id = uuid.uuid4().hex
+                temp_suffix = f"_temp_{unique_id}"
+                temp_archive_base = download_folder / f"{thread_title}{temp_suffix}"
+
+                success = False
+                for attempt in range(max_retries):
+                    if is_zip:
+                        success = self._create_zip_archive(
+                            root_folder, temp_archive_base, thread_title
+                        )
+                    else:
+                        success = self._create_rar_archive(
+                            root_folder, temp_archive_base, thread_title
+                        )
+                    if success:
+                        break
+                    if attempt < max_retries - 1:
+                        time.sleep(2)
+
+                if not success:
+                    raise Exception("Archive creation failed after all attempts")
+
+                # Gather newly created archives
+                new_archives = []
+                if is_zip:
+                    new_archives.extend(
+                        glob.glob(str(download_folder / f"{thread_title}{temp_suffix}.z*"))
+                    )
+                else:
+                    new_archives.extend(
+                        glob.glob(str(download_folder / f"{thread_title}{temp_suffix}.part*.rar"))
+                    )
+                    if not new_archives:
+                        single_rar = download_folder / f"{thread_title}{temp_suffix}.rar"
+                        if single_rar.exists():
+                            new_archives.append(str(single_rar))
+
+                if not new_archives:
+                    raise Exception("No temporary archive parts were created")
+
+                # Remove original archive(s)
                 if is_multipart and all_parts:
                     self._safely_remove_original_archives(archive_path, all_parts)
                 else:
                     self._safely_remove_original_archives(archive_path, None)
-                return files
 
-            # Check if multi-part .partX.rar
-            is_multipart = False
-            all_parts = []
-            if (not is_zip) and re.search(r'\.part\d+\.rar$', archive_path.name, re.IGNORECASE):
-                base_name = re.sub(r'\.part\d+\.rar$', '', archive_path.name, flags=re.IGNORECASE)
-                part1_path = download_folder / f"{base_name}.part1.rar"
-                if part1_path.exists():
-                    archive_path = part1_path
-                    is_multipart = True
-                    all_parts = sorted(download_folder.glob(f"{base_name}.part*.rar"))
-                    logging.info(f"Detected multi-part archive with {len(all_parts)} parts")
+                # Rename the temp ones => remove the _temp_uuid portion
+                final_archives = self._safely_rename_archives(new_archives, temp_suffix)
 
-            if is_multipart:
-                original_name = base_name
-            else:
-                original_name = archive_path.stem
-            
-            extract_dir_name = f"{original_name}_extracted"
-            extract_dir = download_folder / extract_dir_name
-            if extract_dir.exists():
+                # Cleanup
                 self._safely_remove_directory(extract_dir)
-            extract_dir.mkdir(exist_ok=True)
 
-            max_retries = 3
-            extract_success = False
-            for attempt in range(max_retries):
-                logging.info(
-                    f"Extracting {original_format} archive: {archive_path} (Attempt {attempt + 1})"
-                )
-                extract_success = self._extract_archive(
-                    archive_path, extract_dir, password
-                )
-                if extract_success:
-                    self._flatten_extracted_directory(extract_dir)
-                    break
-                if attempt < max_retries - 1:
-                    time.sleep(2)
+                return final_archives
 
-            if not extract_success:
-                raise Exception("Archive extraction failed after all attempts")
-
-            self._modify_files_for_hash_safely(extract_dir)
-            self._remove_banned_files_safely(extract_dir)
-
-            total_size = sum(
-                f.stat().st_size
-                for f in extract_dir.rglob('*')
-                if f.is_file() and f.name.lower() != 'desktop.ini'
-            )
-            logging.info(f"Total size of extracted files: {total_size / self.GIGABYTE:.2f} GB")
-
-            root_folder = self.ensure_single_root(extract_dir, thread_title)
-
-            # Split and package assets into thread_dir (download_folder)
-            book_dir, audio_dir, assets = self.split_embedded_assets(root_folder)
-
-            # Package directly to the download_folder so outputs survive cleanup
-            packs = self.package_assets(book_dir, audio_dir, thread_title, assets, output_dir=download_folder)
-
-            produced: list[Path] = []
-            produced.extend([p for p in packs.get("audio", [])])
-            for fmt_list in (packs.get("book", {}) or {}).values():
-                produced.extend(fmt_list or [])
-
-            # Verify produced outputs
-            if not produced:
-                raise Exception("No archives were produced by package_assets")
-            invalid = [p for p in produced if (not Path(p).exists()) or Path(p).stat().st_size <= 0]
-            if invalid:
-                names = ", ".join(str(p) for p in invalid)
-                raise Exception(f"Produced archives failed verification: {names}")
-
-            # Safe cleanup only after verification
-            if is_multipart and all_parts:
-                self._safely_remove_original_archives(archive_path, all_parts)
-            else:
-                self._safely_remove_original_archives(archive_path, None)
-            self._safely_remove_directory(extract_dir)
-
-            return produced
-
-        except Exception as e:
-            logging.error(f"Error processing archive: {str(e)}")
-            # Transactional policy: on error, keep extracted/original for debugging
-            return []
+            except Exception as e:
+                logging.error(f"Error processing archive: {str(e)}")
+                if extract_dir and extract_dir.exists():
+                    self._safely_remove_directory(extract_dir)
+                return []
 
     def handle_other_file(
         self,
@@ -1301,7 +1300,6 @@ class FileProcessor:
 
         book_map: dict[str, list[Path]] = {ext: [] for ext in book_exts}
         audio_files: list[Path] = []
-        other_files: list[Path] = []
 
         for file_path in root_dir.glob("*"):
             if not file_path.is_file():
@@ -1309,15 +1307,13 @@ class FileProcessor:
             ext = file_path.suffix.lower()
             if ext in book_exts:
                 book_map[ext].append(file_path)
-            else:
-                other_files.append(file_path)
-                if ext in audio_exts:
-                    audio_files.append(file_path)
+            elif ext in audio_exts:
+                audio_files.append(file_path)
 
         if not any(book_map.values()):
             return root_dir, root_dir, {
                 "book_files": {},
-                "audio_parts": [f.name for f in audio_files],
+                "audio_files": [f.name for f in audio_files],
             }
 
         book_only = root_dir.parent / "book_only"
@@ -1328,114 +1324,15 @@ class FileProcessor:
         for files in book_map.values():
             for f in files:
                 shutil.move(str(f), book_only / f.name)
-        for f in other_files:
+        for f in audio_files:
             shutil.move(str(f), audio_only / f.name)
 
         assets = {
             "book_files": {
-                ext.lstrip('.'):
-                    [f.name for f in files] for ext, files in book_map.items() if files
+                ext.lstrip('.'): [f.name for f in files]
+                for ext, files in book_map.items() if files
             },
-            "audio_parts": [f.name for f in audio_files],
+            "audio_files": [f.name for f in audio_files],
         }
 
         return book_only, audio_only, assets
-
-    # ------------------------------------------------------------------
-
-    def package_assets(
-        self,
-        book_dir: Path,
-        audio_dir: Path,
-        base_title: str,
-        assets: dict,
-        output_dir: Path | None = None,
-    ) -> dict:
-        """Create packages for audio and handle books per category policy.
-
-        - Always package AUDIO to RAR(s) as before.
-        - If the category is Hörbücher/Hörspiele (audio books), DO NOT compress book files:
-          copy them next to the audio archive as plain files (EPUB/PDF/…).
-        - Otherwise (non-audio-book categories), keep the old behavior and RAR each book format.
-
-        Returns
-        -------
-        dict
-            {"audio": [Path, ...], "book": {fmt: [Path, ...]}}
-        """
-        result: dict[str, any] = {"audio": [], "book": {}}
-        safe_title = self._sanitize_and_shorten_title(base_title)
-
-        # Determine output directory (defaults to parent of sources)
-        out_dir = Path(output_dir) if output_dir else audio_dir.parent
-
-        # Detect audiobook category from the parent folder name (e.g. "Horbucher_und_Horspiele")
-        # This works for both "Hörbuch/ Hörspiele" and ASCII "Horbucher/ Horspiele"
-        parent_name = out_dir.parent.name.lower() if out_dir.parent else ""
-        is_audiobook_category = any(
-            kw in parent_name
-            for kw in ("hör", "horbuch", "hörbuch", "horspiel", "hörspiel")
-        )
-
-        # Audio package -------------------------------------------------
-        audio_base = out_dir / f"{safe_title} (Hörbuch)"
-        if audio_dir.exists():
-            ok = self._create_rar_archive(audio_dir, audio_base, safe_title)
-            if not ok:
-                # create placeholder empty file to avoid downstream errors
-                (audio_base.with_suffix(".rar")).write_bytes(b"")
-            result["audio"] = sorted(out_dir.glob(f"{audio_base.name}*.rar"))
-
-        # Book handling -------------------------------------------------
-        book_files = assets.get("book_files", {}) if isinstance(assets, dict) else {}
-
-        if not book_dir.exists() or not book_files:
-            return result
-
-        if is_audiobook_category:
-            # ✅ New policy for audiobooks:
-            #   Do NOT compress books. Copy them out next to the audio archive.
-            for fmt, files in book_files.items():
-                produced: list[Path] = []
-                for idx, name in enumerate(files, start=1):
-                    src = book_dir / name
-                    if not src.exists():
-                        continue
-                    # If single file for format -> TITLE (E-Book - FMT).ext
-                    # If multiple -> TITLE (E-Book - FMT) [i].ext
-                    base = out_dir / f"{safe_title} (E-Book - {fmt.upper()})"
-                    if len(files) == 1:
-                        dst = base.with_suffix(Path(name).suffix)
-                    else:
-                        dst = out_dir / f"{base.name} [{idx}]{Path(name).suffix}"
-                    # Avoid overwriting by adding counter if needed
-                    final = dst
-                    counter = 1
-                    while final.exists():
-                        stem, suf = final.stem, final.suffix
-                        final = final.with_name(f"{stem}_{counter}{suf}")
-                        counter += 1
-                    shutil.copy2(src, final)
-                    produced.append(final)
-                if produced:
-                    result.setdefault("book", {})[fmt] = produced
-        else:
-            # Legacy behavior (non-audiobook categories): RAR each format
-            for fmt, files in book_files.items():
-                tmp_dir = book_dir / f"__{fmt}"
-                tmp_dir.mkdir(parents=True, exist_ok=True)
-                for name in files:
-                    src = book_dir / name
-                    if src.exists():
-                        shutil.copy(src, tmp_dir / name)
-                out_base = out_dir / f"{safe_title} (E-Book - {fmt.upper()})"
-                ok = self._create_rar_archive(tmp_dir, out_base, safe_title)
-                if not ok:
-                    (out_base.with_suffix(".rar")).write_bytes(b"")
-                result.setdefault("book", {})[fmt] = sorted(
-                    out_dir.glob(f"{out_base.name}*.rar")
-                )
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-
-        return result
-

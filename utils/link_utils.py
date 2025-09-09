@@ -180,32 +180,23 @@ def _normalize_flat_map(src: Dict[Any, Any]) -> Dict[str, List[str]]:
 def save_links(main_window: Any, category: str, title: str, links: Dict[str, Any]) -> Dict[str, Any]:
     """Normalise *links*, group them using ``group_hints`` and persist.
 
-    Parameters
-    ----------
-    main_window:
-        Object holding ``process_threads`` and ``save_process_threads_data``.
-    category, title:
-        Identify the thread record within ``process_threads``.
-    links:
-        Mapping of hosts to URLs.  Can be flat or already grouped.
-
     Returns
     -------
     dict
-        The grouped structure that was persisted.  Keys are ``audio``,
-        ``ebook`` and optionally ``episodes`` and ``keeplinks``.
+        The grouped structure that was persisted. Keys include ``audio`` and ``ebook``
+        (bucketed links), ``episodes`` (episodic content), ``keeplinks`` (single short-link),
+        and ``mirrors`` (leftover direct links that don’t fit other buckets).
     """
-
     flat = _normalize_flat_map(links or {})
 
     keeplink = ""
     if flat.get("keeplinks"):
         keeplink = flat.pop("keeplinks")[0]
 
-    # locate thread record and grouping hints
+    # ---- Locate thread record & grouping hints safely ----
     try:
-        cat = main_window.process_threads.get(category, {})
-        root_rec = cat.get(title)
+        cat_map = (getattr(main_window, "process_threads", None) or {}).get(category, {})
+        root_rec = cat_map.get(title)
         if not root_rec:
             return {}
         versions = root_rec.get("versions")
@@ -214,18 +205,13 @@ def save_links(main_window: Any, category: str, title: str, links: Dict[str, Any
         log.exception("save_links: thread not found for %s/%s", category, title)
         return {}
 
-    # ``group_hints`` may be missing or ``None`` on older records; ensure we
-    # always work with a dictionary to avoid ``AttributeError`` when accessing
-    # hint values.
     hints = (latest.get("group_hints") or {}) if isinstance(latest, dict) else {}
     audio_parts = int(hints.get("audio_parts") or 0)
-    ebook_counts = {
-        str(k).upper(): int(v)
-        for k, v in (hints.get("ebook_counts") or {}).items()
-    }
+    ebook_counts = {str(k).upper(): int(v) for k, v in (hints.get("ebook_counts") or {}).items()}
 
-    # ensure deterministic order for formats
-    fmt_order = _FMT_ORDER + [f for f in ebook_counts.keys() if f not in _FMT_ORDER]
+    # Deterministic order for formats (preserve _FMT_ORDER then append any extras)
+    extras = [k for k in ebook_counts.keys() if k not in _FMT_ORDER]
+    fmt_order = _FMT_ORDER + extras
 
     grouped: Dict[str, Any] = {}
     if keeplink:
@@ -233,6 +219,7 @@ def save_links(main_window: Any, category: str, title: str, links: Dict[str, Any
 
     audio_map: Dict[str, List[str]] = {}
     ebook_map: Dict[str, Dict[str, List[str]]] = {}
+    mirrors_map: Dict[str, List[str]] = {}
 
     for host, urls in flat.items():
         if not urls:
@@ -240,63 +227,85 @@ def save_links(main_window: Any, category: str, title: str, links: Dict[str, Any
 
         remaining = list(urls)
 
+        # ---- AUDIO bucketing (by parts) ----
         if audio_parts > 0:
-            selected: List[str] = []
+            picked: List[str] = []
+            # Prefer archive-like extensions for audio packs
             for u in list(remaining):
                 if _ext_from_url(u) in {"rar", "zip", "7z"}:
-                    selected.append(u)
+                    picked.append(u)
                     remaining.remove(u)
-                    if len(selected) == audio_parts:
+                    if len(picked) == audio_parts:
                         break
-            while len(selected) < audio_parts and remaining:
-                selected.append(remaining.pop(0))
-            if selected:
-                audio_map[host] = selected
+            # Fallback fill if hints > available archives
+            while len(picked) < audio_parts and remaining:
+                picked.append(remaining.pop(0))
+            if picked:
+                audio_map[host] = picked
 
+        # ---- EBOOK bucketing (by format counts) ----
         for fmt in fmt_order:
-            count = ebook_counts.get(fmt, 0)
-            if count <= 0:
+            need = int(ebook_counts.get(fmt, 0) or 0)
+            if need <= 0:
                 continue
             fmt_lower = fmt.lower()
-            selected: List[str] = []
+            picked: List[str] = []
             for u in list(remaining):
                 if _ext_from_url(u) == fmt_lower:
-                    selected.append(u)
+                    picked.append(u)
                     remaining.remove(u)
-                    if len(selected) == count:
+                    if len(picked) == need:
                         break
-            while len(selected) < count and remaining:
-                selected.append(remaining.pop(0))
-            if selected:
-                ebook_map.setdefault(fmt, {})[host] = selected
+            # Fallback fill if not enough exact matches
+            while len(picked) < need and remaining:
+                picked.append(remaining.pop(0))
+            if picked:
+                ebook_map.setdefault(fmt, {})[host] = picked
+
+        # ---- Anything left goes to MIRRORS (avoid dropping direct links) ----
+        if remaining:
+            mirrors_map.setdefault(host, []).extend(_dedup(remaining))
 
     if audio_map:
         grouped["audio"] = audio_map
     if ebook_map:
         grouped["ebook"] = ebook_map
+    if mirrors_map:
+        grouped["mirrors"] = mirrors_map
 
-    # passthrough episodes if present already grouped in the source
+    # ---- Pass-through of EPISODES (if provided in grouped source) ----
     episodes_src = links.get("episodes") if isinstance(links, dict) else {}
     episodes_grouped: Dict[str, Dict[str, List[str]]] = {}
-    for label, by_host in (episodes_src or {}).items():
-        for host, urls in (by_host or {}).items():
-            canon = _canonicalize_host(str(host)) or _guess_host_from_url(str(host))
-            url_list = _dedup(_as_list(urls))
-            if canon and url_list:
-                episodes_grouped.setdefault(str(label), {})[canon] = url_list
+    if isinstance(episodes_src, dict):
+        for label, by_host in (episodes_src or {}).items():
+            if not isinstance(by_host, dict):
+                continue
+            for h, u in (by_host or {}).items():
+                canon = _canonicalize_host(str(h)) or _guess_host_from_url(str(h))
+                url_list = _dedup(_as_list(u))
+                if canon and url_list:
+                    episodes_grouped.setdefault(str(label), {})[canon] = url_list
     if episodes_grouped:
         grouped["episodes"] = episodes_grouped
 
+    # ---- Persist back into process_threads ----
     try:
         root_rec["links"] = grouped
-        if latest is not root_rec:
+        if latest is not root_rec and isinstance(latest, dict):
             latest["links"] = grouped
-        # Force persistence so process_threads survives abrupt restarts
-        main_window.save_process_threads_data(force=True)
+        # Force persistence so process_threads survives restarts
+        if hasattr(main_window, "save_process_threads_data"):
+            try:
+                main_window.save_process_threads_data(force=True)  # type: ignore[call-arg]
+            except TypeError:
+                main_window.save_process_threads_data()  # backward compatibility
     except Exception:
         log.exception("Failed to save links for %s/%s", category, title)
 
     return grouped
+
+
+
 
 
 __all__ = ["save_links"]

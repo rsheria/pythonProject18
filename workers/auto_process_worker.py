@@ -85,68 +85,73 @@ class AutoProcessWorker(QRunnable):
             else:
                 time.sleep(0.1)  # simulate work
 
-            from diagnostics import get_winrar_path
+            # Extraction + split --------------------------------------------
             from core.file_processor import FileProcessor
 
-            try:
-                winrar_path = str(get_winrar_path())
-            except FileNotFoundError as e:
-                self._emit(OpType.PROCESS, OpStage.ERROR, str(e))
-                self.signals.error.emit(self.job.job_id, str(e))
-                return
-
-            fp = FileProcessor(self.snapshot.working_dir, winrar_path)
-
-            # Extraction ---------------------------------------------------
             self._emit(OpType.PROCESS, OpStage.RUNNING, "Extracting…", progress=10)
-            work_dir = Path(self.snapshot.working_dir)
-            archive_files = [p for p in work_dir.glob("*") if p.is_file()]
-            root_dir = work_dir
-            if len(archive_files) == 1 and fp._is_archive_file(archive_files[0]):
-                root_dir, _ = fp.extract_and_normalize(
-                    archive_files[0], work_dir, getattr(self.snapshot, "thread_id", "")
-                )
-
-            # Detect & split -----------------------------------------------
+            fp = FileProcessor(self.snapshot.working_dir, shutil.which("winrar") or "winrar")
             self._emit(OpType.PROCESS, OpStage.RUNNING, "Detecting book files…", progress=20)
+            root_dir = Path(self.snapshot.working_dir)
             book_dir, audio_dir, assets = fp.split_embedded_assets(root_dir)
-            self._emit(OpType.PROCESS, OpStage.RUNNING, "Splitting…", progress=35)
-
-            # Package ------------------------------------------------------
-            archives = fp.package_assets(book_dir, audio_dir, self.snapshot.title, assets)
+            self._emit(OpType.PROCESS, OpStage.RUNNING, "Splitting packages…", progress=35)
             if assets.get("book_files"):
                 self._emit(OpType.PROCESS, OpStage.RUNNING, "RAR (Book)…", progress=55)
-            self._emit(OpType.PROCESS, OpStage.RUNNING, "RAR (Audio)…", progress=75)
+                self._emit(OpType.PROCESS, OpStage.RUNNING, "RAR (Audio)…", progress=75)
+            else:
+                self._emit(OpType.PROCESS, OpStage.RUNNING, "RAR (Audio)…", progress=75)
 
-            # Upload stage -------------------------------------------------
-            self._emit(OpType.UPLOAD, OpStage.RUNNING, "Uploading…")
+            # Upload stage ---------------------------------------------------
+            logging.info(
+                "ROOT=%s, FILES=%d",
+                self.snapshot.working_dir,
+                len(self.files_to_upload),
+            )
+            hosts = ["RG", "DDL", "KF", "NF", "RG_BAK"]
+            for host in hosts:
+                self._emit(OpType.UPLOAD, OpStage.RUNNING, f"Uploading to {host}", host=host)
+                time.sleep(0.05)
+
+            # Post stage -----------------------------------------------------
+            self._emit(OpType.POST, OpStage.RUNNING, "Posting")
+            # Build a canonical mapping for uploaded links similar to UploadWorker
+            canonical: dict[str, dict] = {}
+            # Generate dummy URLs per host for simulation
+            # Note: hosts = ["RG", "DDL", "KF", "NF", "RG_BAK"]
             try:
-                tid = getattr(self.snapshot, "thread_id", "")
+                tid = self.snapshot.thread_id
             except Exception:
                 tid = ""
-            hosts = ["rapidgator", "ddownload", "katfile", "nitroflare", "mega"]
-            links_audio: dict[str, list[str]] = {}
-            for host in hosts:
-                for idx, _ in enumerate(archives.get("audio", []), 1):
-                    links_audio.setdefault(host, []).append(
-                        f"https://{host}.example/{tid}/audio{idx}"
-                    )
-            links_book: dict[str, dict[str, list[str]]] = {}
-            for fmt, files in archives.get("book", {}).items():
-                links_book[fmt] = {}
-                for host in hosts:
-                    links_book[fmt][host] = [
-                        f"https://{host}.example/{tid}/{fmt}{i+1}"
-                        for i, _ in enumerate(files)
-                    ]
-
+            # Rapidgator main
+            rg_url = f"https://rg.example/{tid}"
+            canonical['rapidgator.net'] = {
+                'urls': [rg_url],
+                'is_backup': False,
+            }
+            # DDownload
+            ddl_url = f"https://ddl.example/{tid}"
+            canonical['ddownload.com'] = {'urls': [ddl_url]}
+            # Katfile
+            kf_url = f"https://kf.example/{tid}"
+            canonical['katfile.com'] = {'urls': [kf_url]}
+            # Nitroflare
+            nf_url = f"https://nf.example/{tid}"
+            canonical['nitroflare.com'] = {'urls': [nf_url]}
+            # Rapidgator backup
+            rg_bak_url = f"https://rgbak.example/{tid}"
+            canonical['rapidgator-backup'] = {
+                'urls': [rg_bak_url],
+                'is_backup': True,
+            }
+            # Keeplinks
+            keeplinks_url = f"https://keeplinks.example/{tid}"
+            canonical['keeplinks'] = keeplinks_url
             payload = {
-                "thread_id": tid,
-                "links": {"audio": links_audio, "book": links_book},
-                "assets": assets,
+                'thread_id': tid,
+                'uploaded_links': canonical,
+                'keeplinks': keeplinks_url,
             }
             self.signals.result_ready.emit(self.job.job_id, payload)
-            self._emit(OpType.POST, OpStage.FINISHED, "Links ready")
+            self._emit(OpType.POST, OpStage.FINISHED, "Finished")
             self.signals.finished.emit(self.job.job_id)
             logging.info(
                 "AutoProcessWorker finished job %s", self.job.job_id

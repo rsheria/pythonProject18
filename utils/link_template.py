@@ -163,392 +163,125 @@ def _cleanup_separators(s: str) -> str:
 
 def _append_multi_block(blocks: List[str], label: str, urls: List[str]) -> None:
     parts = " ‖ ".join("[url=%s]%02d[/url]" % (u, i + 1) for i, u in enumerate(urls))
-    blocks.append(f"[center][size=3][b]{label}:[/b] {parts}[/size][/center]")
+    blocks.append(f"[center][size=2][b]{label}:[/b] {parts}[/size][/center]")
 
 # ----------------------------- main API ------------------------------------
 
-def apply_links_template(template: str, links: dict) -> str:
+def apply_links_template(template: str, links_dict: dict) -> str:
     """
-    ذكي لتجهيز كتلة الروابط مع احترام التيمبلت المحفوظ:
-
-      • يدعم وضعين للتيمبلت:
-        (أ) وضع التوكنز البسيط: يستبدل {LINK_RG}/{LINK_DDL}/... داخل
-            وسوم [url=...] ويشيل المضيفين اللى مفيش لهم روابط بالكامل.
-        (ب) وضع الأقسام: {AUDIO}/{EBOOK}/{EPISODES} + {LINKS} المجمّع.
-
-      • يرتّب المضيفين حسب utils/host_priority.py
-      • يخفى أى مضيف مفيهوش روابط فعلية.
-      • لا يلمس عناوين الـ URLs إطلاقاً (يحميها أثناء التعقيم).
-      • يستبدل الرموز الممنوعة (‖ → -) ويرفع [size=2] إلى [size=3].
-      • يتعامل مع Keeplinks كرابط واحد (من غير ترقيم أحرف!).
-
-    يقبل أشكال links المختلفة (المسطّح/المجمّع/الكانوني).
+    يطبّق التيمبلت بذكاء:
+      - {LINK_KEEP} يتبدّل بأول Keeplinks لو موجود (مرة واحدة فقط).
+      - لباقي المضيفين {LINK_DDL}/{LINK_RG}/{LINK_KF}/{LINK_NF}/{LINK_MEGA}:
+          * 0 لينك  => يمسح العنصر بالكامل.
+          * 1 لينك  => يستبدل الـ placeholder بالرابط (لو داخل [url=...] هيفضل التنسيق).
+          * +1 لينك => يمسح العنصر من السطر الرئيسي ويضيف بلوك منفصل مرقّم 01..N تحت.
     """
-    import re
-    from collections import defaultdict
+    # 1) طبّع وفهرس الروابط
+    jd = _normalize_links_dict(links_dict)
 
-    # ---------- إعدادات ورموز المضيفين ----------
-    HOST_TOKENS = {
-        "ddownload":  "DDL",
-        "rapidgator": "RG",
-        "katfile":    "KF",
-        "nitroflare": "NF",
-        "mega":       "MEGA",
-        "keeplinks":  "KEEP",
-    }
-    HOST_LABELS = {
-        "ddownload":  "DDownload",
-        "rapidgator": "Rapidgator",
-        "katfile":    "Katfile",
-        "nitroflare": "Nitroflare",
-        "mega":       "MEGA",
-    }
+    if "{PART}" in template:
+        lines: List[str] = []
+        tmpl_lines = template.splitlines()
+        max_parts = max((len(jd.get(h, [])) for h in jd if h != "keeplinks"), default=0)
+        for idx in range(max_parts):
+            for line in tmpl_lines:
+                skip = False
+                out_line = line
+                for host, token in HOST_TOKENS.items():
+                    placeholder = "{LINK_%s}" % token
+                    if placeholder in out_line:
+                        urls = jd.get(host, [])
+                        if idx < len(urls):
+                            out_line = out_line.replace(placeholder, urls[idx])
+                            out_line = out_line.replace("{PART}", str(idx + 1))
+                        else:
+                            skip = True
+                        break
+                if not skip:
+                    out_line = out_line.replace("{PART}", str(idx + 1))
+                    lines.append(out_line)
+        return "\n".join(lines).strip()
 
-    # ترتيب المضيفين (لو متاح)
-    HOST_ORDER: list[str] = []
-    try:
-        from .host_priority import get_host_priority  # type: ignore
-        try:
-            HOST_ORDER = list(get_host_priority())
-        except Exception:
-            HOST_ORDER = []
-    except Exception:
-        try:
-            from .host_priority import HOST_PRIORITY  # type: ignore
-            HOST_ORDER = list(HOST_PRIORITY)
-        except Exception:
-            HOST_ORDER = []
-    HOST_INDEX = {h: i for i, h in enumerate(HOST_ORDER)}
-    def _norm_host(h: str) -> str:
-        h = (h or "").lower()
-        if "rapidgator" in h: return "rapidgator"
-        if "ddownload"  in h or h == "ddl": return "ddownload"
-        if "katfile"    in h: return "katfile"
-        if "nitroflare" in h: return "nitroflare"
-        if "mega"       in h: return "mega"
-        if "keeplink"   in h or "keeplinks" in h: return "keeplinks"
-        return h
-    def _sort_hosts(keys: list[str]) -> list[str]:
-        return sorted(keys, key=lambda k: HOST_INDEX.get(_norm_host(k), 10_000))
-
-    # ---------- حماية الروابط أثناء التعقيم ----------
-    def _protect_urls(text: str) -> tuple[str, dict]:
-        repl = {}
-        idx = 0
-        def _stash(m):
-            nonlocal idx
-            key = f"__URL_PLACEHOLDER_{idx}__"
-            repl[key] = m.group(0)
-            idx += 1
-            return key
-        text = re.sub(r"\[url(?:=[^\]]+)?\].*?\[/url\]", _stash, text, flags=re.I | re.S)
-        text = re.sub(r"https?://[^\s\]]+", _stash, text, flags=re.I)
-        return text, repl
-    def _restore_urls(text: str, repl: dict) -> str:
-        for k, v in repl.items():
-            text = text.replace(k, v)
-        return text
-
-    def _sanitize_specials(text: str) -> str:
-        mapping = {"‖": "-", "–": "-", "—": "-", "−": "-", "\u00A0": " "}
-        for bad, good in mapping.items():
-            text = text.replace(bad, good)
-        text = re.sub(r"[ \t]{2,}", " ", text)
-        text = re.sub(r"(\s*[\|\-]\s*){2,}", " - ", text)
-        text = re.sub(r"\s*-\s*", " - ", text)
-        text = re.sub(r"(?:\s*-\s*){2,}", " - ", text)
-        text = re.sub(r"\s*-\s*$", "", text)
-        return text
-    def _bump_font_sizes(text: str) -> str:
-        return re.sub(r"(?i)\[size\s*=\s*['\"]?2['\"]?\s*\]", "[size=3]", text)
-
-    # ---------- توحيد links إلى شكل مفهوم ----------
-    # نحاول أولاً الاستفادة من الشكل الكانوني لو متوفر (rapidgator.net…)
-    canon: dict[str, list[str]] = {}
-    if isinstance(links, dict):
-        for k, v in links.items():
-            key = _norm_host(str(k))
-            if key == "keeplinks":
-                # نخزّنه منفصل (سلسلة واحدة)
-                canon["keeplinks"] = [v] if v else []
-                continue
-            # v ممكن يكون list/tuple/dict/str
-            urls: list[str] = []
-            if isinstance(v, (list, tuple, set)):
-                for x in v:
-                    if isinstance(x, dict):
-                        for kk in ("urls", "url", "link"):
-                            if kk in x and x[kk]:
-                                val = x[kk]
-                                if isinstance(val, (list, tuple, set)):
-                                    urls += [str(u) for u in val if u]
-                                elif val:
-                                    urls.append(str(val))
-                    elif x:
-                        urls.append(str(x))
-            elif isinstance(v, dict):
-                val = v.get("urls") or v.get("url") or v.get("link")
-                if isinstance(val, (list, tuple, set)):
-                    urls += [str(u) for u in val if u]
-                elif val:
-                    urls.append(str(val))
-            elif v:
-                urls.append(str(v))
-            if urls:
-                canon.setdefault(key, [])
-                canon[key] += [u for u in urls if u]
-
-    # ---------- وضع (أ): استبدال توكنز {LINK_*} إن وُجدت ----------
-    has_token_mode = any(("{LINK_" in template) for _ in (0,))
-    if has_token_mode:
-        host_values: dict[str, list[str]] = {}
-        for host, tok in HOST_TOKENS.items():
-            if host == "keeplinks":
-                host_values[host] = canon.get("keeplinks") or []
-            else:
-                host_values[host] = canon.get(host) or []
-
-        def _strip_host_placeholder(line: str, token: str) -> str:
-            sep = r"[‖\|\-•·]"
-            pat = r"\s*(?:%s\s*)?\[url=\{LINK_%s\}\][^\[]*?\[/url\]\s*(?:%s\s*)?" % (sep, token, sep)
-            line = re.sub(pat, " ", line, flags=re.I)
-            line = line.replace("{LINK_%s}" % token, "")
-            line = re.sub(r"(?:\s*%s\s*){2,}" % sep, " - ", line)
-            line = re.sub(r"^\s*%s\s*|\s*%s\s*$" % (sep, sep), "", line)
-            return re.sub(r"[ \t]{2,}", " ", line).strip()
-
-        out_lines: list[str] = []
-        if "{PART}" in template:
-            max_parts = max(
-                [len(v) for h, v in host_values.items() if h != "keeplinks"]
-                or [1]
-            )
-            for part in range(max_parts):
-                for ln in template.splitlines():
-                    changed = ln.replace("{PART}", str(part + 1))
-                    line_has_link = False
-                    for host, tok in HOST_TOKENS.items():
-                        placeholder = "{LINK_%s}" % tok
-                        if placeholder in changed:
-                            urls = host_values.get(host, [])
-                            if part < len(urls):
-                                changed = changed.replace(placeholder, urls[part])
-                                line_has_link = True
-                            else:
-                                changed = _strip_host_placeholder(changed, tok)
-                    # Keep the line if any placeholder was replaced or static text remains
-                    if changed.strip():
-                        out_lines.append(changed)
-        else:
-            for ln in template.splitlines():
-                changed = ln
-                for host, tok in HOST_TOKENS.items():
-                    placeholder = "{LINK_%s}" % tok
-                    pattern = r"\[url=\{LINK_%s\}\]([^\[]*?)\[/url\]" % tok
-                    urls = host_values.get(host, [])
-                    if urls:
-                        def _repl(m):
-                            label = m.group(1) or HOST_LABELS.get(host, tok)
-                            parts = []
-                            for i, u in enumerate(urls, 1):
-                                lab = label if i == 1 else f"{label}-{i}"
-                                parts.append(f"[url={u}]{lab}[/url]")
-                            return " ‖ ".join(parts)
-                        changed = re.sub(pattern, _repl, changed)
-                        if placeholder in changed:
-                            changed = changed.replace(placeholder, " ‖ ".join(urls))
-                    else:
-                        changed = re.sub(pattern, "", changed)
-                        changed = _strip_host_placeholder(changed, tok)
-                out_lines.append(changed)
-
-        result = "\n".join(out_lines)
-
-        tmp, stash = _protect_urls(result)
-        tmp = _sanitize_specials(tmp)
-        tmp = _bump_font_sizes(tmp)
-        tmp = _cleanup_separators(tmp)
-        result = _restore_urls(tmp, stash)
-        return result.strip()
-
-    # ---------- وضع (ب): الأقسام الذكية ----------
-    # نبنى هيكل مجمّع: Audio/E-Book/Episodes/Other (لو مستخدم بيبعته)
-    def _render_host_block(host: str, url_list: list[str]) -> str:
-        if not url_list:
-            return ""
-        token = HOST_TOKENS.get(_norm_host(host), host)
-        parts = []
-        for i, u in enumerate(url_list, 1):
-            label = token if i == 1 else f"{token}-{i}"
-            parts.append(f"[url={u}]{label}[/url]")
-        return " ‖ ".join(parts)
-
-    # نحاول قراءة الصيغ/الأجزاء إن كانت موجودة
-    def _normalize_grouped(src: dict) -> dict:
-        out = {
-            "audio": defaultdict(list),
-            "ebook": defaultdict(lambda: defaultdict(list)),
-            "episodes": defaultdict(lambda: defaultdict(list)),
-            "other": defaultdict(list),
-        }
-        have_grouped = False
-        if isinstance(src, dict):
-            if any(k in src for k in ("audio", "ebook", "episodes", "mirrors")):
-                have_grouped = True
-        if not have_grouped:
-            # fallback: اعرض كل المضيفين المتاحة كمرايات "other"
-            for host, urls in (canon or {}).items():
-                if host == "keeplinks":
-                    continue
-                if urls:
-                    out["other"][host].extend(urls)
-            return out
-
-        # Grouped paths (لو اتبعت بهذا الشكل)
-        audio = (src.get("audio") or {}) if isinstance(src, dict) else {}
-        for host, urls in (audio.items() if isinstance(audio, dict) else []):
-            if urls:
-                out["audio"][host].extend([u for u in urls if u])
-
-        ebook = (src.get("ebook") or {}) if isinstance(src, dict) else {}
-        for fmt, by_host in (ebook.items() if isinstance(ebook, dict) else []):
-            for host, urls in (by_host.items() if isinstance(by_host, dict) else []):
-                if urls:
-                    out["ebook"][str(fmt).upper()][host].extend([u for u in urls if u])
-
-        episodes = (src.get("episodes") or {}) if isinstance(src, dict) else {}
-        for label, by_host in (episodes.items() if isinstance(episodes, dict) else []):
-            for host, urls in (by_host.items() if isinstance(by_host, dict) else []):
-                if urls:
-                    out["episodes"][label][host].extend([u for u in urls if u])
-
-        mirrors = (src.get("mirrors") or {}) if isinstance(src, dict) else {}
-        for host, urls in (mirrors.items() if isinstance(mirrors, dict) else []):
-            if urls:
-                out["other"][host].extend([u for u in urls if u])
-
-        return out
-
-    grouped = _normalize_grouped(links or {})
-
-    def _render_section(title: str, mapping: dict) -> str:
-        lines = [f"[size=3][b]{title}[/b][/size]"]
-        any_line = False
-        for host in _sort_hosts(list(mapping.keys())):
-            block = _render_host_block(host, mapping[host])
-            if block:
-                lines.append(f"[center]{block}[/center]")
-                any_line = True
-        return "\n".join(lines) if any_line else ""
-
-    audio_block = _render_section("Hörbuch", grouped["audio"])
-    # E-Book مع كل صيغة على حدة
-    ebook_block = ""
-    if grouped["ebook"]:
-        parts = ["[size=3][b]E-Book[/b][/size]"]
-        for fmt in sorted(grouped["ebook"].keys()):
-            parts.append(f"[b]{fmt}[/b]")
-            by_host = grouped["ebook"][fmt]
-            for host in _sort_hosts(list(by_host.keys())):
-                block = _render_host_block(host, by_host[host])
-                if block:
-                    parts.append(f"[center]{block}[/center]")
-        ebook_block = "\n".join(parts)
-
-    episodes_block = ""
-    if grouped["episodes"]:
-        parts = ["[size=3][b]Episoden[/b][/size]"]
-        for label in sorted(grouped["episodes"].keys()):
-            parts.append(f"[b]{label}[/b]")
-            by_host = grouped["episodes"][label]
-            for host in _sort_hosts(list(by_host.keys())):
-                block = _render_host_block(host, by_host[host])
-                if block:
-                    parts.append(f"[center]{block}[/center]")
-        episodes_block = "\n".join(parts)
-
-    mirrors_block = ""
-    if grouped["other"]:
-        # لو مفيش Audio/Ebook/Episodes استعمل المرايات كبديل
-        parts = []
-        for host in _sort_hosts(list(grouped["other"].keys())):
-            block = _render_host_block(host, grouped["other"][host])
-            if block:
-                parts.append(f"[center]{block}[/center]")
-        mirrors_block = "\n".join(parts)
-
-    result = template
-    has_explicit = any(p in template for p in ("{AUDIO}", "{EBOOK}", "{EPISODES}", "{LINKS}"))
-    if has_explicit:
-        result = result.replace("{AUDIO}", audio_block)
-        result = result.replace("{EBOOK}", ebook_block)
-        result = result.replace("{EPISODES}", episodes_block)
-        combined = "\n\n".join([b for b in (audio_block, ebook_block, episodes_block) if b.strip()]) or mirrors_block
-        result = result.replace("{LINKS}", combined)
+    # 2) Keeplinks: استخدم أول واحد فقط
+    keep_urls = jd.get("keeplinks", [])
+    if keep_urls:
+        template = template.replace("{LINK_KEEP}", keep_urls[0])
     else:
-        combined = "\n\n".join(
-            [b for b in (audio_block, ebook_block, episodes_block) if b.strip()]
-        ) or mirrors_block
-        if combined.strip():
-            header_lines = []
-            keepl = canon.get("keeplinks") or []
-            if keepl:
-                header_lines.append(
-                    f"[center][size=3][url={keepl[0]}]Keeplinks[/url][/size][/center]"
-                )
-            header_lines.append("[center][size=3][b]Download-Links[/b][/size][/center]")
-            header_lines.append(combined)
-            result = "\n".join(header_lines)
-        else:
-            # No grouped links; return the original template stripped
-            result = template.strip()
+        template = template.replace("{LINK_KEEP}", "")
 
-    # تنظيف أخير
-    tmp, stash = _protect_urls(result)
-    tmp = re.sub(r"\[center\]\s*\[/center\]", "", tmp, flags=re.I)
-    tmp = re.sub(r"(\n\s*){3,}", "\n\n", tmp)
-    tmp = _sanitize_specials(tmp)
-    tmp = _bump_font_sizes(tmp)
-    result = _restore_urls(tmp, stash)
-    result = result.replace("Download - Links", "Download-Links")
-    result = result.replace("E - Book", "E-Book")
-    return result.strip()
+    # 3) باقي المضيفين
+    multi_blocks: List[str] = []
+    for host in HOST_ORDER:
+        token = HOST_TOKENS[host]
+        label = HOST_LABELS[host]
+        urls = jd.get(host, []) or []
+
+        if not urls:
+            template = template.replace("{LINK_%s}" % token, "")
+            continue
+
+        if len(urls) == 1:
+            # استبدل الـ placeholder لو موجود
+            placeholder = "{LINK_%s}" % token
+            if placeholder in template:
+                template = template.replace(placeholder, urls[0])
+            else:
+                # لو التيمبلت بيستخدم [url={LINK_TOKEN}]..[/url] هتتم المعالجة تلقائيًا
+                template = template.replace("{LINK_%s}" % token, urls[0])
+                template = template.replace("[url={LINK_%s}]" % token, "[url=%s]" % urls[0])
+        else:
+            # شيل من السطر الرئيسي وأضِف بلوك مرقّم
+            template = _strip_host_placeholder(template, token)
+            _append_multi_block(multi_blocks, label, urls)
+
+    # 4) نظافة عامة + إضافة بلوكات متعددة بعد أول [/center] لو موجود
+    template = re.sub(r"\{LINK_[A-Z_]+\}", "", template)  # أي placeholders متبقية
+
+    lower_t = template.lower()
+    if "[/center]" in lower_t and lower_t.strip().startswith("[center"):
+        idx = lower_t.rfind("[/center]")
+        idx = template.lower().rfind("[/center]")
+        head = template[: idx + len("[/center]")]
+        tail = template[idx + len("[/center]") :]
+        extra = ("\n" + "\n".join(multi_blocks) + "\n") if multi_blocks else ""
+        return (head + extra + tail).strip()
+    else:
+        extra = ("\n" + "\n".join(multi_blocks)) if multi_blocks else ""
+        return (template + extra).strip()
+
 
 # ---------------------------------------------------------------------------
 def render_links_german(links: dict, keeplinks: str | None = None) -> str:
     """Render final BBCode blocks for audio/book links in German.
 
-    ``links`` should contain ``audio`` and/or ``book`` dictionaries using the
-    normalized host keys (``rapidgator``, ``ddownload`` …).  The resulting BBCode
-    uses ``[size=3]`` everywhere and host abbreviations as link texts.
+    Parameters
+    ----------
+    links: dict
+        Structure with optional ``audio`` and ``book`` mappings.  Each host
+        key should use the normalized host names (rapidgator, ddownload, etc.).
+    keeplinks: str | None
+        Optional Keeplinks URL to show above other links.
     """
 
     lines: list[str] = []
     if keeplinks:
-        lines.append(f"[center][size=3][url={keeplinks}]Keeplinks[/url][/size][/center]")
+        lines.append(f"[size=3][url={keeplinks}]Keeplinks[/url][/size]")
 
-    lines.append("[center][size=3][b]Download-Links[/b][/size][/center]")
+    lines.append("[size=3][b]Download-Links[/b][/size]")
 
     audio = links.get("audio", {}) if isinstance(links, dict) else {}
     if audio:
-        lines.append("[center][size=3][b]Hörbuch-Teile[/b][/size][/center]")
-        for host in HOST_ORDER + ["mega"]:
+        lines.append("[size=3][b]Hörbuch-Teile[/b][/size]")
+        for host in HOST_ORDER:
             urls = audio.get(host) or []
             if not urls:
                 continue
-            if len(urls) == 1:
-                part = f"[url={urls[0]}]{HOST_TOKENS[host]}[/url]"
-            else:
-                part = " ".join(
-                    f"[url={u}]{i:02d}[/url]" for i, u in enumerate(urls, 1)
-                )
-            lines.append(
-                f"[center][size=3]{HOST_TOKENS[host]}: {part}[/size][/center]"
-            )
+            parts = " ".join(f"[url={u}]{i:02d}[/url]" for i, u in enumerate(urls, 1))
+            lines.append(f"[size=3]{HOST_TOKENS[host]}: {parts}[/size]")
 
     book = links.get("book", {}) if isinstance(links, dict) else {}
     if book:
-        lines.append("[center][size=3][b]Buchdateien[/b][/size][/center]")
+        lines.append("[size=3][b]Buchdateien[/b][/size]")
         fmt_parts: list[str] = []
         fmt_order = ["pdf", "epub", "azw3", "mobi", "djvu"]
         for fmt in fmt_order:
@@ -563,11 +296,9 @@ def render_links_german(links: dict, keeplinks: str | None = None) -> str:
                 url = urls[0] if isinstance(urls, list) else urls
                 host_parts.append(f"[url={url}]{HOST_TOKENS[host]}[/url]")
             if host_parts:
-                fmt_parts.append(f"{fmt.upper()}: {'-'.join(host_parts)}")
+                fmt_parts.append(f"{fmt.upper()}: {' - '.join(host_parts)}")
         if fmt_parts:
-            lines.append(
-                "[center][size=3]" + " — ".join(fmt_parts) + "[/size][/center]"
-            )
+            lines.append("[size=3]" + " — ".join(fmt_parts) + "[/size]")
 
     return "\n".join(lines).strip()
 
