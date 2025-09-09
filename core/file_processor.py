@@ -7,9 +7,71 @@ import glob
 import uuid
 import time
 import random
+import faulthandler
 from pathlib import Path
 from typing import List, Optional, Set, Dict, Any
 from config.config import DATA_DIR    # ← استيراد DATA_DIR
+
+# On Windows we rely on several WinAPI calls via ``ctypes`` for dealing with
+# long paths and stubborn files.  Without explicitly declaring the argument and
+# return types, ``ctypes`` assumes a default which may corrupt the stack on
+# some architectures (producing mysterious crashes with exit code
+# ``0xC0000409`` once processing finishes).  Defining these prototypes up-front
+# keeps the calls well behaved and prevents the interpreter from terminating
+# unexpectedly during the final cleanup phase.
+if os.name == "nt":  # pragma: no cover - executed only on Windows
+    import ctypes
+    from ctypes import wintypes
+    import threading
+
+    # Enable faulthandler to capture hard crashes into crash.log.  The returned
+    # file handle is stored globally so it stays alive for the lifetime of the
+    # process; otherwise Python might close it and faulthandler would attempt to
+    # write to an invalid descriptor during a crash.
+    _crash_log = Path(DATA_DIR) / "crash.log"
+    try:
+        _crash_log.parent.mkdir(parents=True, exist_ok=True)
+        _crash_log_fp = open(_crash_log, "a", buffering=1)
+        faulthandler.enable(_crash_log_fp)
+    except Exception:  # pragma: no cover - fallback if log file can't be opened
+        _crash_log_fp = None
+        faulthandler.enable()
+
+    # Log unhandled exceptions from background threads so silent crashes are
+    # easier to diagnose.
+    def _thread_excepthook(args):  # pragma: no cover - executed only on Windows
+        logging.error(
+            "Unhandled thread exception",  # noqa: G004 - allow logging f-string
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+
+    threading.excepthook = _thread_excepthook
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    def _errcheck_bool(result, func, args):  # pragma: no cover - helper for Windows API
+        if not result:
+            err = ctypes.get_last_error()
+            logging.debug(f"{func.__name__}{args} failed with error {err}")
+        return result
+
+    _kernel32.SetFileAttributesW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD]
+    _kernel32.SetFileAttributesW.restype = wintypes.BOOL
+    _kernel32.SetFileAttributesW.errcheck = _errcheck_bool
+
+    _kernel32.DeleteFileW.argtypes = [wintypes.LPCWSTR]
+    _kernel32.DeleteFileW.restype = wintypes.BOOL
+    _kernel32.DeleteFileW.errcheck = _errcheck_bool
+
+    _kernel32.RemoveDirectoryW.argtypes = [wintypes.LPCWSTR]
+    _kernel32.RemoveDirectoryW.restype = wintypes.BOOL
+    _kernel32.RemoveDirectoryW.errcheck = _errcheck_bool
+
+    _kernel32.MoveFileExW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
+    _kernel32.MoveFileExW.restype = wintypes.BOOL
+    _kernel32.MoveFileExW.errcheck = _errcheck_bool
+else:  # pragma: no cover - non Windows platforms do not need kernel32
+    _kernel32 = None
 
 
 class FileProcessor:
@@ -226,13 +288,26 @@ class FileProcessor:
             # --- Step 4: Handle Book files (no re-compression) ---
             if list(book_dir.iterdir()):
                 for ext, file_list in assets.get("book_files", {}).items():
-                    final_files["book"][ext] = [str(book_dir / fname) for fname in file_list]
+                    moved: list[str] = []
+                    for fname in file_list:
+                        src = book_dir / fname
+                        dest = thread_dir / fname
+                        counter = 1
+                        while dest.exists():
+                            dest = thread_dir / f"{Path(fname).stem}_{counter}{Path(fname).suffix}"
+                            counter += 1
+                        shutil.move(str(src), dest)
+                        moved.append(str(dest))
+                    final_files["book"][ext] = moved
+                # remove now-empty book directory to flatten structure
+                self._safely_remove_directory(book_dir)
 
             # --- Final Cleanup ---
-            self._final_directory_cleanup(thread_dir,
-                                          final_files["audio"] + [f for files in final_files["book"].values() for f in
-                                                                  files]
-                                          )
+            self._final_directory_cleanup(
+                thread_dir,
+                final_files["audio"]
+                + [f for files in final_files["book"].values() for f in files],
+            )
             # Cleanup temp_root if it was created
             if 'temp_root' in locals() and temp_root.exists():
                 self._safely_remove_directory(temp_root)
@@ -920,29 +995,20 @@ class FileProcessor:
         delay = 1
 
         def remove_with_retry(path: Path):
+            """Wrapper around ``_safely_remove_file`` with retries and logging."""
             for attempt in range(max_retries):
                 try:
                     if path.exists():
-                        if os.name == 'nt':
-                            try:
-                                import win32api
-                                import win32con
-                                win32api.SetFileAttributes(str(path), win32con.FILE_ATTRIBUTE_NORMAL)
-                            except:
-                                pass
-                        path.unlink()
-                        logging.info(f"Removed original archive: {path}")
-                        return True
-                except PermissionError:
-                    if attempt < max_retries - 1:
-                        time.sleep(delay)
-                        continue
-                    else:
-                        logging.error(f"Failed to remove {path} after {max_retries} attempts")
-                        return False
+                        if self._safely_remove_file(path):
+                            logging.info(f"Removed original archive: {path}")
+                            return True
                 except Exception as e:
-                    logging.error(f"Error removing {path}: {str(e)}")
+                    logging.error(f"Error removing {path}: {e}")
                     return False
+                if attempt < max_retries - 1:
+                    time.sleep(delay)
+            logging.error(f"Failed to remove {path} after {max_retries} attempts")
+            return False
 
         if part_files:
             for p in part_files:
@@ -995,33 +1061,33 @@ class FileProcessor:
 
     def _rmtree_onerror(self, func, path, exc_info):
         """shutil.rmtree onerror: clear attributes & retry; uses WinAPI for long paths."""
-        import ctypes, stat
+        import stat
         try:
-            if os.name == 'nt':
-                ctypes.windll.kernel32.SetFileAttributesW(self._win_long_path(Path(path)), 0x80)  # NORMAL
+            if os.name == 'nt' and _kernel32:
+                _kernel32.SetFileAttributesW(self._win_long_path(Path(path)), 0x80)  # NORMAL
             try:
                 os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
             except Exception:
                 pass
             func(path)
         except Exception:
-            if os.name == 'nt':
+            if os.name == 'nt' and _kernel32:
                 try:
                     lp = self._win_long_path(Path(path))
                     if func in (os.remove, os.unlink):
-                        ctypes.windll.kernel32.DeleteFileW(lp)
+                        _kernel32.DeleteFileW(lp)
                     elif func in (os.rmdir,):
-                        ctypes.windll.kernel32.RemoveDirectoryW(lp)
+                        _kernel32.RemoveDirectoryW(lp)
                 except Exception:
                     pass
 
     def _safely_remove_directory(self, directory: Path, retries: int = 30, delay: float = 0.25) -> None:
         """Remove directory & contents reliably (handles long paths on Windows)."""
-        import shutil, ctypes, stat
+        import shutil, stat
         if not directory.exists():
             return
 
-        win = (os.name == 'nt')
+        win = (os.name == 'nt' and _kernel32 is not None)
 
         # 1) على ويندوز: لو المسار طويل جداً انقله مؤقتاً لمسار قصير في جذر الدرايف
         if win:
@@ -1033,8 +1099,8 @@ class FileProcessor:
                     dst_lp = self._win_long_path(root_tmp)
                     MOVEFILE_REPLACE_EXISTING = 0x1
                     MOVEFILE_COPY_ALLOWED = 0x2
-                    ok = ctypes.windll.kernel32.MoveFileExW(src_lp, dst_lp,
-                                                            MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)
+                    ok = _kernel32.MoveFileExW(src_lp, dst_lp,
+                                                MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)
                     if not ok:
                         dir_abs.rename(root_tmp)
                     directory = root_tmp
@@ -1045,7 +1111,7 @@ class FileProcessor:
             try:
                 for p in directory.rglob('*'):
                     try:
-                        ctypes.windll.kernel32.SetFileAttributesW(self._win_long_path(p), 0x80)  # NORMAL
+                        _kernel32.SetFileAttributesW(self._win_long_path(p), 0x80)  # NORMAL
                         try:
                             os.chmod(str(p), stat.S_IWRITE | stat.S_IREAD)
                         except Exception:
@@ -1076,7 +1142,7 @@ class FileProcessor:
                 try:
                     if p.is_file() or p.is_symlink():
                         if win:
-                            ctypes.windll.kernel32.SetFileAttributesW(self._win_long_path(p), 0x80)
+                            _kernel32.SetFileAttributesW(self._win_long_path(p), 0x80)
                         try:
                             os.chmod(str(p), 0o777)
                         except Exception:
@@ -1086,12 +1152,12 @@ class FileProcessor:
                         except Exception:
                             if win:
                                 try:
-                                    ctypes.windll.kernel32.DeleteFileW(self._win_long_path(p))
+                                    _kernel32.DeleteFileW(self._win_long_path(p))
                                 except Exception:
                                     pass
                     elif p.is_dir():
                         if win:
-                            ctypes.windll.kernel32.SetFileAttributesW(self._win_long_path(p), 0x80)
+                            _kernel32.SetFileAttributesW(self._win_long_path(p), 0x80)
                         try:
                             os.chmod(str(p), 0o777)
                         except Exception:
@@ -1101,7 +1167,7 @@ class FileProcessor:
                         except Exception:
                             if win:
                                 try:
-                                    ctypes.windll.kernel32.RemoveDirectoryW(self._win_long_path(p))
+                                    _kernel32.RemoveDirectoryW(self._win_long_path(p))
                                 except Exception:
                                     pass
                 except Exception:
@@ -1110,14 +1176,14 @@ class FileProcessor:
             # أخيرًا احذف الفولدر نفسه
             try:
                 if win:
-                    ctypes.windll.kernel32.SetFileAttributesW(self._win_long_path(directory), 0x80)
+                    _kernel32.SetFileAttributesW(self._win_long_path(directory), 0x80)
                 try:
                     os.chmod(str(directory), 0o777)
                 except Exception:
                     pass
                 if win:
                     try:
-                        ctypes.windll.kernel32.RemoveDirectoryW(self._win_long_path(directory))
+                        _kernel32.RemoveDirectoryW(self._win_long_path(directory))
                     except Exception:
                         pass
                 if directory.exists():
@@ -1135,14 +1201,14 @@ class FileProcessor:
 
     def _safely_remove_file(self, file_path: Path, retries: int = 30, delay: float = 0.25) -> bool:
         """Remove a single file reliably (handles long paths on Windows)."""
-        import ctypes, stat
-        win = (os.name == 'nt')
+        import stat
+        win = (os.name == 'nt' and _kernel32 is not None)
         for _ in range(retries):
             try:
                 if file_path.exists():
                     if win:
                         try:
-                            ctypes.windll.kernel32.SetFileAttributesW(self._win_long_path(file_path), 0x80)
+                            _kernel32.SetFileAttributesW(self._win_long_path(file_path), 0x80)
                         except Exception:
                             pass
                     try:
@@ -1154,7 +1220,7 @@ class FileProcessor:
                     except Exception:
                         if win:
                             try:
-                                ctypes.windll.kernel32.DeleteFileW(self._win_long_path(file_path))
+                                _kernel32.DeleteFileW(self._win_long_path(file_path))
                             except Exception:
                                 pass
                 return True

@@ -781,9 +781,6 @@ class DownloadWorker(QThread):
         row = info["row"]
 
         files = info.get("downloaded_files", []) or info.get("new_files", [])
-        if files:
-            info["downloaded_files"] = files
-            info["new_files"] = files
         if not files:
             self.status_update.emit(f"No files for '{info['thread_title']}', skipping.")
             return
@@ -805,6 +802,7 @@ class DownloadWorker(QThread):
                 .get("password")
             )
 
+            # process_downloads now returns the structured dictionary
             processed_data = self.file_processor.process_downloads(
                 td,
                 files,
@@ -812,15 +810,15 @@ class DownloadWorker(QThread):
                 password,
             )
 
-            if processed_data and isinstance(processed_data, dict):
-                # --- NEW: Handle structured data ---
+            if processed_data:
+                # Flatten all processed files into a single list for the upload worker
                 all_processed_paths = []
-                audio_files = processed_data.get("audio", [])
-                book_files_dict = processed_data.get("book", {})
-
-                all_processed_paths.extend(audio_files)
-                for fmt, paths in book_files_dict.items():
-                    all_processed_paths.extend(paths)
+                if isinstance(processed_data, dict):
+                    all_processed_paths.extend(processed_data.get("audio", []))
+                    for fmt, paths in processed_data.get("book", {}).items():
+                        all_processed_paths.extend(paths)
+                else:  # Legacy list format
+                    all_processed_paths = processed_data
 
                 if not all_processed_paths:
                     raise Exception("Processing returned no valid file paths.")
@@ -828,9 +826,7 @@ class DownloadWorker(QThread):
                 main_file = max(all_processed_paths, key=lambda p: os.path.getsize(p))
 
                 self.file_progress.emit(row, 100)
-                entry = self.gui.process_threads[info["category_name"]][
-                    info["thread_title"]
-                ]
+                entry = self.gui.process_threads[info["category_name"]][info["thread_title"]]
                 entry.update({"file_name": os.path.basename(main_file), "file_path": str(main_file)})
                 self.gui.save_process_threads_data()
                 logging.info(
@@ -840,42 +836,19 @@ class DownloadWorker(QThread):
 
                 try:
                     hosts = getattr(self.gui, "active_upload_hosts", [])
+                    # Pass ONLY the flat list of files. UploadWorker will categorize them.
                     upload_worker = UploadWorker(
                         self.bot,
                         row,
                         str(td),
                         thread_id,
                         upload_hosts=hosts,
-                        files_data=processed_data
+                        files=all_processed_paths  # <-- Pass the flat list here
                     )
                     self.gui.register_worker(upload_worker)
                     upload_worker.start()
                 except Exception as e:
                     logging.error("Failed to enqueue upload: %s", e, exc_info=True)
-
-                proc_status.stage = OpStage.FINISHED
-                proc_status.message = "Processing complete"
-                proc_status.progress = 100
-                self.progress_update.emit(proc_status)
-                self.download_success.emit(row)
-
-            # --- Legacy Fallback (if process_downloads returns a simple list) ---
-            elif processed_data:
-                logging.warning("Processing returned a legacy list format.")
-                main = max(processed_data, key=lambda p: os.path.getsize(p))
-                self.file_progress.emit(row, 100)
-                entry = self.gui.process_threads[info["category_name"]][
-                    info["thread_title"]
-                ]
-                entry.update({"file_name": os.path.basename(main), "file_path": str(main)})
-                self.gui.save_process_threads_data()
-
-                hosts = getattr(self.gui, "active_upload_hosts", [])
-                upload_worker = UploadWorker(
-                    self.bot, row, str(td), thread_id, upload_hosts=hosts, files=processed_data
-                )
-                self.gui.register_worker(upload_worker)
-                upload_worker.start()
 
                 proc_status.stage = OpStage.FINISHED
                 proc_status.message = "Processing complete"

@@ -42,17 +42,15 @@ class UploadWorker(QThread):
             keeplinks_url: Optional[str] = None,
             cancel_event=None,
             files: Optional[List[str]] = None,
-            files_data: Optional[Dict[str, Any]] = None,
-            package_label: str = "audio",
+            package_label: str = "audio",  # Kept for compatibility, can be removed
     ):
         super().__init__()
         self.bot = bot
         self.row = row
-        self.folder_path = Path(folder_path)
+        self.folder_path = Path(folder_path)  # This is the root thread directory
         self.thread_id = thread_id
         self.config = bot.config
         self.section = section
-        self.package_label = package_label
         self.keeplinks_url = keeplinks_url
         self.keeplinks_sent = False
         self.is_cancelled = False
@@ -73,35 +71,25 @@ class UploadWorker(QThread):
         if "katfile" in self.hosts:
             self.handlers["katfile"] = KatfileUploadHandler(self.bot)
 
-        # --- NEW: Content-Aware File Gathering ---
+        # --- NEW ROBUST: Internal Content Categorization ---
         self.audio_files: List[Path] = []
         self.book_files: Dict[str, List[Path]] = {}
-        self.files: List[Path] = []
 
-        if files_data and isinstance(files_data, dict):
-            self.audio_files = [Path(p) for p in files_data.get("audio", [])]
-            book_data = files_data.get("book", {})
-            for ext, paths in book_data.items():
-                self.book_files[ext] = [Path(p) for p in paths]
-        elif files:
-             self.files = [Path(f) for f in files]
-        else:
-            audio_dir = self.folder_path / "audio_only"
-            book_dir = self.folder_path / "book_only"
-            if audio_dir.exists() and audio_dir.is_dir():
-                self.audio_files = sorted([f for f in audio_dir.iterdir() if f.is_file()])
-            if book_dir.exists() and book_dir.is_dir():
-                for f in sorted(book_dir.iterdir()):
-                    if f.is_file():
-                        ext = f.suffix.lstrip('.').lower()
-                        self.book_files.setdefault(ext, []).append(f)
-            if not self.audio_files and not self.book_files:
-                self.files = sorted([f for f in self.folder_path.iterdir() if f.is_file()])
+        book_exts = {".pdf", ".epub", ".azw3", ".mobi", ".djvu"}
 
-        self.total_files = len(self.audio_files) + sum(len(v) for v in self.book_files.values()) + len(self.files)
+        all_files = [Path(f) for f in (files or [])]
+
+        for f in all_files:
+            ext = f.suffix.lower()
+            if ext in book_exts:
+                self.book_files.setdefault(ext.lstrip('.'), []).append(f)
+            else:  # Everything else (including .rar) is considered audio for now
+                self.audio_files.append(f)
+
+        self.total_files = len(all_files)
 
         if not self.total_files > 0:
-            logging.warning("UploadWorker: لا توجد ملفات في المجلد %s", folder_path)
+            logging.warning("UploadWorker: No files to upload in folder %s", folder_path)
         # -------------------------------------------
 
         self.upload_results = {
