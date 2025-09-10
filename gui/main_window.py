@@ -70,7 +70,7 @@ from gui.advanced_bbcode_editor import AdvancedBBCodeEditor
 from gui.utils.responsive_manager import ResponsiveManager
 from models.job_model import AutoProcessJob
 from models.operation_status import OperationStatus, OpStage, OpType
-from utils import sanitize_filename, LINK_TEMPLATE_PRESETS
+from utils import sanitize_filename
 from utils.paths import get_data_folder
 from utils.host_priority import (
     get_highest_priority_host,
@@ -5585,10 +5585,11 @@ class ForumBotGUI(QMainWindow):
     # ... (rest of the code remains the same)
     def build_links_block(self, category_name: str, thread_title: str) -> str:
         """
-        Builds a content-aware BBCode links block.
-        - Handles new structured format for audiobooks/ebooks with German labels.
-        - Falls back to the old template system for legacy/simple threads.
+        Build a BBCode block containing:
+        1) The Keeplinks short link.
+        2) Separate lines for each file-host in the order specified in settings.
         """
+        # 1) احصل على معلومات الموضوع
         thread_info = self.process_threads.get(category_name, {}).get(thread_title)
         if not thread_info:
             return ""
@@ -5597,72 +5598,94 @@ class ForumBotGUI(QMainWindow):
         if not links_dict:
             return "[LINKS TBD]"
 
-        # --- NEW: Content-Aware German BBCode Builder ---
-        if "audio" in links_dict or "book" in links_dict:
-            lines = []
+        def _norm(h: str) -> str:
+            return h.lower().replace("-", "").replace("_", "").replace(".", "")
 
-            # Host labels for BBCode
-            host_labels = {
-                "rapidgator.net": "RG", "ddownload.com": "DDL",
-                "katfile.com": "KF", "nitroflare.com": "NF",
-                "mega.nz": "MEGA"
-            }
-            # The order in which hosts will be displayed
-            host_order = ["rapidgator.net", "ddownload.com", "katfile.com", "nitroflare.com", "mega.nz"]
+        backup_pattern = re.compile(r"(bak|backup)$", re.IGNORECASE)
+        backup_filtered = 0
 
-            # 1. Keeplinks first
-            keeplinks_url = links_dict.get("keeplinks")
-            if keeplinks_url and isinstance(keeplinks_url, str):
-                lines.append(f"[center][size=3][url={keeplinks_url}]Keeplinks[/url][/size][/center]")
+        def _norm(h: str) -> str:
+            return h.lower().replace("-", "").replace("_", "").replace(".", "")
 
-            lines.append("[center][size=3][b]Download-Links[/b][/size][/center]")
+        backup_pattern = re.compile(r"(bak|backup)$", re.IGNORECASE)
+        backup_filtered = 0
 
-            # 2. Audio parts
-            audio_links = links_dict.get("audio", {})
-            if audio_links:
-                lines.append("[center][size=3][b]Hörbuch-Teile[/b][/size][/center]")
-                for host in host_order:
-                    if host in audio_links:
-                        urls = audio_links[host]
-                        # Create numbered links for each part
-                        parts = " ‖ ".join(f"[url={url}]{i:02d}[/url]" for i, url in enumerate(urls, 1))
-                        lines.append(f"[center][size=2][b]{host_labels.get(host, host)}:[/b] {parts}[/size][/center]")
-
-            # 3. Book files, grouped by format
-            book_links = links_dict.get("book", {})
-            if book_links:
-                lines.append("[center][size=3][b]Buchdateien[/b][/size][/center]")
-                format_lines = []
-                # Order formats: PDF, EPUB, then others
-                format_order = ["pdf", "epub"] + [f for f in book_links.keys() if f not in ["pdf", "epub"]]
-
-                for file_format in format_order:
-                    if file_format in book_links:
-                        host_links = book_links[file_format]
-                        host_parts = []
-                        for host in host_order:
-                            if host in host_links:
-                                # Assuming one file per format per host
-                                url = host_links[host][0]
-                                host_parts.append(f"[url={url}]{host_labels.get(host, host)}[/url]")
-                        if host_parts:
-                            format_lines.append(f"[b]{file_format.upper()}:[/b] {' - '.join(host_parts)}")
-
-                if format_lines:
-                    lines.append(f"[center][size=2]{'  ‖  '.join(format_lines)}[/size][/center]")
-
-            return "\n".join(lines).strip()
-
-        # --- FALLBACK: Use old template system for legacy threads ---
-        else:
-            logging.info(f"Using legacy link template for '{thread_title}'")
+        # Allow user-defined template
+        template = self.user_manager.get_user_setting("links_template", "") if hasattr(self, "user_manager") else ""
+        if template:
             try:
                 from utils import apply_links_template
-                template = self.user_manager.get_user_setting("links_template", LINK_TEMPLATE_PRESETS[0])
                 return apply_links_template(template, links_dict).strip()
-            except Exception as e:
-                logging.error(f"Error applying legacy template: {e}")
-                return "[LINKS TBD]"
+            except Exception:
+                pass
+
+        result_lines = []
+
+        # 2) Keeplinks أولاً
+        keeplinks = links_dict.get("keeplinks")
+        if keeplinks:
+            result_lines.append("[B]Download via Keeplinks (Short Link):[/B]")
+            # Support keeplinks stored as list or newline-separated string
+            if isinstance(keeplinks, (list, tuple, set)):
+                for url in keeplinks:
+                    if not url:
+                        continue
+                    result_lines.append(f"[url]{url}[/url]")
+            else:
+                # If newline-separated string, split into lines
+                parts = str(keeplinks).strip().split("\n")
+                for url in parts:
+                    if not url:
+                        continue
+                    result_lines.append(f"[url]{url}[/url]")
+            result_lines.append("")  # blank line
+
+        # 3) خريطة من اسم المضيف في الإعدادات إلى (key في links_dict، label للعرض)
+        host_key_map = {
+            "rapidgator": ("rapidgator.net", "Rapidgator"),
+            "nitroflare": ("nitroflare.com", "Nitroflare"),
+            "ddownload": ("ddownload.com", "DDownload"),
+            "katfile": ("katfile.com", "Katfile"),
+            "mega": ("mega", "Mega"),
+        }
+
+        # 4) نظّف قائمة المضيفات من أى نسخة احتياطية لـ Rapidgator قبل اللوب
+        filtered_hosts = []
+        for host in self.active_upload_hosts:
+            normalized = _norm(host)
+            if "rapidgator" in normalized and backup_pattern.search(normalized):
+                continue
+            filtered_hosts.append(host)
+
+        # 5) لفّ على المضيفات بالترتيب من settings
+        for host in filtered_hosts:
+            key, label = host_key_map.get(host.lower(), (host.lower(), host.capitalize()))
+            entry = links_dict.get(key)
+            # Fallback to normalised key (strip suffixes)
+            if entry is None:
+                entry = links_dict.get(key.replace(".net", "").replace(".com", ""))
+            if entry is None:
+                continue
+            # If entry is a dict with an 'is_backup' flag set to True, skip it entirely
+            if isinstance(entry, dict) and entry.get('is_backup'):
+                backup_filtered += len(self._as_list(entry.get('urls')))
+                continue
+            # Obtain list of direct links from entry
+            direct_links = self._as_list(entry if not isinstance(entry, dict) else entry.get('urls'))
+            if not direct_links:
+                continue
+            # Deduplicate while preserving order
+            direct_links = list(dict.fromkeys(direct_links))
+            result_lines.append(f"[B]Download From {label}:[/B]")
+            for url in direct_links:
+                result_lines.append(f"[url]{url}[/url]")
+            result_lines.append("")  # blank line
+
+        if backup_filtered:
+            logging.info("build_links_block filtered %d backup links", backup_filtered)
+
+        # 6) ارجع النص النهائي
+        return "\n".join(line for line in result_lines).strip()
 
     def get_keeplinks_url_from_backup(self, thread_id):
         """Retrieve the Keeplinks URL from the backup JSON based on the thread ID."""
@@ -5816,18 +5839,26 @@ class ForumBotGUI(QMainWindow):
 
     def handle_upload_complete(self, row, urls_dict):
         try:
-            # Handle potential errors or retry logic first
+            # 0) أخطاء/ريترى
             if isinstance(urls_dict, dict) and "error" in urls_dict:
                 if getattr(self, "auto_retry_mode", False):
-                    # Auto-retry logic remains the same
-                    # ...
-                    pass
+                    w = getattr(self, "upload_workers", {}).get(row)
+                    if w:
+                        from PyQt5.QtCore import QTimer, QMetaObject, Qt, Q_ARG
+                        # Schedule a delayed retry; the actual call is invoked on the worker's thread via queued connection
+                        def _schedule_retry(worker=w, r=row):
+                            try:
+                                QMetaObject.invokeMethod(worker, "retry_failed_uploads", Qt.QueuedConnection, Q_ARG(int, r))
+                            except Exception:
+                                pass
+                        QTimer.singleShot(10000, _schedule_retry)
                 return
 
+            # 1) حدّد الصف عن طريق thread_id (fallback = row)
             tid = str(urls_dict.get("thread_id", "")) if isinstance(urls_dict, dict) else ""
             current_row = self._row_for_tid(tid) if tid else row
             if current_row < 0:
-                logging.warning("Thread ID '%s' not found in table after upload; skipping UI update.", tid)
+                logging.warning("Thread ID '%s' not found; skipping update", tid)
                 return
 
             t_item = self.process_threads_table.item(current_row, 0)
@@ -5842,72 +5873,87 @@ class ForumBotGUI(QMainWindow):
                 logging.warning("Thread '%s' not found in category '%s' after upload.", thread_title, category_name)
                 return
 
-            # --- NEW: Directly save the structured URLs ---
-            # The urls_dict is now expected to be structured, e.g., {'audio':..., 'book':..., 'keeplinks':...}
+            # 2) توحيد القيم إلى list + توحيد المفاتيح
+            def to_list(v):
+                if not v:
+                    return []
+                if isinstance(v, dict):
+                    v = v.get("urls") or v.get("url") or v.get("link") or []
+                if isinstance(v, str):
+                    return [v]
+                return list(v)
 
-            # Update the links in the main data structure
-            thread_info["links"] = urls_dict
+            rg_links = to_list(urls_dict.get("rapidgator") or urls_dict.get("rapidgator.net"))
+            rg_backup = to_list(urls_dict.get("rapidgator-backup") or urls_dict.get("rapidgator_backup"))
+            nf_links = to_list(urls_dict.get("nitroflare") or urls_dict.get("nitroflare.com"))
+            dd_links = to_list(urls_dict.get("ddownload") or urls_dict.get("ddownload.com"))
+            kf_links = to_list(urls_dict.get("katfile") or urls_dict.get("katfile.com"))
+            keeplink = (urls_dict.get("keeplinks") or "")
+
+            merged_links = {
+                "rapidgator.net": rg_links,
+                "nitroflare.com": nf_links,
+                "ddownload.com": dd_links,
+                "katfile.com": kf_links,
+                "rapidgator-backup": rg_backup,
+                "keeplinks": keeplink,
+            }
+            # امسح المفاتيح الفارغة
+            merged_links = {
+                k: v for k, v in merged_links.items()
+                if (isinstance(v, str) and v) or (isinstance(v, list) and v)
+            }
+
+            # 3) تحديث خلايا الجدول (الأولوية: أول RG فقط فى العمود)
+            model = self.process_threads_table.model()
+            # Set text for RG, RG_BAK, and Keeplinks columns
+            rg_text    = rg_links[0] if rg_links else ""
+            rg_bak_txt = "\n".join(rg_backup)
+            keep_txt   = keeplink if isinstance(keeplink, str) else ""
+            if self.process_threads_table.item(current_row, 3):
+                self.process_threads_table.item(current_row, 3).setText(rg_text)
+            if self.process_threads_table.item(current_row, 4):
+                self.process_threads_table.item(current_row, 4).setText(rg_bak_txt)
+            if self.process_threads_table.item(current_row, 5):
+                self.process_threads_table.item(current_row, 5).setText(keep_txt)
+            # Emit a single dataChanged signal for the range of modified cells to reduce UI overhead
+            model.dataChanged.emit(model.index(current_row, 3), model.index(current_row, 5))
+
+            # 4) تحديث الداتا الداخلية (مهم: الجذر + آخر نسخة)
+            #    علشان View Links و Proceed Template يقروا الروابط الجديدة فعلاً
+            thread_info["links"] = dict(merged_links)  # ← الجذر
             if thread_info.get("versions"):
                 latest = thread_info["versions"][-1]
-                latest["links"] = urls_dict
+                latest["links"] = dict(merged_links)  # ← آخر نسخة
                 latest["upload_status"] = True
                 latest["thread_id"] = tid
 
             thread_info["upload_status"] = True
             thread_info["thread_id"] = tid
 
-            # --- Update UI Table (Simplified) ---
-            # We will display primary links, and build_links_block will handle the full detail.
-            model = self.process_threads_table.model()
-
-            # Display Keeplinks URL
-            keeplink = urls_dict.get("keeplinks", "")
-            if self.process_threads_table.item(current_row, 5):
-                self.process_threads_table.item(current_row, 5).setText(keeplink if isinstance(keeplink, str) else "")
-
-            # Display primary download links (e.g., from audio)
-            primary_links = []
-            if "audio" in urls_dict and urls_dict["audio"]:
-                first_host = next(iter(urls_dict["audio"]), None)
-                if first_host:
-                    primary_links = urls_dict["audio"][first_host]
-            elif "book" in urls_dict and urls_dict["book"]:
-                first_format = next(iter(urls_dict["book"]), None)
-                if first_format and urls_dict["book"][first_format]:
-                    first_host = next(iter(urls_dict["book"][first_format]), None)
-                    if first_host:
-                        primary_links = urls_dict["book"][first_format][first_host]
-
-            if self.process_threads_table.item(current_row, 3):
-                self.process_threads_table.item(current_row, 3).setText("\n".join(primary_links))
-
-            model.dataChanged.emit(model.index(current_row, 3), model.index(current_row, 5))
-
-            # --- Update Backup Section (if applicable) ---
-            # This part needs to be adapted if you want backups for the new structure
-            # For now, we can simplify it to save the Keeplinks URL and primary audio links
-            if "audio" in urls_dict and urls_dict["audio"]:
+            # 5) باك-أب سيكشن
+            if rg_backup:
                 bi = self.backup_threads.get(thread_title, {}) or {}
                 bi["thread_id"] = tid
-                # Save primary audio links to backup
-                first_host = next(iter(urls_dict["audio"]), None)
-                if first_host:
-                    bi["rapidgator_links"] = urls_dict["audio"][first_host]
+                bi["rapidgator_links"] = rg_links
+                bi["rapidgator_backup_links"] = rg_backup
                 bi["keeplinks_link"] = keeplink if isinstance(keeplink, str) else ""
                 self.backup_threads[thread_title] = bi
                 self.save_backup_threads_data()
                 self.populate_backup_threads_table()
 
-            # --- Finalize ---
+            # 6) حفظ وتحديث الحالة
             self.save_process_threads_data()
             self.mark_upload_complete(category_name, thread_title)
 
-            logging.info("Structured links populated for tid=%s on row=%s", tid, current_row)
-
+            updated_cols = []
+            if rg_links:   updated_cols.append("RG")
+            if rg_backup:  updated_cols.append("RG_BAK")
+            if keeplink:   updated_cols.append("Keeplinks")
+            logging.info("POPULATE-LINKS tid=%s row=%s updated=%s", tid, current_row, updated_cols)
         except Exception as e:
             logging.error(f"Error in handle_upload_complete: {e}", exc_info=True)
             ui_notifier.error("Upload Error", str(e))
-
 
     def _on_upload_worker_complete(self):
         """Track completed upload workers and close dialog when done."""
@@ -9839,35 +9885,73 @@ class ForumBotGUI(QMainWindow):
 
     def save_process_threads_data(self, force: bool = False):
         """
-        حفظ متغير self.process_threads إلى ملف JSON بشكل فوري ومتزامن لضمان عدم فقدان البيانات.
+        حفظ متغير self.process_threads إلى data/<username>_process_threads.json
         """
         try:
-            # 1. تحديد مسار الملف بناءً على المستخدم الحالي
+            # Determine target file and user for logging
             filename = self.get_process_threads_filepath()
+            current_user = self.user_manager.get_current_user() if hasattr(self, 'user_manager') else None
 
-            # 2. أخذ نسخة عميقة (deep copy) من البيانات لتجنب أي مشاكل أثناء الكتابة
-            # هذا يضمن أن البيانات لن تتغير أثناء عملية الحفظ
+            logging.info(f"💾 Saving process threads data for user: {current_user}")
+            logging.info(f"💾 Target file path: {filename}")
+            logging.info(f"💾 Data to save: {len(self.process_threads)} threads")
+
+            # Serialize a copy of the data in the UI thread to avoid race conditions when
+            # the data structure is being mutated elsewhere. We use json roundtrip to
+            # deep copy the nested dictionaries/lists.
             try:
-                # الطريقة الأضمن لعمل نسخة عميقة من القواميس المتداخلة
-                serialized = json.dumps(self.process_threads, ensure_ascii=False)
+                serialized = json.dumps(self.process_threads, ensure_ascii=False, indent=4)
                 data_copy = json.loads(serialized)
             except Exception:
-                # في حالة فشل النسخ العميق، نستخدم نسخة سطحية كخيار احتياطي
+                # Fallback shallow copy if serialization fails
                 data_copy = dict(self.process_threads)
 
-            # 3. التأكد من وجود المجلد قبل الكتابة
+            # Ensure the directory exists
             os.makedirs(os.path.dirname(filename), exist_ok=True)
 
-            # 4. الكتابة الفورية والمباشرة على القرص (متزامنة)
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(data_copy, f, ensure_ascii=False, indent=4)
+            # Cancel any pending save to coalesce rapid successive calls
+            if hasattr(self, "_process_threads_save_timer"):
+                timer = getattr(self, "_process_threads_save_timer")
+                if timer.isActive():
+                    timer.stop()
 
-            # 5. تسجيل رسالة نجاح في السجل (Log) للتأكيد
-            logging.info(f"✅ [SYNC SAVE] Process Threads data saved successfully to {filename}")
+            # Inner function performing the actual disk write on a background thread
+            def _write_file(data, path):
+                try:
+                    with open(path, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, ensure_ascii=False, indent=4)
+                    # Optional verification
+                    logging.info(f"✅ Process Threads data saved successfully to {path}")
+                except Exception as ex:
+                    logging.error(f"❌ Error writing process threads data: {ex}", exc_info=True)
 
+            # If force is True, write synchronously immediately and skip the debounce timer.
+            if force:
+                try:
+                    with open(filename, 'w', encoding='utf-8') as f:
+                        json.dump(data_copy, f, ensure_ascii=False, indent=4)
+                    logging.info(f"✅ Process Threads data saved successfully to {filename}")
+                except Exception as ex:
+                    logging.error(f"❌ Error writing process threads data: {ex}", exc_info=True)
+                return
+
+            # Use a single-shot QTimer to schedule the write after a short delay; this
+            # collapses multiple calls into a single write operation.
+            from PyQt5.QtCore import QTimer
+            def _start_async_write():
+                import threading
+                t = threading.Thread(target=_write_file, args=(data_copy, filename), daemon=True)
+                t.start()
+
+            if not hasattr(self, "_process_threads_save_timer"):
+                self._process_threads_save_timer = QTimer(self)
+                self._process_threads_save_timer.setSingleShot(True)
+                self._process_threads_save_timer.timeout.connect(_start_async_write)
+
+            # Start/reset the timer with a small debounce interval (300 ms)
+            self._process_threads_save_timer.start(300)
         except Exception as e:
-            # في حالة حدوث أي خطأ، يتم تسجيله ومعالجته مركزيًا
-            logging.error(f"❌ Error in save_process_threads_data (SYNC): {e}", exc_info=True)
+            logging.error(f"❌ Error in save_process_threads_data: {e}", exc_info=True)
             self.handle_exception("save_process_threads_data", e)
 
     def load_process_threads_data(self):

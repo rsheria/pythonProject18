@@ -779,8 +779,15 @@ class DownloadWorker(QThread):
             return
         info = self.thread_info_map[thread_id]
         row = info["row"]
-
+        
+        # Check both downloaded_files (legacy) and new_files (JDownloader)
         files = info.get("downloaded_files", []) or info.get("new_files", [])
+        
+        # Sync both for consistency
+        if files:
+            info["downloaded_files"] = files
+            info["new_files"] = files
+            
         if not files:
             self.status_update.emit(f"No files for '{info['thread_title']}', skipping.")
             return
@@ -801,61 +808,53 @@ class DownloadWorker(QThread):
                 .get(info["thread_title"], {})
                 .get("password")
             )
-
-            # process_downloads now returns the structured dictionary
-            processed_data = self.file_processor.process_downloads(
+            processed = self.file_processor.process_downloads(
                 td,
                 files,
                 info["thread_title"],
                 password,
             )
 
-            if processed_data:
-                # Flatten all processed files into a single list for the upload worker
-                all_processed_paths = []
-                if isinstance(processed_data, dict):
-                    all_processed_paths.extend(processed_data.get("audio", []))
-                    for fmt, paths in processed_data.get("book", {}).items():
-                        all_processed_paths.extend(paths)
-                else:  # Legacy list format
-                    all_processed_paths = processed_data
-
-                if not all_processed_paths:
-                    raise Exception("Processing returned no valid file paths.")
-
-                main_file = max(all_processed_paths, key=lambda p: os.path.getsize(p))
-
+            if processed:
+                if isinstance(processed, tuple):
+                    root_dir, produced_files = processed
+                    produced_files = [str(p) for p in produced_files]
+                    main = produced_files[0] if produced_files else None
+                else:
+                    root_dir = td
+                    produced_files = processed
+                    main = max(produced_files, key=lambda p: os.path.getsize(p))
                 self.file_progress.emit(row, 100)
-                entry = self.gui.process_threads[info["category_name"]][info["thread_title"]]
-                entry.update({"file_name": os.path.basename(main_file), "file_path": str(main_file)})
+                entry = self.gui.process_threads[info["category_name"]][
+                    info["thread_title"]
+                ]
+                if main:
+                    entry.update({"file_name": os.path.basename(main), "file_path": str(main)})
                 self.gui.save_process_threads_data()
                 logging.info(
-                    "Processed %d files for '%s', main file: %s", len(all_processed_paths), info["thread_title"],
-                    main_file
+                    "Processed main file for '%s': %s", info["thread_title"], main
                 )
-
-                try:
-                    hosts = getattr(self.gui, "active_upload_hosts", [])
-                    # Pass ONLY the flat list of files. UploadWorker will categorize them.
-                    upload_worker = UploadWorker(
-                        self.bot,
-                        row,
-                        str(td),
-                        thread_id,
-                        upload_hosts=hosts,
-                        files=all_processed_paths  # <-- Pass the flat list here
-                    )
-                    self.gui.register_worker(upload_worker)
-                    upload_worker.start()
-                except Exception as e:
-                    logging.error("Failed to enqueue upload: %s", e, exc_info=True)
-
+                if isinstance(processed, tuple):
+                    logging.info("ROOT=%s, FILES=%d", root_dir, len(produced_files))
+                    try:
+                        hosts = getattr(self.gui, "active_upload_hosts", [])
+                        upload_worker = UploadWorker(
+                            self.bot,
+                            row,
+                            root_dir,
+                            thread_id,
+                            upload_hosts=hosts,
+                            files=produced_files,
+                        )
+                        self.gui.register_worker(upload_worker)
+                        upload_worker.start()
+                    except Exception as e:
+                        logging.error("Failed to enqueue upload: %s", e)
                 proc_status.stage = OpStage.FINISHED
                 proc_status.message = "Processing complete"
                 proc_status.progress = 100
                 self.progress_update.emit(proc_status)
                 self.download_success.emit(row)
-
             else:
                 logging.warning("No processed output for '%s'", info["thread_title"])
                 proc_status.stage = OpStage.ERROR

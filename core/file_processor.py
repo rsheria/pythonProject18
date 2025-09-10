@@ -7,71 +7,9 @@ import glob
 import uuid
 import time
 import random
-import faulthandler
 from pathlib import Path
-from typing import List, Optional, Set, Dict, Any
+from typing import List, Optional, Set
 from config.config import DATA_DIR    # ← استيراد DATA_DIR
-
-# On Windows we rely on several WinAPI calls via ``ctypes`` for dealing with
-# long paths and stubborn files.  Without explicitly declaring the argument and
-# return types, ``ctypes`` assumes a default which may corrupt the stack on
-# some architectures (producing mysterious crashes with exit code
-# ``0xC0000409`` once processing finishes).  Defining these prototypes up-front
-# keeps the calls well behaved and prevents the interpreter from terminating
-# unexpectedly during the final cleanup phase.
-if os.name == "nt":  # pragma: no cover - executed only on Windows
-    import ctypes
-    from ctypes import wintypes
-    import threading
-
-    # Enable faulthandler to capture hard crashes into crash.log.  The returned
-    # file handle is stored globally so it stays alive for the lifetime of the
-    # process; otherwise Python might close it and faulthandler would attempt to
-    # write to an invalid descriptor during a crash.
-    _crash_log = Path(DATA_DIR) / "crash.log"
-    try:
-        _crash_log.parent.mkdir(parents=True, exist_ok=True)
-        _crash_log_fp = open(_crash_log, "a", buffering=1)
-        faulthandler.enable(_crash_log_fp)
-    except Exception:  # pragma: no cover - fallback if log file can't be opened
-        _crash_log_fp = None
-        faulthandler.enable()
-
-    # Log unhandled exceptions from background threads so silent crashes are
-    # easier to diagnose.
-    def _thread_excepthook(args):  # pragma: no cover - executed only on Windows
-        logging.error(
-            "Unhandled thread exception",  # noqa: G004 - allow logging f-string
-            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
-        )
-
-    threading.excepthook = _thread_excepthook
-
-    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-
-    def _errcheck_bool(result, func, args):  # pragma: no cover - helper for Windows API
-        if not result:
-            err = ctypes.get_last_error()
-            logging.debug(f"{func.__name__}{args} failed with error {err}")
-        return result
-
-    _kernel32.SetFileAttributesW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD]
-    _kernel32.SetFileAttributesW.restype = wintypes.BOOL
-    _kernel32.SetFileAttributesW.errcheck = _errcheck_bool
-
-    _kernel32.DeleteFileW.argtypes = [wintypes.LPCWSTR]
-    _kernel32.DeleteFileW.restype = wintypes.BOOL
-    _kernel32.DeleteFileW.errcheck = _errcheck_bool
-
-    _kernel32.RemoveDirectoryW.argtypes = [wintypes.LPCWSTR]
-    _kernel32.RemoveDirectoryW.restype = wintypes.BOOL
-    _kernel32.RemoveDirectoryW.errcheck = _errcheck_bool
-
-    _kernel32.MoveFileExW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
-    _kernel32.MoveFileExW.restype = wintypes.BOOL
-    _kernel32.MoveFileExW.errcheck = _errcheck_bool
-else:  # pragma: no cover - non Windows platforms do not need kernel32
-    _kernel32 = None
 
 
 class FileProcessor:
@@ -230,92 +168,99 @@ class FileProcessor:
 
         files = sorted([p for p in root_dir.glob("*") if p.is_file()])
         return root_dir, files
-
     def process_downloads(
-            self,
-            thread_dir: Path,
-            downloaded_files: List[str],
-            thread_title: str,
-            password: str | None = None,
-    ) -> Optional[Dict[str, Any]]:
+        self,
+        thread_dir: Path,
+        downloaded_files: List[str],
+        thread_title: str,
+        password: str | None = None,
+    ) -> Optional[List[str] | tuple[str, List[str]]]:
         """
-        Processes downloaded files, separates assets, recompresses selectively,
-        and returns a structured dictionary of file paths ready for upload.
+        Process downloaded files and return list of processed file paths.
+        1) Move the downloaded files to the thread_dir.
+        2) If there's exactly one file or a multi-part scenario => rename final archive with thread_title.
+        3) If multiple distinct files => now re-process each one with its original name.
         """
         try:
-            cleaned_title = self._sanitize_and_shorten_title(thread_title)
+            # First sanitize & shorten the thread title to avoid Windows path issues
+            cleaned_thread_title = self._sanitize_and_shorten_title(thread_title)
+
+            # Make sure the thread directory exists
             thread_dir.mkdir(parents=True, exist_ok=True)
+
+            # Move downloaded files to the thread_dir
             moved_files = self._organize_downloads(downloaded_files, thread_dir)
             if not moved_files:
+                logging.error("No files were moved to the thread directory.")
                 return None
 
-            # --- Step 1: Extract and Flatten Everything ---
-            # Use the first archive as the primary source for extraction
-            primary_archive = next((f for f in moved_files if self._is_archive_file(f)), None)
-            if not primary_archive:
-                logging.warning("No primary archive found to process in process_downloads.")
-                # Treat non-archive files as assets to be processed directly
-                # We create a temporary root dir to place them in for asset splitting
-                temp_root = thread_dir / f"temp_root_{uuid.uuid4().hex}"
-                temp_root.mkdir()
+            logging.info(
+                "Processing '%s' with settings: m%s split=%sB mode=%s",
+                thread_title,
+                self.comp_level,
+                self.split_bytes,
+                self.recompress_mode,
+            )
+
+            # Decide processing path based on recompress_mode
+            if self.recompress_mode == "never":
+                thread_id = thread_dir.name
+                root_dir = thread_dir
+                produced: List[Path] = []
                 for f in moved_files:
-                    shutil.copy(f, temp_root / f.name)
-                root_folder = temp_root
-            else:
-                root_folder, _ = self.extract_and_normalize(primary_archive, thread_dir, cleaned_title)
-
-            # --- Step 2: Split into Audio and Book Assets ---
-            book_dir, audio_dir, assets = self.split_embedded_assets(root_folder)
-
-            final_files = {"audio": [], "book": {}}
-
-            # --- Step 3: Selective Re-compression for Audio ---
-            if list(audio_dir.iterdir()):  # Check if audio_dir is not empty
-                if self.recompress_mode != "never":
-                    logging.info(f"Re-compressing audio assets for '{thread_title}'")
-                    audio_archive_base = thread_dir / cleaned_title
-                    if self._create_rar_archive(audio_dir, audio_archive_base, cleaned_title):
-                        # Find the created archive parts
-                        final_archives = list(thread_dir.glob(f"{cleaned_title}.part*.rar"))
-                        if not final_archives:
-                            single_rar = thread_dir / f"{cleaned_title}.rar"
-                            if single_rar.exists():
-                                final_archives.append(single_rar)
-                        final_files["audio"] = [str(p) for p in final_archives]
-                else:  # recompress_mode is "never"
-                    final_files["audio"] = [str(p) for p in audio_dir.iterdir() if p.is_file()]
-
-            # --- Step 4: Handle Book files (no re-compression) ---
-            if list(book_dir.iterdir()):
-                for ext, file_list in assets.get("book_files", {}).items():
-                    moved: list[str] = []
-                    for fname in file_list:
-                        src = book_dir / fname
-                        dest = thread_dir / fname
+                    if self._is_archive_file(f):
+                        root_dir, files = self.extract_and_normalize(
+                            f, thread_dir, thread_id
+                        )
+                        produced.extend(files)
+                    else:
+                        root_dir.mkdir(parents=True, exist_ok=True)
+                        dest = root_dir / f.name
                         counter = 1
                         while dest.exists():
-                            dest = thread_dir / f"{Path(fname).stem}_{counter}{Path(fname).suffix}"
+                            dest = root_dir / f"{f.stem}_{counter}{f.suffix}"
                             counter += 1
-                        shutil.move(str(src), dest)
-                        moved.append(str(dest))
-                    final_files["book"][ext] = moved
-                # remove now-empty book directory to flatten structure
-                self._safely_remove_directory(book_dir)
+                        shutil.move(str(f), dest)
+                        produced.append(dest)
 
-            # --- Final Cleanup ---
-            self._final_directory_cleanup(
-                thread_dir,
-                final_files["audio"]
-                + [f for files in final_files["book"].values() for f in files],
-            )
-            # Cleanup temp_root if it was created
-            if 'temp_root' in locals() and temp_root.exists():
-                self._safely_remove_directory(temp_root)
+                    root_dir.mkdir(parents=True, exist_ok=True)
 
-            return final_files
+                    keep = {root_dir.resolve()} | {p.resolve() for p in produced}
+                    for item in list(thread_dir.iterdir()):
+                        if item.resolve() not in keep:
+                            if item.is_dir():
+                                self._safely_remove_directory(item)
+                            else:
+                                self._safely_remove_file(item)
+
+                    logging.info("ROOT=%s, FILES=%d", root_dir, len(produced))
+                    return str(root_dir), [str(p) for p in produced]
+            elif (
+                self.recompress_mode == "if_needed"
+                and len(moved_files) == 1
+                and self._is_archive_file(moved_files[0])
+                and self.split_bytes == 0
+            ):
+                processed_files = [str(moved_files[0])]
+            elif self._detect_if_single_item(moved_files):
+                # Single item => rename final archived output to cleaned_thread_title
+                processed_files = self._process_as_single_item(
+                    moved_files, thread_dir, cleaned_thread_title, password
+                )
+            else:
+                # Multiple distinct files => process each with its own original name
+                processed_files = self._process_multi_distinct(
+                    moved_files, thread_dir, password
+                )
+            
+            # 🧹 Final comprehensive cleanup - keep only processed files
+            if processed_files:
+                self._final_directory_cleanup(thread_dir, processed_files)
+                
+            return processed_files
 
         except Exception as e:
-            logging.error(f"Error in process_downloads for '{thread_title}': {str(e)}", exc_info=True)
+            logging.error(f"Error in process_downloads: {str(e)}")
             return None
 
     def _sanitize_and_shorten_title(self, text: str, max_length: int = 60) -> str:
@@ -434,158 +379,159 @@ class FileProcessor:
         return final_files
 
     def handle_archive_file(
-                self,
-                archive_path: Path,
-                download_folder: Path,
-                thread_title: str,
-                password: str | None = None,
-        ) -> List[str] | tuple[Path, List[Path]]:
-            """Handle archive processing with format preservation and splitting.
+        self,
+        archive_path: Path,
+        download_folder: Path,
+        thread_title: str,
+        password: str | None = None,
+    ) -> List[str] | tuple[Path, List[Path]]:
+        """Handle archive processing with format preservation and splitting.
 
-            When ``recompress_mode`` is set to ``"never"`` the archive is extracted
-            and normalized but not recompressed.  The method then returns a tuple of
-            ``(root_folder, files)`` where ``files`` is a list of all extracted
-            file paths.  In other modes it returns a list of paths to newly created
-            archives.
-            """
-            extract_dir = None
-            try:
-                original_format = archive_path.suffix.lower()
-                is_zip = (original_format == '.zip')
-                thread_title = self._sanitize_and_shorten_title(thread_title)
+        When ``recompress_mode`` is set to ``"never"`` the archive is extracted
+        and normalized but not recompressed.  The method then returns a tuple of
+        ``(root_folder, files)`` where ``files`` is a list of all extracted
+        file paths.  In other modes it returns a list of paths to newly created
+        archives.
+        """
+        extract_dir = None
+        try:
+            original_format = archive_path.suffix.lower()
+            is_zip = (original_format == '.zip')
+            thread_title = self._sanitize_and_shorten_title(thread_title)
 
-                if self.recompress_mode == "never":
-                    is_multipart = False
-                    all_parts = []
-                    if (not is_zip) and re.search(r"\.part\d+\.rar$", archive_path.name, re.IGNORECASE):
-                        base_name = re.sub(r"\.part\d+\.rar$", "", archive_path.name, flags=re.IGNORECASE)
-                        part1_path = download_folder / f"{base_name}.part1.rar"
-                        if part1_path.exists():
-                            archive_path = part1_path
-                            is_multipart = True
-                            all_parts = sorted(download_folder.glob(f"{base_name}.part*.rar"))
-                    root, files = self.extract_and_normalize(
-                        archive_path, download_folder, download_folder.name
-                    )
-                    if is_multipart and all_parts:
-                        self._safely_remove_original_archives(archive_path, all_parts)
-                    else:
-                        self._safely_remove_original_archives(archive_path, None)
-                    return root, files
-
-                # Check if multi-part .partX.rar
+            if self.recompress_mode == "never":
                 is_multipart = False
                 all_parts = []
-                if (not is_zip) and re.search(r'\.part\d+\.rar$', archive_path.name, re.IGNORECASE):
-                    base_name = re.sub(r'\.part\d+\.rar$', '', archive_path.name, flags=re.IGNORECASE)
+                if (not is_zip) and re.search(r"\.part\d+\.rar$", archive_path.name, re.IGNORECASE):
+                    base_name = re.sub(r"\.part\d+\.rar$", "", archive_path.name, flags=re.IGNORECASE)
                     part1_path = download_folder / f"{base_name}.part1.rar"
                     if part1_path.exists():
                         archive_path = part1_path
                         is_multipart = True
                         all_parts = sorted(download_folder.glob(f"{base_name}.part*.rar"))
-                        logging.info(f"Detected multi-part archive with {len(all_parts)} parts")
-
-                if is_multipart:
-                    original_name = base_name
-                else:
-                    original_name = archive_path.stem
-
-                extract_dir_name = f"{original_name}_extracted"
-                extract_dir = download_folder / extract_dir_name
-                if extract_dir.exists():
-                    self._safely_remove_directory(extract_dir)
-                extract_dir.mkdir(exist_ok=True)
-
-                max_retries = 3
-                extract_success = False
-                for attempt in range(max_retries):
-                    logging.info(
-                        f"Extracting {original_format} archive: {archive_path} (Attempt {attempt + 1})"
-                    )
-                    extract_success = self._extract_archive(
-                        archive_path, extract_dir, password
-                    )
-                    if extract_success:
-                        self._flatten_extracted_directory(extract_dir)
-                        break
-                    if attempt < max_retries - 1:
-                        time.sleep(2)
-
-                if not extract_success:
-                    raise Exception("Archive extraction failed after all attempts")
-
-                self._modify_files_for_hash_safely(extract_dir)
-                self._remove_banned_files_safely(extract_dir)
-
-                total_size = sum(
-                    f.stat().st_size
-                    for f in extract_dir.rglob('*')
-                    if f.is_file() and f.name.lower() != 'desktop.ini'
+                root, files = self.extract_and_normalize(
+                    archive_path, download_folder, download_folder.name
                 )
-                logging.info(f"Total size of extracted files: {total_size / self.GIGABYTE:.2f} GB")
-
-                root_folder = self.ensure_single_root(extract_dir, thread_title)
-
-                # Re-archive everything => final name based on thread_title
-                unique_id = uuid.uuid4().hex
-                temp_suffix = f"_temp_{unique_id}"
-                temp_archive_base = download_folder / f"{thread_title}{temp_suffix}"
-
-                success = False
-                for attempt in range(max_retries):
-                    if is_zip:
-                        success = self._create_zip_archive(
-                            root_folder, temp_archive_base, thread_title
-                        )
-                    else:
-                        success = self._create_rar_archive(
-                            root_folder, temp_archive_base, thread_title
-                        )
-                    if success:
-                        break
-                    if attempt < max_retries - 1:
-                        time.sleep(2)
-
-                if not success:
-                    raise Exception("Archive creation failed after all attempts")
-
-                # Gather newly created archives
-                new_archives = []
-                if is_zip:
-                    new_archives.extend(
-                        glob.glob(str(download_folder / f"{thread_title}{temp_suffix}.z*"))
-                    )
-                else:
-                    new_archives.extend(
-                        glob.glob(str(download_folder / f"{thread_title}{temp_suffix}.part*.rar"))
-                    )
-                    if not new_archives:
-                        single_rar = download_folder / f"{thread_title}{temp_suffix}.rar"
-                        if single_rar.exists():
-                            new_archives.append(str(single_rar))
-
-                if not new_archives:
-                    raise Exception("No temporary archive parts were created")
-
-                # Remove original archive(s)
                 if is_multipart and all_parts:
                     self._safely_remove_original_archives(archive_path, all_parts)
                 else:
                     self._safely_remove_original_archives(archive_path, None)
+                return root, files
 
-                # Rename the temp ones => remove the _temp_uuid portion
-                final_archives = self._safely_rename_archives(new_archives, temp_suffix)
+            # Check if multi-part .partX.rar
+            is_multipart = False
+            all_parts = []
+            if (not is_zip) and re.search(r'\.part\d+\.rar$', archive_path.name, re.IGNORECASE):
+                base_name = re.sub(r'\.part\d+\.rar$', '', archive_path.name, flags=re.IGNORECASE)
+                part1_path = download_folder / f"{base_name}.part1.rar"
+                if part1_path.exists():
+                    archive_path = part1_path
+                    is_multipart = True
+                    all_parts = sorted(download_folder.glob(f"{base_name}.part*.rar"))
+                    logging.info(f"Detected multi-part archive with {len(all_parts)} parts")
 
-                # Cleanup
+            if is_multipart:
+                original_name = base_name
+            else:
+                original_name = archive_path.stem
+            
+            extract_dir_name = f"{original_name}_extracted"
+            extract_dir = download_folder / extract_dir_name
+            if extract_dir.exists():
                 self._safely_remove_directory(extract_dir)
+            extract_dir.mkdir(exist_ok=True)
 
-                return final_archives
+            max_retries = 3
+            extract_success = False
+            for attempt in range(max_retries):
+                logging.info(
+                    f"Extracting {original_format} archive: {archive_path} (Attempt {attempt + 1})"
+                )
+                extract_success = self._extract_archive(
+                    archive_path, extract_dir, password
+                )
+                if extract_success:
+                    self._flatten_extracted_directory(extract_dir)
+                    break
+                if attempt < max_retries - 1:
+                    time.sleep(2)
 
-            except Exception as e:
-                logging.error(f"Error processing archive: {str(e)}")
-                if extract_dir and extract_dir.exists():
-                    self._safely_remove_directory(extract_dir)
-                return []
+            if not extract_success:
+                raise Exception("Archive extraction failed after all attempts")
+
+            self._modify_files_for_hash_safely(extract_dir)
+            self._remove_banned_files_safely(extract_dir)
+
+            total_size = sum(
+                f.stat().st_size
+                for f in extract_dir.rglob('*')
+                if f.is_file() and f.name.lower() != 'desktop.ini'
+            )
+            logging.info(f"Total size of extracted files: {total_size / self.GIGABYTE:.2f} GB")
+
+            root_folder = self.ensure_single_root(extract_dir, thread_title)
+
+
+            # Re-archive everything => final name based on thread_title
+            unique_id = uuid.uuid4().hex
+            temp_suffix = f"_temp_{unique_id}"
+            temp_archive_base = download_folder / f"{thread_title}{temp_suffix}"
+
+            success = False
+            for attempt in range(max_retries):
+                if is_zip:
+                    success = self._create_zip_archive(
+                        root_folder, temp_archive_base, thread_title
+                    )
+                else:
+                    success = self._create_rar_archive(
+                        root_folder, temp_archive_base, thread_title
+                    )
+                if success:
+                    break
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+
+            if not success:
+                raise Exception("Archive creation failed after all attempts")
+
+            # Gather newly created archives
+            new_archives = []
+            if is_zip:
+                new_archives.extend(
+                    glob.glob(str(download_folder / f"{thread_title}{temp_suffix}.z*"))
+                )
+            else:
+                new_archives.extend(
+                    glob.glob(str(download_folder / f"{thread_title}{temp_suffix}.part*.rar"))
+                )
+                if not new_archives:
+                    single_rar = download_folder / f"{thread_title}{temp_suffix}.rar"
+                    if single_rar.exists():
+                        new_archives.append(str(single_rar))
+
+            if not new_archives:
+                raise Exception("No temporary archive parts were created")
+
+            # Remove original archive(s)
+            if is_multipart and all_parts:
+                self._safely_remove_original_archives(archive_path, all_parts)
+            else:
+                self._safely_remove_original_archives(archive_path, None)
+
+            # Rename the temp ones => remove the _temp_uuid portion
+            final_archives = self._safely_rename_archives(new_archives, temp_suffix)
+
+            # Cleanup
+            self._safely_remove_directory(extract_dir)
+
+            return final_archives
+
+        except Exception as e:
+            logging.error(f"Error processing archive: {str(e)}")
+            if extract_dir and extract_dir.exists():
+                self._safely_remove_directory(extract_dir)
+            return []
 
     def handle_other_file(
         self,
@@ -995,20 +941,29 @@ class FileProcessor:
         delay = 1
 
         def remove_with_retry(path: Path):
-            """Wrapper around ``_safely_remove_file`` with retries and logging."""
             for attempt in range(max_retries):
                 try:
                     if path.exists():
-                        if self._safely_remove_file(path):
-                            logging.info(f"Removed original archive: {path}")
-                            return True
+                        if os.name == 'nt':
+                            try:
+                                import win32api
+                                import win32con
+                                win32api.SetFileAttributes(str(path), win32con.FILE_ATTRIBUTE_NORMAL)
+                            except:
+                                pass
+                        path.unlink()
+                        logging.info(f"Removed original archive: {path}")
+                        return True
+                except PermissionError:
+                    if attempt < max_retries - 1:
+                        time.sleep(delay)
+                        continue
+                    else:
+                        logging.error(f"Failed to remove {path} after {max_retries} attempts")
+                        return False
                 except Exception as e:
-                    logging.error(f"Error removing {path}: {e}")
+                    logging.error(f"Error removing {path}: {str(e)}")
                     return False
-                if attempt < max_retries - 1:
-                    time.sleep(delay)
-            logging.error(f"Failed to remove {path} after {max_retries} attempts")
-            return False
 
         if part_files:
             for p in part_files:
@@ -1061,33 +1016,33 @@ class FileProcessor:
 
     def _rmtree_onerror(self, func, path, exc_info):
         """shutil.rmtree onerror: clear attributes & retry; uses WinAPI for long paths."""
-        import stat
+        import ctypes, stat
         try:
-            if os.name == 'nt' and _kernel32:
-                _kernel32.SetFileAttributesW(self._win_long_path(Path(path)), 0x80)  # NORMAL
+            if os.name == 'nt':
+                ctypes.windll.kernel32.SetFileAttributesW(self._win_long_path(Path(path)), 0x80)  # NORMAL
             try:
                 os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
             except Exception:
                 pass
             func(path)
         except Exception:
-            if os.name == 'nt' and _kernel32:
+            if os.name == 'nt':
                 try:
                     lp = self._win_long_path(Path(path))
                     if func in (os.remove, os.unlink):
-                        _kernel32.DeleteFileW(lp)
+                        ctypes.windll.kernel32.DeleteFileW(lp)
                     elif func in (os.rmdir,):
-                        _kernel32.RemoveDirectoryW(lp)
+                        ctypes.windll.kernel32.RemoveDirectoryW(lp)
                 except Exception:
                     pass
 
     def _safely_remove_directory(self, directory: Path, retries: int = 30, delay: float = 0.25) -> None:
         """Remove directory & contents reliably (handles long paths on Windows)."""
-        import shutil, stat
+        import shutil, ctypes, stat
         if not directory.exists():
             return
 
-        win = (os.name == 'nt' and _kernel32 is not None)
+        win = (os.name == 'nt')
 
         # 1) على ويندوز: لو المسار طويل جداً انقله مؤقتاً لمسار قصير في جذر الدرايف
         if win:
@@ -1099,8 +1054,8 @@ class FileProcessor:
                     dst_lp = self._win_long_path(root_tmp)
                     MOVEFILE_REPLACE_EXISTING = 0x1
                     MOVEFILE_COPY_ALLOWED = 0x2
-                    ok = _kernel32.MoveFileExW(src_lp, dst_lp,
-                                                MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)
+                    ok = ctypes.windll.kernel32.MoveFileExW(src_lp, dst_lp,
+                                                            MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)
                     if not ok:
                         dir_abs.rename(root_tmp)
                     directory = root_tmp
@@ -1111,7 +1066,7 @@ class FileProcessor:
             try:
                 for p in directory.rglob('*'):
                     try:
-                        _kernel32.SetFileAttributesW(self._win_long_path(p), 0x80)  # NORMAL
+                        ctypes.windll.kernel32.SetFileAttributesW(self._win_long_path(p), 0x80)  # NORMAL
                         try:
                             os.chmod(str(p), stat.S_IWRITE | stat.S_IREAD)
                         except Exception:
@@ -1142,7 +1097,7 @@ class FileProcessor:
                 try:
                     if p.is_file() or p.is_symlink():
                         if win:
-                            _kernel32.SetFileAttributesW(self._win_long_path(p), 0x80)
+                            ctypes.windll.kernel32.SetFileAttributesW(self._win_long_path(p), 0x80)
                         try:
                             os.chmod(str(p), 0o777)
                         except Exception:
@@ -1152,12 +1107,12 @@ class FileProcessor:
                         except Exception:
                             if win:
                                 try:
-                                    _kernel32.DeleteFileW(self._win_long_path(p))
+                                    ctypes.windll.kernel32.DeleteFileW(self._win_long_path(p))
                                 except Exception:
                                     pass
                     elif p.is_dir():
                         if win:
-                            _kernel32.SetFileAttributesW(self._win_long_path(p), 0x80)
+                            ctypes.windll.kernel32.SetFileAttributesW(self._win_long_path(p), 0x80)
                         try:
                             os.chmod(str(p), 0o777)
                         except Exception:
@@ -1167,7 +1122,7 @@ class FileProcessor:
                         except Exception:
                             if win:
                                 try:
-                                    _kernel32.RemoveDirectoryW(self._win_long_path(p))
+                                    ctypes.windll.kernel32.RemoveDirectoryW(self._win_long_path(p))
                                 except Exception:
                                     pass
                 except Exception:
@@ -1176,14 +1131,14 @@ class FileProcessor:
             # أخيرًا احذف الفولدر نفسه
             try:
                 if win:
-                    _kernel32.SetFileAttributesW(self._win_long_path(directory), 0x80)
+                    ctypes.windll.kernel32.SetFileAttributesW(self._win_long_path(directory), 0x80)
                 try:
                     os.chmod(str(directory), 0o777)
                 except Exception:
                     pass
                 if win:
                     try:
-                        _kernel32.RemoveDirectoryW(self._win_long_path(directory))
+                        ctypes.windll.kernel32.RemoveDirectoryW(self._win_long_path(directory))
                     except Exception:
                         pass
                 if directory.exists():
@@ -1201,14 +1156,14 @@ class FileProcessor:
 
     def _safely_remove_file(self, file_path: Path, retries: int = 30, delay: float = 0.25) -> bool:
         """Remove a single file reliably (handles long paths on Windows)."""
-        import stat
-        win = (os.name == 'nt' and _kernel32 is not None)
+        import ctypes, stat
+        win = (os.name == 'nt')
         for _ in range(retries):
             try:
                 if file_path.exists():
                     if win:
                         try:
-                            _kernel32.SetFileAttributesW(self._win_long_path(file_path), 0x80)
+                            ctypes.windll.kernel32.SetFileAttributesW(self._win_long_path(file_path), 0x80)
                         except Exception:
                             pass
                     try:
@@ -1220,7 +1175,7 @@ class FileProcessor:
                     except Exception:
                         if win:
                             try:
-                                _kernel32.DeleteFileW(self._win_long_path(file_path))
+                                ctypes.windll.kernel32.DeleteFileW(self._win_long_path(file_path))
                             except Exception:
                                 pass
                 return True
