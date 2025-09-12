@@ -20,7 +20,7 @@ def test_apply_links_template_missing():
     template = "{LINK_RG}-{LINK_KF}-{LINK_KEEP}"
     links = {"rapidgator.net": ["a"]}
     result = apply_links_template(template, links)
-    assert result.strip() == "a--"
+    assert result.strip() == "a"
 
 
 def test_apply_links_template_multiple_parts():
@@ -45,3 +45,12 @@ def test_apply_links_template_skip_missing_parts():
     assert lines[2] == "DDL 1: ddl1"
     assert lines[3] == "RG 2: rg2"
     assert lines[4] == "NF 2: nf2"
+
+
+def test_apply_links_template_no_empty_links_or_separators():
+    template = "[url={LINK_RG}]RG[/url] ‖ [url={LINK_NF}]NF[/url]"
+    links = {"rapidgator.net": ["rg1"]}
+    result = apply_links_template(template, links)
+    assert "[url=]" not in result
+    assert "‖‖" not in result
+    assert result.strip() == "[url=rg1]RG[/url]"

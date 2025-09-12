@@ -192,19 +192,19 @@ def strip_legacy_link_blocks(template_text: str) -> str:
     يحذف أى بلوكات/Placeholders قديمة خاصة بعرض اللينكات لمنع التكرار قبل الحقن.
     لا يغيّر أى نص آخر أو URLs.
     القواعد العامة:
-      - مسح أسطر تحتوى {LINKS} أو {LINK_KEEP} أو {LINK_RG}/{LINK_DDL}/{LINK_KF}/{LINK_NF}/{LINK_MEGA}
-      - مسح بلوكات CENTER صغيرة مع عنوان DOWNLOAD LINKS التقليدى إن وُجدت.
+      - مسح بلوكات placeholders قديمة مثل {AUDIOBOOK_LINKS_BLOCK} وما شابه.
+      - مسح بلوكات CENTER بعنوان DOWNLOAD LINKS إذا كانت تحوى روابط فعلية فقط.
     """
     import re
     if not isinstance(template_text, str) or not template_text:
         return template_text or ""
     txt = template_text
 
-    # أمسح placeholders المعروفة
+    # أمسح placeholders قديمة لكن اترك أى أسطر فيها {LINKS} أو {LINK_*}
     tokens = [
-        r"\{LINKS\}", r"\{LINK_KEEP\}",
-        r"\{LINK_RG\}", r"\{LINK_DDL\}", r"\{LINK_KF\}", r"\{LINK_NF\}", r"\{LINK_MEGA\}",
-        r"\{AUDIOBOOK_LINKS_BLOCK\}", r"\{EBOOK_LINKS_BLOCK\}", r"\{MUSIC_LINKS_BLOCK\}",
+        r"\{AUDIOBOOK_LINKS_BLOCK\}",
+        r"\{EBOOK_LINKS_BLOCK\}",
+        r"\{MUSIC_LINKS_BLOCK\}",
     ]
     pattern_tokens = re.compile("|".join(tokens))
     lines = []
@@ -214,10 +214,14 @@ def strip_legacy_link_blocks(template_text: str) -> str:
         lines.append(line)
     txt = "\n".join(lines)
 
-    # إزالة بلوك مركزى شائع لعنوان DOWNLOAD LINKS لو موجود (اختيارى وآمن)
+    # إزالة بلوك DOWNLOAD LINKS فقط إذا لم يحتوِ على placeholders
+    def _strip_block(m: re.Match) -> str:
+        block = m.group(0)
+        return block if re.search(r"\{LINK(?:S|_[A-Z_]+)\}", block) else ""
+
     txt = re.sub(
         r"\[center\][^\[]*?DOWNLOAD\s+LINKS[^\]]*?\[/center\]\s*",
-        "",
+        _strip_block,
         txt,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -235,18 +239,50 @@ def build_type_format_host_blocks(
     الآن، لن يتم تفعيل هذا المنطق الهرمي إلا إذا كانت force_build=True.
     """
     from .link_template import HOST_ORDER as DEFAULT_HOST_ORDER, HOST_LABELS as DEFAULT_HOST_LABELS
+    from .link_template import _normalize_links_dict
 
     inv = _invert_host_results_by_type_format(host_results)
 
-    # <<< بداية الإصلاح: تحقق من وجود بيانات كتاب/صوتي + force_build >>>
-    # إذا لم تكن هناك بيانات مصنفة ككتب أو صوتيات، أو لم يتم فرض البناء، أرجع ناتجًا فارغًا.
-    # هذا يمنع الدالة من الاستيلاء على عملية بناء الروابط للمواضيع العادية.
-    if not inv or not force_build:
+    # لو الاستدعاء مش مجبور عليه، مافيش داعى نبنى أى بلوك
+    if not force_build:
         return "", {}
-    # <<< نهاية الإصلاح >>>
 
     order = list(host_order) if (host_order and isinstance(host_order, list)) else list(DEFAULT_HOST_ORDER)
     labels = dict(host_labels) if (host_labels and isinstance(host_labels, dict)) else dict(DEFAULT_HOST_LABELS)
+
+    # --------- حالة ملف واحد أو عدم وجود بيانات مصنفة ---------
+    types_present = [t for t, fmts in inv.items() if fmts]
+    single_type = len(types_present) == 1
+    single_fmt = False
+    if single_type:
+        fmt_map = inv[types_present[0]]
+        fmts_present = [f for f, hosts in fmt_map.items() if hosts]
+        single_fmt = len(fmts_present) == 1
+
+    if not inv or (single_type and single_fmt):
+        norm = _normalize_links_dict(host_results)
+        keep = norm.get("keeplinks", [])
+        if not inv:
+            host_map = {h: u for h, u in norm.items() if h != "keeplinks" and u}
+        else:
+            fmt_map = inv[types_present[0]]
+            fmts_present = [f for f, hosts in fmt_map.items() if hosts]
+            raw_host_map = fmt_map[fmts_present[0]] if fmts_present else {}
+            host_map = {h.split(".")[0]: urls for h, urls in raw_host_map.items()}
+        if not host_map and not keep:
+            return "", {}
+        parts: List[str] = []
+        if keep:
+            parts.append(f"[url={keep[0]}]Keeplinks[/url]")
+        for host in order:
+            urls = host_map.get(host)
+            if not urls:
+                continue
+            label = labels.get(host, host.capitalize())
+            links_str = " | ".join(f"[url={u}]{i+1}[/url]" for i, u in enumerate(urls))
+            parts.append(f"{label}: {links_str}")
+        return " ‖ ".join(parts), {}
+    # --------- نهاية حالة الملف الواحد ---------
 
     def _sorted_hosts(d: Dict[str, List[str]]) -> List[str]:
         present = list(d.keys())
@@ -360,32 +396,33 @@ def apply_links_template(template: str, links_dict: dict) -> str:
         template = template.replace("{LINK_KEEP}", "")
 
     # 3) باقي المضيفين
+    template_lines = template.splitlines()
     multi_blocks: List[str] = []
     for host in HOST_ORDER:
         token = HOST_TOKENS[host]
         label = HOST_LABELS[host]
         urls = jd.get(host, []) or []
 
-        if not urls:
-            template = template.replace("{LINK_%s}" % token, "")
-            continue
-
-        if len(urls) == 1:
-            # استبدل الـ placeholder لو موجود
-            placeholder = "{LINK_%s}" % token
-            if placeholder in template:
-                template = template.replace(placeholder, urls[0])
+        new_lines: List[str] = []
+        for line in template_lines:
+            if not urls:
+                line = _strip_host_placeholder(line, token)
+            elif len(urls) == 1:
+                line = line.replace("{LINK_%s}" % token, urls[0])
+                line = line.replace("[url={LINK_%s}]" % token, f"[url={urls[0]}]")
             else:
-                # لو التيمبلت بيستخدم [url={LINK_TOKEN}]..[/url] هتتم المعالجة تلقائيًا
-                template = template.replace("{LINK_%s}" % token, urls[0])
-                template = template.replace("[url={LINK_%s}]" % token, "[url=%s]" % urls[0])
-        else:
-            # شيل من السطر الرئيسي وأضِف بلوك مرقّم
-            template = _strip_host_placeholder(template, token)
+                line = _strip_host_placeholder(line, token)
+            line = _cleanup_separators(line)
+            new_lines.append(line)
+        template_lines = new_lines
+        if urls and len(urls) > 1:
             _append_multi_block(multi_blocks, label, urls)
+
+    template = "\n".join(template_lines)
 
     # 4) نظافة عامة + إضافة بلوكات متعددة بعد أول [/center] لو موجود
     template = re.sub(r"\{LINK_[A-Z_]+\}", "", template)  # أي placeholders متبقية
+    template = "\n".join(_cleanup_separators(l) for l in template.splitlines())
 
     lower_t = template.lower()
     if "[/center]" in lower_t and lower_t.strip().startswith("[center"):

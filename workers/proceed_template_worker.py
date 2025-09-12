@@ -30,6 +30,7 @@ class ProceedTemplateWorker(QThread):
             tm = get_template_manager()
             return tm.render_with_links(category, host_results, template_text=filled)
         except Exception:
+            logging.exception("Failed to merge links into BBCode")
             return filled
     def run(self):
         status = OperationStatus(

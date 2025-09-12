@@ -1,37 +1,50 @@
 import sys
 import types
 import pathlib
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
 # provide dummy requests module if missing
 if 'requests' not in sys.modules:
     req = types.ModuleType('requests')
     adapters = types.ModuleType('adapters')
+
     class HTTPAdapter:
         pass
+
     adapters.HTTPAdapter = HTTPAdapter
     req.adapters = adapters
     exc = types.ModuleType('exceptions')
+
     class SSLError(Exception):
         pass
+
     class ConnectionError(Exception):
         pass
+
     exc.SSLError = SSLError
     exc.ConnectionError = ConnectionError
     req.exceptions = exc
+
     class Session:
         def __init__(self):
             pass
+
     class Response:
         pass
+
     req.Session = Session
     req.Response = Response
     sys.modules['requests'] = req
     sys.modules['requests.adapters'] = req.adapters
     sys.modules['requests.exceptions'] = req.exceptions
+
 if 'bs4' not in sys.modules:
     bs4 = types.ModuleType('bs4')
+
     class BeautifulSoup:
         pass
+
     bs4.BeautifulSoup = BeautifulSoup
     sys.modules['bs4'] = bs4
 
@@ -55,3 +68,16 @@ def test_template_apply_links_block(tmp_path):
     tpl = tm.get_template("Games")
     final = tpl.replace("{CONTENT}", content).replace("{LINKS_BLOCK}", links_block)
     assert "Body" in final and "Links" in final
+
+
+def test_render_with_links_single_book(tmp_path):
+    tm = TemplateManager(tmp_path / "tpl.json")
+    template = "{LINKS}"
+    host_results = {
+        "ddownload": {"by_type": {"book": {"epub": ["https://ddl/book.epub"]}}},
+        "keeplinks": {"urls": ["https://keep/all"]},
+    }
+    output = tm.render_with_links("Books", host_results, template)
+    assert "DDownload" in output and "https://ddl/book.epub" in output
+    assert "Keeplinks" in output and "https://keep/all" in output
+

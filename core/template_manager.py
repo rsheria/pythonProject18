@@ -157,6 +157,54 @@ def render_with_links(
                 "[/center]"
             )
 
+            def _has_multiple_types(data: dict) -> bool:
+                types_found = set()
+                for bucket in (data or {}).values():
+                    if not isinstance(bucket, dict):
+                        continue
+                    by_type = bucket.get("by_type") or {}
+                    if by_type.get("book"):
+                        types_found.add("book")
+                    if by_type.get("audio"):
+                        types_found.add("audio")
+                    if len(types_found) > 1:
+                        return True
+                return False
+
+            if _has_multiple_types(host_results):
+                block_text, per_type = lt.build_type_format_host_blocks(
+                    host_results, host_order=host_order, host_labels=host_labels, force_build=True
+                )
+                host_results_copy = dict(host_results or {})
+                keeplinks_val = host_results_copy.pop("keeplinks", None)
+                keeplink_url = ""
+                if isinstance(keeplinks_val, dict):
+                    urls = keeplinks_val.get("urls") or keeplinks_val.get("url") or []
+                    keeplink_url = urls[0] if isinstance(urls, list) and urls else (
+                        urls if isinstance(urls, str) else ""
+                    )
+                elif isinstance(keeplinks_val, str):
+                    keeplink_url = keeplinks_val
+
+                parts = []
+                if keeplink_url:
+                    keep_line = f"[url={keeplink_url}]Keeplinks[/url]"
+                    parts.append(keep_line)
+                if per_type.get("audio"):
+                    parts.append(per_type["audio"])
+                if per_type.get("book"):
+                    parts.append(per_type["book"])
+                combined_block = "\n\n".join(p for p in parts if p).strip()
+
+                ph = next((ph for ph in generic_placeholders if ph in template_to_process), None)
+                if ph:
+                    template_to_process = template_to_process.replace(ph, combined_block, 1)
+                    return template_to_process
+
+                if template_to_process and not template_to_process.endswith("\n"):
+                    template_to_process += "\n"
+                return f"{template_to_process}\n{combined_block}".strip()
+
             for ph in generic_placeholders:
                 if ph in template_to_process:
                     template_to_process = template_to_process.replace(ph, default_links_sub_template, 1)
@@ -167,7 +215,28 @@ def render_with_links(
 
         else:
             logging.debug("No known placeholders found. Appending a default link block.")
-            block_text, _ = lt.build_type_format_host_blocks(host_results, force_build=True)
+            block_text, per_type = lt.build_type_format_host_blocks(host_results, force_build=True)
+            host_results_copy = dict(host_results or {})
+            keeplinks_val = host_results_copy.pop("keeplinks", None)
+            keeplink_url = ""
+            if isinstance(keeplinks_val, dict):
+                urls = keeplinks_val.get("urls") or keeplinks_val.get("url") or []
+                keeplink_url = urls[0] if isinstance(urls, list) and urls else (
+                    urls if isinstance(urls, str) else ""
+                )
+            elif isinstance(keeplinks_val, str):
+                keeplink_url = keeplinks_val
+
+            if block_text or per_type:
+                parts = []
+                if keeplink_url:
+                    parts.append(f"[url={keeplink_url}]Keeplinks[/url]")
+                if per_type.get("audio"):
+                    parts.append(per_type["audio"])
+                if per_type.get("book"):
+                    parts.append(per_type["book"])
+                block_text = "\n\n".join(p for p in parts if p).strip()
+
             if not block_text:
                 from utils.link_template import _normalize_links_dict, HOST_ORDER, HOST_LABELS
                 simple_parts = []
