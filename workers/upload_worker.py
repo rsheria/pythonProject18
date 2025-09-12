@@ -114,10 +114,18 @@ class UploadWorker(QThread):
     def _kind_from_name(self, name: str) -> str:
         """Classify filename into book/audio/other kinds."""
         ext = self._ext_from_name(name)
+        # 1. Direct book formats
         if ext in {"pdf", "epub", "mobi", "azw3", "cbz", "cbr"}:
             return "book"
+        # 2. Direct audio formats
         if ext in {"m4b", "mp3", "flac", "aac", "ogg", "m4a", "wav"}:
             return "audio"
+        # 3. Archives: use the package_label as a hint
+        if ext in {"rar", "zip", "7z"}:
+            # If the worker was created with the 'audio' label, assume archives are audio.
+            if self.package_label == "audio":
+                return "audio"
+        # 4. Fallback
         return "other"
 
     @pyqtSlot()

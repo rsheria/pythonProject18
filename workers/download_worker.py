@@ -9,6 +9,7 @@ from pathlib import Path
 from queue import Queue
 from threading import Lock
 from urllib.parse import urlparse
+
 # فوق مع الباقى
 try:
     from integrations import jd_client
@@ -29,6 +30,7 @@ from .upload_worker import UploadWorker
 from integrations.jd_client import hard_cancel
 from utils.sanitize import sanitize_filename
 
+
 def get_downloader_for(url: str, bot):
     """
     يُرجع الـ Downloader المناسب حسب المضيف:
@@ -40,7 +42,7 @@ def get_downloader_for(url: str, bot):
     """
     u = url.lower()
     is_folder_url = "/folder/" in u or "/archive/" in u
-    
+
     # Define supported hosts by JDownloader
     supported_hosts = [
         "rapidgator.net",
@@ -59,12 +61,12 @@ def get_downloader_for(url: str, bot):
         supported_hosts = list(dict.fromkeys(supported_hosts + bot.known_file_hosts))
     # Check if host is supported
     is_supported_host = any(host in u for host in supported_hosts)
-    
+
     if not is_supported_host:
         logging.warning(f"❌ Unsupported host detected: {url}")
         logging.info(f"💡 Supported hosts: {', '.join(supported_hosts)}")
         return None
-    
+
     # Always use a single shared JDownloader instance for ALL supported hosts
     jd_downloader = None
     if bot is not None:
@@ -80,7 +82,7 @@ def get_downloader_for(url: str, bot):
     if jd_available:
         # Identify host name for logging
         host_name = next((host for host in supported_hosts if host in u), "Unknown")
-        
+
         # Special logging for premium hosts
         if "rapidgator" in u:
             logging.info(f"📥 Using JDownloader for RAPIDGATOR: {url}")
@@ -95,11 +97,11 @@ def get_downloader_for(url: str, bot):
                     "filespayouts.com",
                     "uploady.io",
                 ]
-            ):
+        ):
             logging.info(f"🆕 Using JDownloader for NEW HOST ({host_name}): {url}")
         else:
             logging.info(f"📥 Using JDownloader for {host_name.upper()}: {url}")
-        
+
         return jd_downloader
     else:
         # JDownloader not available - no fallback
@@ -168,6 +170,7 @@ class DownloadWorker(QThread):
 
     def _is_cancelled(self):
         return self.is_cancelled or (self.cancel_event and self.cancel_event.is_set())
+
     def get_download_hosts_priority(self):
         """Get download hosts priority from user settings with fallback to defaults"""
         default_priority = [
@@ -205,7 +208,7 @@ class DownloadWorker(QThread):
             for h in extra_hosts:
                 if h not in priority:
                     priority.append(h)
-            
+
             logging.info(
                 f"📋 Using custom download hosts priority: {priority[:3]}{'...' if len(priority) > 3 else ''}"
             )
@@ -779,15 +782,9 @@ class DownloadWorker(QThread):
             return
         info = self.thread_info_map[thread_id]
         row = info["row"]
-        
-        # Check both downloaded_files (legacy) and new_files (JDownloader)
-        files = info.get("downloaded_files", []) or info.get("new_files", [])
-        
-        # Sync both for consistency
-        if files:
-            info["downloaded_files"] = files
-            info["new_files"] = files
-            
+
+        files = info.get("downloaded_files", [])
+
         if not files:
             self.status_update.emit(f"No files for '{info['thread_title']}', skipping.")
             return
@@ -816,40 +813,72 @@ class DownloadWorker(QThread):
             )
 
             if processed:
-                if isinstance(processed, tuple):
-                    root_dir, produced_files = processed
-                    produced_files = [str(p) for p in produced_files]
-                    main = produced_files[0] if produced_files else None
-                else:
-                    root_dir = td
-                    produced_files = processed
-                    main = max(produced_files, key=lambda p: os.path.getsize(p))
+                # <<< START OF FINAL SAFETY FIX FOR MEMORY CRASH >>>
+                root_dir_str = ""
+                final_produced_files = []
+
+                # Unpack results safely
+                if isinstance(processed, tuple) and len(processed) == 2:
+                    root_dir_str, produced_files_str_list = processed
+                    final_produced_files = [str(p) for p in produced_files_str_list if Path(p).exists()]
+                elif isinstance(processed, list):
+                    root_dir_str = str(td)
+                    final_produced_files = [str(p) for p in processed if Path(p).exists()]
+
+                if not final_produced_files:
+                    raise FileNotFoundError(f"Processing returned no valid files for '{info['thread_title']}'.")
+
+                # Find the largest existing file to determine the main file.
+                main_file_path = max(
+                    (Path(p) for p in final_produced_files),
+                    key=lambda p: p.stat().st_size
+                )
+                main_file_str = str(main_file_path)
+                # <<< END OF FINAL SAFETY FIX FOR MEMORY CRASH >>>
+
                 self.file_progress.emit(row, 100)
                 entry = self.gui.process_threads[info["category_name"]][
                     info["thread_title"]
                 ]
-                if main:
-                    entry.update({"file_name": os.path.basename(main), "file_path": str(main)})
+                if main_file_str:
+                    entry.update({"file_name": os.path.basename(main_file_str), "file_path": main_file_str})
+
                 self.gui.save_process_threads_data()
                 logging.info(
-                    "Processed main file for '%s': %s", info["thread_title"], main
+                    "Processed main file for '%s': %s", info["thread_title"], main_file_str
                 )
-                if isinstance(processed, tuple):
-                    logging.info("ROOT=%s, FILES=%d", root_dir, len(produced_files))
-                    try:
-                        hosts = getattr(self.gui, "active_upload_hosts", [])
-                        upload_worker = UploadWorker(
-                            self.bot,
-                            row,
-                            root_dir,
-                            thread_id,
-                            upload_hosts=hosts,
-                            files=produced_files,
-                        )
-                        self.gui.register_worker(upload_worker)
-                        upload_worker.start()
-                    except Exception as e:
-                        logging.error("Failed to enqueue upload: %s", e)
+
+                # This block handles the creation and start of the UploadWorker.
+                # It's a critical point for potential memory errors.
+                try:
+                    logging.info("Preparing to start UploadWorker...")
+                    hosts = getattr(self.gui, "active_upload_hosts", [])
+
+                    # Create the worker instance
+                    upload_worker = UploadWorker(
+                        self.bot,
+                        row,
+                        root_dir_str,
+                        thread_id,
+                        upload_hosts=hosts,
+                        files=final_produced_files,
+                    )
+
+                    # Registering the worker connects its signals to the GUI's orchestrator.
+                    # This must be done carefully.
+                    self.gui.register_worker(upload_worker)
+
+                    # Start the worker thread.
+                    upload_worker.start()
+                    logging.info(f"UploadWorker started for thread '{info['thread_title']}'.")
+
+                except Exception as e:
+                    logging.error(f"Failed to create or start UploadWorker for '{info['thread_title']}': {e}",
+                                  exc_info=True)
+                    # Even if upload fails to start, we should not crash.
+                    # We can emit an error signal.
+                    self.download_error.emit(row, f"Failed to start upload: {e}")
+
                 proc_status.stage = OpStage.FINISHED
                 proc_status.message = "Processing complete"
                 proc_status.progress = 100
@@ -866,9 +895,9 @@ class DownloadWorker(QThread):
             logging.error(err, exc_info=True)
             self.status_update.emit(err)
             proc_status.stage = OpStage.ERROR
-            proc_status.message = err
+            proc_status.message = str(e)
             self.progress_update.emit(proc_status)
-            self.download_error.emit(row, err)
+            self.download_error.emit(row, str(e))
 
     def _enqueue_links(self, links, job) -> bool:
         """Send links to JDownloader with a sanitized download path.

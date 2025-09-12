@@ -65,97 +65,130 @@ class TemplateManager:
     def all_templates(self) -> Dict[str, str]:
         return dict(self.templates)
 
-    def render_with_links(
+
+# ضعه في core/template_manager.py بدلاً من الدالة render_with_links الحالية
+
+# ضعه في core/template_manager.py بدلاً من الدالة render_with_links الحالية
+
+def render_with_links(
         self,
         category: str,
         host_results: dict,
         template_text: Optional[str] = None,
         host_labels: dict | None = None,
         host_order: list[str] | None = None,
-    ) -> str:
-        """
-        Build final BBCode by injecting link blocks grouped by type/format/host into the template for *category*.
+) -> str:
+    """
+    Builds the final BBCode. This version correctly uses the appropriate link building
+    strategy based on the placeholders found in the user-defined template. It ensures
+    that templates with generic {LINKS} placeholders are correctly processed using
+    the legacy templating engine.
+    """
+    base = template_text if template_text is not None else (self.get_template(category) or "")
+    try:
+        from utils import link_template as lt
+        import logging
 
-        The ``host_results`` structure should mirror the data stored by the upload pipeline, typically a nested
-        mapping of host → {all, by_type}. If ``template_text`` is not provided, the method will load the
-        template for ``category`` using ``get_template``.
+        # Clean the base template from any PREVIOUSLY generated link blocks to avoid duplication
+        # This does NOT remove placeholders like {LINKS}
+        cleaned_template = lt.strip_legacy_link_blocks(base)
 
-        The method performs the following steps:
+        # --- Strategy Detection ---
 
-        1. Load the base template and remove any legacy link placeholders or panels.
-        2. Use ``utils.link_template`` helpers to build a hierarchical link block respecting host order and labels.
-        3. Replace the first occurrence of ``{LINKS}``/``{links}``/``[LINKS]``/``[links]`` in the cleaned template with
-           the generated block. If none of these placeholders are found, append the block at the end.
+        # Strategy A: New hierarchical placeholders (for future use cases)
+        new_placeholders = ["{AUDIOBOOK_LINKS_BLOCK}", "{EBOOK_LINKS_BLOCK}", "{MUSIC_LINKS_BLOCK}"]
+        use_hierarchical_builder = any(ph in cleaned_template for ph in new_placeholders)
 
-        In case of any error, the original template is returned unchanged.
-        """
-        base = template_text if template_text is not None else (self.get_template(category) or "")
-        try:
-            from utils import link_template as lt  # type: ignore
-            cleaned = lt.strip_legacy_link_blocks(base)
+        # Strategy B: Legacy placeholders OR the generic {LINKS} placeholder
+        legacy_placeholders = ["{LINK_RG}", "{LINK_DDL}", "{LINK_KF}", "{LINK_NF}", "{LINK_MEGA}", "{LINK_KEEP}",
+                               "{PART}"]
+        generic_placeholders = ["{LINKS}", "[LINKS]", "{links}", "[links]", "{LINKS_BLOCK}"]
+        use_legacy_builder = any(ph in cleaned_template for ph in legacy_placeholders) or any(
+            ph in cleaned_template for ph in generic_placeholders)
 
-            # Extract Keeplinks (container link) if provided and remove from host_results
-            keeplink = ""
-            hr = dict(host_results or {})
-            kl = hr.pop("keeplinks", None)
-            if isinstance(kl, dict):
-                urls = kl.get("urls") or kl.get("url") or []
-                if isinstance(urls, str):
-                    keeplink = urls
-                elif urls:
-                    keeplink = urls[0]
-            elif isinstance(kl, str):
-                keeplink = kl
+        # --- Execution ---
 
+        if use_hierarchical_builder:
+            logging.debug("Using hierarchical link builder strategy.")
             block_text, per_type = lt.build_type_format_host_blocks(
-                hr,
-                host_order=host_order,
-                host_labels=host_labels,
+                host_results, host_order=host_order, host_labels=host_labels, force_build=True  # <-- Force build
             )
+            # (The rest of the logic for this case is fine)
+            host_results_copy = dict(host_results or {})
+            keeplinks_val = host_results_copy.pop("keeplinks", None)
+            keeplink_url = ""
+            if isinstance(keeplinks_val, dict):
+                urls = keeplinks_val.get("urls") or keeplinks_val.get("url") or []
+                keeplink_url = urls[0] if isinstance(urls, list) and urls else (urls if isinstance(urls, str) else "")
+            elif isinstance(keeplinks_val, str):
+                keeplink_url = keeplinks_val
 
-            # Prepend Keeplinks block if available
-            if keeplink:
-                keep_line = f"[url={keeplink}]Keeplinks[/url]"
+            if keeplink_url:
+                keep_line = f"[url={keeplink_url}]Keeplinks[/url]"
                 block_text = keep_line + ("\n\n" + block_text if block_text else "")
                 per_type = {k: (keep_line + ("\n\n" + v if v else "")) for k, v in per_type.items()}
 
-            if not block_text:
-                return cleaned
-
-            # Replace single numbered links with host label text when the line has only one URL
-            import re
-            labels = getattr(lt, "HOST_LABELS", {})
-            for label in labels.values():
-                pat = rf"{label}: \[url=([^\]]+)\]1\[/url\](?!\s*\|)"
-                repl = lambda m, lbl=label: f"{label}: [url={m.group(1)}]{lbl}[/url]"
-                block_text = re.sub(pat, repl, block_text)
-                for t in per_type:
-                    per_type[t] = re.sub(pat, repl, per_type[t])
+            if not block_text: return cleaned_template
 
             injector = getattr(lt, "inject_links_blocks", None)
-            if callable(injector):
-                return injector(cleaned, block_text, per_type)
-            # Fallback manual injection
-            placeholders = [
+            if callable(injector): return injector(cleaned_template, block_text, per_type)
+
+            for ph, blk in [
                 ("{AUDIOBOOK_LINKS_BLOCK}", per_type.get("audio")),
                 ("{EBOOK_LINKS_BLOCK}", per_type.get("book")),
                 ("{LINKS}", block_text),
-                ("{links}", block_text),
-                ("[LINKS]", block_text),
-                ("[links]", block_text),
-            ]
-            replaced = False
-            for ph, blk in placeholders:
-                if blk and ph in cleaned:
-                    cleaned = cleaned.replace(ph, blk)
-                    replaced = True
-            if not replaced:
-                if cleaned and not cleaned.endswith("\n"):
-                    cleaned += "\n"
-                cleaned = f"{cleaned}\n{block_text}" if block_text else cleaned
-            return cleaned
-        except Exception:
-            return base
+            ]:
+                if blk and ph in cleaned_template:
+                    cleaned_template = cleaned_template.replace(ph, blk, 1)
+            return cleaned_template
+
+        elif use_legacy_builder:
+            logging.debug("Using legacy/generic link builder strategy.")
+            template_to_process = cleaned_template
+
+            # Default sub-template for the {LINKS} placeholder
+            default_links_sub_template = (
+                "[center][size=3][b]DOWNLOAD LINKS[/b][/size]\n\n"
+                "[url={LINK_KEEP}]Keeplinks[/url] ‖ "
+                "[url={LINK_DDL}]DDownload[/url] ‖ "
+                "[url={LINK_RG}]Rapidgator[/url] ‖ "
+                "[url={LINK_KF}]Katfile[/url] ‖ "
+                "[url={LINK_NF}]Nitroflare[/url]\n"
+                "[/center]"
+            )
+
+            for ph in generic_placeholders:
+                if ph in template_to_process:
+                    template_to_process = template_to_process.replace(ph, default_links_sub_template, 1)
+                    logging.debug(f"Replaced generic placeholder '{ph}' with default sub-template.")
+                    break
+
+            return lt.apply_links_template(template_to_process, host_results or {})
+
+        else:
+            logging.debug("No known placeholders found. Appending a default link block.")
+            block_text, _ = lt.build_type_format_host_blocks(host_results, force_build=True)
+            if not block_text:
+                from utils.link_template import _normalize_links_dict, HOST_ORDER, HOST_LABELS
+                simple_parts = []
+                direct_map = _normalize_links_dict(host_results)
+                for host in HOST_ORDER:
+                    if host in direct_map and direct_map[host]:
+                        urls = direct_map[host]
+                        label = HOST_LABELS.get(host, host.capitalize())
+                        links_str = " | ".join(f"[url={u}]{i + 1}[/url]" for i, u in enumerate(urls))
+                        simple_parts.append(f"{label}: {links_str}")
+                block_text = "\n".join(simple_parts)
+
+            if cleaned_template and not cleaned_template.endswith("\n"):
+                cleaned_template += "\n"
+            return f"{cleaned_template}\n{block_text}".strip()
+
+    except Exception as e:
+        logging.error("Failed to render links, returning base template. Error: %s", e, exc_info=True)
+        return base
+
+
 
 
 # Global instance used across the application

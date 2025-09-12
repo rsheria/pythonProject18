@@ -9,17 +9,18 @@ import time
 import random
 from pathlib import Path
 from typing import List, Optional, Set
-from config.config import DATA_DIR    # ← استيراد DATA_DIR
+from config.config import DATA_DIR  # ← استيراد DATA_DIR
 
 
 class FileProcessor:
     def __init__(
-        self,
-        download_dir: str,
-        winrar_path: str,
-        comp_level: int = 0,
-        split_bytes: int = 1024 * 1024 * 1024,
-        recompress_mode: str = "always",
+            self,
+            download_dir: str,
+            winrar_path: str,
+            comp_level: int = 0,
+            split_bytes: int = 1024 * 1024 * 1024,
+            recompress_mode: str = "always",
+            keep_original_archives: bool = True,  # خيار جديد
     ):
         """Initialize FileProcessor with paths and runtime options."""
         # تأكد من وجود DATA_DIR
@@ -31,6 +32,7 @@ class FileProcessor:
         self.comp_level = int(comp_level)
         self.split_bytes = int(split_bytes)
         self.recompress_mode = recompress_mode
+        self.keep_original_archives = keep_original_archives  # حفظ الخيار
 
         # Get the actual project path
         self.project_path = Path(__file__).parent
@@ -51,11 +53,19 @@ class FileProcessor:
         self.GIGABYTE = 1024 * 1024 * 1024
         self.ARCHIVE_EXTENSIONS = {'.rar', '.zip', '.7z'}
 
+        # إضافة ثوابت لأعلام subprocess على Windows
+        if os.name == 'nt':
+            self.CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
+            self.SW_HIDE = subprocess.SW_HIDE
+        else:
+            self.CREATE_NO_WINDOW = 0
+            self.SW_HIDE = 0
+
     def update_settings(
-        self,
-        comp_level: Optional[int] = None,
-        split_bytes: Optional[int] = None,
-        recompress_mode: Optional[str] = None,
+            self,
+            comp_level: Optional[int] = None,
+            split_bytes: Optional[int] = None,
+            recompress_mode: Optional[str] = None,
     ) -> None:
         """Update runtime options."""
         if comp_level is not None:
@@ -124,7 +134,6 @@ class FileProcessor:
         tuple(Path, list[Path])
             The root directory and list of files directly under it.
         """
-
         src_archive = Path(src_archive)
         work_dir = Path(work_dir)
 
@@ -158,12 +167,11 @@ class FileProcessor:
             shutil.move(str(file_path), dest)
 
         # Remove temporary extraction directory and other subfolders under work_dir
-        if src_archive.exists():
-            self._safely_remove_file(src_archive)
+        # ملاحظة: لن نحذف الأرشيف الأصلي هنا
         if temp_dir.exists():
             self._safely_remove_directory(temp_dir)
         for item in work_dir.iterdir():
-            if item.is_dir() and item != root_dir:
+            if item.is_dir() and item != root_dir and item != src_archive.parent:
                 self._safely_remove_directory(item)
 
         files = sorted([p for p in root_dir.glob("*") if p.is_file()])
@@ -183,7 +191,7 @@ class FileProcessor:
         """
         Quick, no-extract check to see if an archive contains readable book files.
         - ZIP: uses Python's zipfile
-        - RAR: uses the configured RAR tool (WinRAR/UnRAR) to list contents without extracting
+        - RAR: uses the configured RAR tool to list contents without extraction
         Returns True if any readable book extension is found.
         Silently returns False on errors (no popups).
         """
@@ -195,7 +203,7 @@ class FileProcessor:
             if ext == ".zip":
                 try:
                     import zipfile
-                    with zipfile.ZipFile(archive_path) as zf:
+                    with zipfile.ZipFile(archive_path, 'r') as zf:
                         for name in zf.namelist():
                             n = (name or "").lower()
                             if any(n.endswith(e) for e in exts):
@@ -204,60 +212,72 @@ class FileProcessor:
                 except Exception:
                     return False
 
-            # RAR: list the archive contents for .rar files
+            # <<< START OF FINAL FIX: Robust RAR listing >>>
             if ext == ".rar":
                 try:
-                    import subprocess
-                    exe_path = str(self.winrar_path)
-                    exe_name = exe_path.lower()
+                    # Prefer Rar.exe (console version) if it exists, as it's less likely to create popups.
+                    winrar_dir = self.winrar_path.parent
+                    rar_exe_path = winrar_dir / "Rar.exe"
+                    executable = rar_exe_path if rar_exe_path.exists() else self.winrar_path
 
-                    def run_list(list_cmd: str) -> subprocess.CompletedProcess:
-                        cmd = [
-                            exe_path,
-                            list_cmd,
-                            "-c-",  # no comments
-                            "-p-",  # do not prompt for password
-                            "-y",   # assume Yes on prompts
-                        ]
-                        # Try to append -ibck if supported
-                        try:
-                            cmd.append("-ibck")
-                        except Exception:
-                            pass
-                        cmd.append(str(archive_path))
-                        return subprocess.run(
-                            cmd,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            text=True,
-                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                        )
+                    # Use 'vt' (technical list) for machine-readable output.
+                    # This is much more reliable than parsing 'l' output.
+                    cmd = [
+                        str(executable),
+                        'vt',  # List contents with technical details (very reliable)
+                        '-p-',  # No password prompt
+                        '-y',  # Yes to all
+                        str(archive_path)
+                    ]
 
-                    # WinRAR.exe does not support 'lb'; only use 'l'. For other rar/unrar use 'lb' first.
-                    if "winrar" in exe_name:
-                        res = run_list("l")
-                    else:
-                        res = run_list("lb")
-                        # fallback to 'l' if 'lb' fails or unknown
-                        if res.returncode not in (0, 1) or (res.stderr and "unknown" in res.stderr.lower()):
-                            res = run_list("l")
+                    logging.debug(f"Running WinRAR list command: {' '.join(map(str, cmd))}")
 
-                    if res.returncode not in (0, 1):
+                    result = subprocess.run(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        encoding='utf-8',
+                        errors='replace',
+                        creationflags=self.CREATE_NO_WINDOW,
+                        timeout=20
+                    )
+
+                    # On success, stderr is often empty, stdout contains the list.
+                    # On failure, stderr might contain useful info.
+                    if result.returncode != 0:
+                        logging.error(
+                            f"WinRAR list command failed with code {result.returncode} for {archive_path.name}")
+                        if result.stderr: logging.error(f"Stderr: {result.stderr.strip()}")
+                        if result.stdout: logging.error(f"Stdout: {result.stdout.strip()}")
                         return False
 
-                    for line in (res.stdout or "").splitlines():
-                        n = line.strip().lower()
-                        if any(n.endswith(e) for e in exts):
-                            return True
+                    # The output of 'vt' contains lines like "Name: path/to/file.pdf"
+                    for line in (result.stdout or "").splitlines():
+                        line_lower = line.lower()
+                        if line_lower.strip().startswith("name:"):
+                            # Check if the filename part contains any book extension.
+                            if any(book_ext in line_lower for book_ext in exts):
+                                logging.info(
+                                    f"Book entry found in '{archive_path.name}'. Enabling books mode. Line: '{line.strip()}'")
+                                return True
+
+                    logging.info(f"No book entries found in '{archive_path.name}'.")
                     return False
-                except Exception:
+
+                except subprocess.TimeoutExpired:
+                    logging.warning(f"Timeout listing archive contents: {archive_path}")
                     return False
+                except Exception as e:
+                    logging.debug(f"Error checking archive contents for {archive_path}: {e}", exc_info=True)
+                    return False
+            # <<< END OF FINAL FIX >>>
 
             # Other archive types: not handled here
             return False
+
         except Exception:
             return False
-
 
     def _is_readable_book_ext(self, p: Path) -> bool:
         """Return True if *p* has an ebook-readable extension.
@@ -395,7 +415,7 @@ class FileProcessor:
 
                     if self._is_archive_file(f):
                         # عالج الأرشيف؛ لو احتوى كتباً سيتم ضغط الصوتيات داخلياً
-                        self.handle_archive_file(f, thread_dir, thread_id, password)
+                        self.handle_archive_file(f, thread_dir, cleaned_thread_title, password)
                     else:
                         # ملف عادي: انقله كما هو
                         root_dir.mkdir(parents=True, exist_ok=True)
@@ -558,10 +578,10 @@ class FileProcessor:
         return "unknown"
 
     def build_upload_manifest(
-        self,
-        root_dir: str | Path,
-        produced_files: list[str] | list[Path],
-        category_hint: str | None = None,
+            self,
+            root_dir: str | Path,
+            produced_files: list[str] | list[Path],
+            category_hint: str | None = None,
     ) -> list[dict]:
         """
         يبني مانيفست للرفع من ناتج المعالجة بدون تغيير أي signatures خارجية.
@@ -604,7 +624,6 @@ class FileProcessor:
             return []
 
         return out
-
 
     def _sanitize_and_shorten_title(self, text: str, max_length: int = 60) -> str:
         """
@@ -657,11 +676,11 @@ class FileProcessor:
         return False
 
     def _process_as_single_item(
-        self,
-        moved_files: List[Path],
-        thread_dir: Path,
-        thread_title: str,
-        password: str | None = None,
+            self,
+            moved_files: List[Path],
+            thread_dir: Path,
+            thread_title: str,
+            password: str | None = None,
     ) -> List[str]:
         """
         Single item scenario: either 1 file or a multi-part .rar.
@@ -722,11 +741,11 @@ class FileProcessor:
         return final_files
 
     def handle_archive_file(
-        self,
-        archive_path: Path,
-        download_folder: Path,
-        thread_title: str,
-        password: str | None = None,
+            self,
+            archive_path: Path,
+            download_folder: Path,
+            thread_title: str,
+            password: str | None = None,
     ) -> List[str] | tuple[Path, List[Path]]:
         """Handle archive processing with format preservation and splitting.
 
@@ -777,7 +796,7 @@ class FileProcessor:
                 original_name = base_name
             else:
                 original_name = archive_path.stem
-            
+
             extract_dir_name = f"{original_name}_extracted"
             extract_dir = download_folder / extract_dir_name
             if extract_dir.exists():
@@ -869,7 +888,6 @@ class FileProcessor:
                 self._safely_remove_directory(extract_dir)
                 return [str(p) for p in final_files]
 
-
             # Re-archive everything => final name based on thread_title
             unique_id = uuid.uuid4().hex
             temp_suffix = f"_temp_{unique_id}"
@@ -932,10 +950,10 @@ class FileProcessor:
             return []
 
     def handle_other_file(
-        self,
-        file_path: Path,
-        target_dir: Path,
-        thread_title: str
+            self,
+            file_path: Path,
+            target_dir: Path,
+            thread_title: str
     ) -> Optional[str]:
         """
         For a single file scenario, re-archive a non-archive file
@@ -1008,44 +1026,44 @@ class FileProcessor:
         """
         if not extract_dir.exists():
             return
-            
+
         try:
             # Get all files in subdirectories (not in root)
             files_to_move = []
             for item in extract_dir.rglob('*'):
                 if item.is_file() and item.parent != extract_dir:
                     files_to_move.append(item)
-            
+
             if not files_to_move:
                 logging.debug(f"No nested files found in {extract_dir.name}")
                 return
-                
+
             moved_count = 0
             for file_path in files_to_move:
                 try:
                     # Create unique name if file already exists in root
                     target_name = file_path.name
                     target_path = extract_dir / target_name
-                    
+
                     counter = 1
                     while target_path.exists():
                         name_parts = file_path.stem, counter, file_path.suffix
                         target_name = f"{name_parts[0]}_{name_parts[1]}{name_parts[2]}"
                         target_path = extract_dir / target_name
                         counter += 1
-                    
+
                     # Move file to root level
                     shutil.move(str(file_path), str(target_path))
                     moved_count += 1
                     logging.debug(f"📦 Moved: {file_path.name} → {target_name}")
-                    
+
                 except Exception as e:
                     logging.warning(f"Failed to move file {file_path}: {e}")
-                    
+
             # Remove empty subdirectories
             subdirs = [d for d in extract_dir.rglob('*') if d.is_dir()]
             subdirs.sort(key=lambda x: len(x.parts), reverse=True)  # Deepest first
-            
+
             removed_dirs = 0
             for subdir in subdirs:
                 try:
@@ -1055,45 +1073,58 @@ class FileProcessor:
                         logging.debug(f"📋 Removed empty dir: {subdir.name}")
                 except OSError:
                     pass  # Directory not empty or permission issues
-            
+
             if moved_count > 0 or removed_dirs > 0:
                 logging.info(
                     f"🎉 Flattened {extract_dir.name}: moved {moved_count} files, "
                     f"removed {removed_dirs} empty directories"
                 )
-                
+
         except Exception as e:
             logging.error(f"Error flattening directory {extract_dir}: {e}")
 
     def _extract_archive(
-                self, archive_path: Path, extract_dir: Path, password: str | None = None
-        ) -> bool:
+            self, archive_path: Path, extract_dir: Path, password: str | None = None
+    ) -> bool:
         """Extract archive using WinRAR with enhanced error handling."""
         try:
+            # استخدام أوامر صحيحة وصامتة
             cmd = [
                 str(self.winrar_path),
-                'x',
-                '-y',
-                '-o+',
+                'x',  # Extract with full paths
+                '-y',  # Yes to all prompts
+                '-o+',  # Overwrite existing files
+                '-ibck',  # Run in background (no GUI)
+                '-inul',  # Disable all messages
             ]
             if password:
                 cmd.append(f'-p{password}')
+            else:
+                cmd.append('-p-')  # No password prompt
+
             cmd.extend([
                 str(archive_path),
-                str(extract_dir),
+                str(extract_dir) + '\\',  # Ensure destination path format
             ])
 
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
+                creationflags=subprocess.CREATE_NO_WINDOW | subprocess.SW_HIDE
             )
-            if result.returncode not in [0, 1]:
+
+            # WinRAR exit codes: 0=success, 1=warning (can be ignored), others=error
+            if result.returncode in [0, 1]:
+                return True
+            else:
                 logging.error(f"WinRAR extraction failed with code {result.returncode}")
-                logging.error(f"WinRAR Output: {result.stdout}")
-                logging.error(f"WinRAR Errors: {result.stderr}")
-            return (result.returncode in [0, 1])
+                if result.stdout:
+                    logging.error(f"WinRAR Output: {result.stdout}")
+                if result.stderr:
+                    logging.error(f"WinRAR Errors: {result.stderr}")
+                return False
+
         except Exception as e:
             logging.error(f"Extraction error: {str(e)}")
             return False
@@ -1101,22 +1132,24 @@ class FileProcessor:
     def _create_rar_archive(self, source_dir: Path, output_base: Path, root_name: str) -> bool:
         """Create a RAR archive using current settings and clean root folder."""
         try:
-            folder_prefix = root_name
+            # The 'root_name' parameter is now used as the folder prefix inside the archive.
+            # However, for the audio files, we want them at the root.
+            # We will handle this by removing the -ap switch.
 
             cmd = [str(self.winrar_path), 'a']
             if self.split_bytes > 0:
                 cmd.append(f'-v{self.split_bytes // (1024 * 1024)}m')
             cmd.extend([
                 f'-m{self.comp_level}',
-                '-ep1',
+                '-ep1',  # This is the key: Exclude base path from files.
                 '-r',
                 '-y',
                 '-rr3p',
                 '-ma5',
                 '-x*.ini',
-                f'-ap"{folder_prefix}"',  # <- فولدر داخلي في الأرشيف
+                # The '-ap' switch was creating the unwanted internal folder. It has been removed.
                 str(output_base) + '.rar',
-                str(source_dir / "*")  # Include contents, not directory itself
+                str(source_dir / "*")  # This ensures we compress the CONTENTS of source_dir
             ])
             result = subprocess.run(
                 cmd,
@@ -1155,21 +1188,19 @@ class FileProcessor:
                 logging.error("No files to archive after filtering for ZIP.")
                 return False
 
-            folder_prefix = root_name
-
             cmd = [str(self.winrar_path), 'a']
             if self.split_bytes > 0:
                 cmd.append(f'-v{self.split_bytes // (1024 * 1024)}m')
             cmd.extend([
                 f'-m{self.comp_level}',
-                '-ep1',
+                '-ep1', # Exclude base path from files.
                 '-r',
                 '-y',
                 '-afzip',
                 '-x*.ini',
-                f'-ap"{folder_prefix}"',
+                # The '-ap' switch was creating the unwanted internal folder. It has been removed.
                 str(output_base) + '.zip',
-                str(source_dir / "*"),
+                str(source_dir / "*"), # Compress the CONTENTS of source_dir
             ])
 
             result = subprocess.run(
@@ -1625,22 +1656,22 @@ class FileProcessor:
         """
         if not thread_dir.exists() or not processed_files:
             return
-            
+
         try:
             # Convert processed files to Path objects for comparison
             processed_paths = {Path(f).resolve() for f in processed_files}
             logging.info(f"🧹 Starting final cleanup - keeping {len(processed_paths)} processed files")
-            
-            # Get all items in thread directory  
+
+            # Get all items in thread directory
             all_items = list(thread_dir.rglob('*'))
-            
+
             files_to_remove = []
             dirs_to_remove = []
-            
+
             for item in all_items:
                 try:
                     item_resolved = item.resolve()
-                    
+
                     if item.is_file():
                         # Keep only processed files
                         if item_resolved not in processed_paths:
@@ -1648,22 +1679,22 @@ class FileProcessor:
                     elif item.is_dir():
                         # Mark directories for cleanup (will be removed if empty)
                         dirs_to_remove.append(item)
-                        
+
                 except Exception as e:
                     logging.warning(f"Error resolving path {item}: {e}")
                     continue
-            
+
             # Remove unwanted files
             removed_files = 0
             for file_path in files_to_remove:
                 if self._safely_remove_file(file_path):
                     removed_files += 1
                     logging.debug(f"📋 Removed file: {file_path.name}")
-            
+
             # Remove empty directories (sort by depth, deepest first)
             dirs_to_remove.sort(key=lambda x: len(x.parts), reverse=True)
             removed_dirs = 0
-            
+
             for dir_path in dirs_to_remove:
                 try:
                     if dir_path.exists() and not any(dir_path.iterdir()):
@@ -1673,21 +1704,21 @@ class FileProcessor:
                 except OSError:
                     # Directory might not be empty or have permission issues
                     pass
-            
+
             # Final verification - count remaining files
             remaining_files = [f for f in thread_dir.rglob('*') if f.is_file()]
             remaining_dirs = [d for d in thread_dir.rglob('*') if d.is_dir()]
-            
+
             logging.info(
                 f"🎉 Cleanup complete! Removed: {removed_files} files, {removed_dirs} directories. "
                 f"Remaining: {len(remaining_files)} files, {len(remaining_dirs)} directories"
             )
-            
+
             # Log final directory structure for verification
             if remaining_files:
                 file_names = [f.name for f in remaining_files]
                 logging.info(f"📁 Final files in {thread_dir.name}: {', '.join(file_names)}")
-                
+
         except Exception as e:
             logging.error(f"Error during final cleanup: {str(e)}", exc_info=True)
 

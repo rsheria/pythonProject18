@@ -223,31 +223,32 @@ def strip_legacy_link_blocks(template_text: str) -> str:
     )
     return txt
 
-
 def build_type_format_host_blocks(
     host_results: Dict,
     host_order: List[str] = None,
     host_labels: Dict[str, str] = None,
+    # معامل جديد للتحكم في السلوك
+    force_build: bool = False
 ) -> Tuple[str, Dict[str, str]]:
     """
     يبنى بلوكات BBCode مفصّلة حسب النوع ثم الصيغة ثم المضيف.
-    يعيد:
-      full_block_text, {"book": "...", "audio": "..."}  # بلوكات النوع منفصلة أيضاً
-    - يحترم ترتيب المضيفين (host_order) لو متوفر، وإلا يستخدم ترتيب الظهور.
-    - يستخدم host_labels لأسماء العرض.
-    - لا يضيف عناوين فارغة لو مفيش بيانات.
+    الآن، لن يتم تفعيل هذا المنطق الهرمي إلا إذا كانت force_build=True.
     """
-    from .link_template import HOST_ORDER as DEFAULT_HOST_ORDER, HOST_LABELS as DEFAULT_HOST_LABELS  # type: ignore
+    from .link_template import HOST_ORDER as DEFAULT_HOST_ORDER, HOST_LABELS as DEFAULT_HOST_LABELS
 
     inv = _invert_host_results_by_type_format(host_results)
-    if not inv:
+
+    # <<< بداية الإصلاح: تحقق من وجود بيانات كتاب/صوتي + force_build >>>
+    # إذا لم تكن هناك بيانات مصنفة ككتب أو صوتيات، أو لم يتم فرض البناء، أرجع ناتجًا فارغًا.
+    # هذا يمنع الدالة من الاستيلاء على عملية بناء الروابط للمواضيع العادية.
+    if not inv or not force_build:
         return "", {}
+    # <<< نهاية الإصلاح >>>
 
     order = list(host_order) if (host_order and isinstance(host_order, list)) else list(DEFAULT_HOST_ORDER)
     labels = dict(host_labels) if (host_labels and isinstance(host_labels, dict)) else dict(DEFAULT_HOST_LABELS)
 
     def _sorted_hosts(d: Dict[str, List[str]]) -> List[str]:
-        # رتب حسب order ثم أى مضيفين آخرين بالترتيب الطبيعى
         present = list(d.keys())
         in_order = [h for h in order if h in present]
         rest = [h for h in present if h not in in_order]
@@ -256,7 +257,6 @@ def build_type_format_host_blocks(
     parts: List[str] = []
     parts_by_type: Dict[str, List[str]] = {"book": [], "audio": []}
 
-    # خريطة عناوين للنوع
     type_headers = {
         "book": "[b]Links – eBooks[/b]",
         "audio": "[b]Links – Audiobooks[/b]",
@@ -267,38 +267,31 @@ def build_type_format_host_blocks(
         if not tmap:
             continue
         t_parts: List[str] = [type_headers.get(t, f"[b]Links – {t}[/b]")]
-        # لكل صيغة
         for fmt in sorted(tmap.keys()):
             hmap = tmap.get(fmt) or {}
             if not hmap:
                 continue
             t_parts.append(f"[u]{fmt}[/u]")
-            # رتب المضيفين
             for host in _sorted_hosts(hmap):
                 urls = [u for u in (hmap.get(host) or []) if u]
                 if not urls:
                     continue
                 host_display = labels.get(host.split(".")[0], labels.get(host, host))
-                # سطر لكل مضيف
                 t_parts.append(f"{host_display}: " + " | ".join(f"[url={u}]{i+1}[/url]" for i, u in enumerate(urls)))
-            # فاصل صغير بين الصيغ
             if t_parts and not t_parts[-1].endswith("\n"):
                 t_parts.append("")
 
-        # لا تضف بلوك النوع لو مفيش بيانات داخله
         block_text = "\n".join([x for x in t_parts if x is not None]).strip()
         if block_text:
             parts_by_type[t].append(block_text)
             parts.append(block_text)
 
-    # جمع النهائى
     full_text = "\n\n".join([p for p in parts if p]).strip()
     per_type_text = {
         k: ("\n\n".join(v).strip() if v else "")
         for k, v in parts_by_type.items()
     }
     return full_text, per_type_text
-
 
 def _strip_host_placeholder(line: str, token: str) -> str:
     """
