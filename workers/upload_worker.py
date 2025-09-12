@@ -308,11 +308,17 @@ class UploadWorker(QThread):
             if u is None:
                 return "failed"
             urls.append(u)
+            upload_host = self.hosts[host_idx]
             host = self._host_from_url(u)
+            # Preserve explicit backup host instead of the generic rapidgator.net
+            if upload_host == "rapidgator-backup":
+                host = "rapidgator-backup"
             if host:
                 kind = self._kind_from_name(f.name)
                 ext = self._ext_from_name(f.name)
                 bucket = self._host_results.setdefault(host, {"by_type": {}})
+                if upload_host == "rapidgator-backup":
+                    bucket["is_backup"] = True
                 by_type = bucket.setdefault("by_type", {})
                 type_bucket = by_type.setdefault(kind, {})
                 if ext:

@@ -1,7 +1,7 @@
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 from config.config import DATA_DIR
 from core.user_manager import UserManager, get_user_manager
@@ -64,6 +64,25 @@ class TemplateManager:
 
     def all_templates(self) -> Dict[str, str]:
         return dict(self.templates)
+
+    # Convenience wrapper to expose the standalone render_with_links as an
+    # instance method for tests and callers expecting it.
+    def render_with_links(
+        self,
+        category: str,
+        host_results: dict,
+        template_text: Optional[str] = None,
+        host_labels: dict | None = None,
+        host_order: list[str] | None = None,
+    ) -> str:
+        return render_with_links(
+            self,
+            category,
+            host_results,
+            template_text=template_text,
+            host_labels=host_labels,
+            host_order=host_order,
+        )
 
 
 # ضعه في core/template_manager.py بدلاً من الدالة render_with_links الحالية
@@ -199,11 +218,20 @@ def render_with_links(
                 ph = next((ph for ph in generic_placeholders if ph in template_to_process), None)
                 if ph:
                     template_to_process = template_to_process.replace(ph, combined_block, 1)
-                    return template_to_process
+                else:
+                    if template_to_process and not template_to_process.endswith("\n"):
+                        template_to_process += "\n"
+                    template_to_process = f"{template_to_process}\n{combined_block}".strip()
 
-                if template_to_process and not template_to_process.endswith("\n"):
-                    template_to_process += "\n"
-                return f"{template_to_process}\n{combined_block}".strip()
+                # Remove any legacy host placeholders like {LINK_RG} that
+                # cannot be satisfied in multi-type mode
+                for token in lt.HOST_TOKENS.values():
+                    template_to_process = "\n".join(
+                        lt._strip_host_placeholder(line, token)
+                        for line in template_to_process.splitlines()
+                    )
+                template_to_process = lt._cleanup_separators(template_to_process)
+                return template_to_process
 
             for ph in generic_placeholders:
                 if ph in template_to_process:
@@ -211,7 +239,19 @@ def render_with_links(
                     logging.debug(f"Replaced generic placeholder '{ph}' with default sub-template.")
                     break
 
-            return lt.apply_links_template(template_to_process, host_results or {})
+            # Flatten grouped link structure (by_type) before applying legacy
+            # placeholder rendering which expects a simple host -> [urls] map.
+            inv = lt._invert_host_results_by_type_format(host_results or {})
+            flat_map: Dict[str, List[str]] = {}
+            for type_map in inv.values():
+                for fmt_map in type_map.values():
+                    for host, urls in fmt_map.items():
+                        flat_map.setdefault(host, []).extend(urls)
+            keeplink_val = (host_results or {}).get("keeplinks")
+            if keeplink_val:
+                flat_map["keeplinks"] = lt._as_list(keeplink_val)
+
+            return lt.apply_links_template(template_to_process, flat_map)
 
         else:
             logging.debug("No known placeholders found. Appending a default link block.")
@@ -228,14 +268,15 @@ def render_with_links(
                 keeplink_url = keeplinks_val
 
             if block_text or per_type:
-                parts = []
-                if keeplink_url:
-                    parts.append(f"[url={keeplink_url}]Keeplinks[/url]")
-                if per_type.get("audio"):
-                    parts.append(per_type["audio"])
-                if per_type.get("book"):
-                    parts.append(per_type["book"])
-                block_text = "\n\n".join(p for p in parts if p).strip()
+                if per_type.get("audio") or per_type.get("book"):
+                    parts = []
+                    if keeplink_url:
+                        parts.append(f"[url={keeplink_url}]Keeplinks[/url]")
+                    if per_type.get("audio"):
+                        parts.append(per_type["audio"])
+                    if per_type.get("book"):
+                        parts.append(per_type["book"])
+                    block_text = "\n\n".join(p for p in parts if p).strip()
 
             if not block_text:
                 from utils.link_template import _normalize_links_dict, HOST_ORDER, HOST_LABELS

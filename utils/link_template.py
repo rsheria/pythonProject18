@@ -168,6 +168,21 @@ def _invert_host_results_by_type_format(host_results: Dict) -> Dict[str, Dict[st
     for host, bucket in (host_results or {}).items():
         if not host or not isinstance(bucket, dict):
             continue
+
+        key = str(host).lower()
+        is_rg_backup = False
+        if "rapidgator" in key:
+            is_rg_backup = (
+                "backup" in key
+                or key.endswith("-bak")
+                or key.endswith("_bak")
+                or key.endswith("-backup")
+                or key.endswith("_backup")
+                or bool(bucket.get("is_backup"))
+            )
+        if is_rg_backup:
+            continue
+
         by_type = (bucket.get("by_type") or {}) if isinstance(bucket.get("by_type"), dict) else {}
         # نتعامل مع book/audio فقط، وأى أنواع أخرى نتجاهلها فى هذه المرحلة
         for t in ("book", "audio"):
@@ -279,7 +294,10 @@ def build_type_format_host_blocks(
             if not urls:
                 continue
             label = labels.get(host, host.capitalize())
-            links_str = " | ".join(f"[url={u}]{i+1}[/url]" for i, u in enumerate(urls))
+            link_text = lambda i: f"{label}{i+1 if len(urls) > 1 else ''}"
+            links_str = " | ".join(
+                f"[url={u}]{link_text(i)}[/url]" for i, u in enumerate(urls)
+            )
             parts.append(f"{label}: {links_str}")
         return " ‖ ".join(parts), {}
     # --------- نهاية حالة الملف الواحد ---------
@@ -295,7 +313,7 @@ def build_type_format_host_blocks(
 
     type_headers = {
         "book": "[b]Links – eBooks[/b]",
-        "audio": "[b]Links – Audiobooks[/b]",
+        "audio": "[b]Links – Hörbücher[/b]",
     }
 
     for t in ("book", "audio"):
@@ -313,7 +331,13 @@ def build_type_format_host_blocks(
                 if not urls:
                     continue
                 host_display = labels.get(host.split(".")[0], labels.get(host, host))
-                t_parts.append(f"{host_display}: " + " | ".join(f"[url={u}]{i+1}[/url]" for i, u in enumerate(urls)))
+                link_text = lambda i: f"{host_display}{i+1 if len(urls) > 1 else ''}"
+                t_parts.append(
+                    f"{host_display}: "
+                    + " | ".join(
+                        f"[url={u}]{link_text(i)}[/url]" for i, u in enumerate(urls)
+                    )
+                )
             if t_parts and not t_parts[-1].endswith("\n"):
                 t_parts.append("")
 

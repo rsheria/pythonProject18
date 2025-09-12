@@ -29,6 +29,7 @@ from .worker_thread import WorkerThread
 from .upload_worker import UploadWorker
 from integrations.jd_client import hard_cancel
 from utils.sanitize import sanitize_filename
+from utils.file_scanner import scan_thread_dir
 
 
 def get_downloader_for(url: str, bot):
@@ -735,15 +736,11 @@ class DownloadWorker(QThread):
                 info["completed"] = True
                 return
 
-            # record new files - check if JDownloader already populated new_files
+            # record new files - scan thread directory recursively to catch
+            # items extracted into nested folders (e.g. book + audio combos)
             files_before_scan = len(info["new_files"])
-            for f in info["thread_dir"].glob("*"):
-                if f.is_file():
-                    fp = str(f)
-                    if fp not in info["new_files"]:
-                        info["new_files"].append(fp)
-
-                files_after_scan = len(info["new_files"])
+            info["new_files"] = scan_thread_dir(info["thread_dir"], info["new_files"])
+            files_after_scan = len(info["new_files"])
             if files_after_scan > files_before_scan:
                 logging.info(
                     f"📁 Found {files_after_scan - files_before_scan} additional files in thread directory"
@@ -826,7 +823,20 @@ class DownloadWorker(QThread):
                     final_produced_files = [str(p) for p in processed if Path(p).exists()]
 
                 if not final_produced_files:
-                    raise FileNotFoundError(f"Processing returned no valid files for '{info['thread_title']}'.")
+                    logging.warning(
+                        "Processing returned no files for '%s'; falling back to raw downloads.",
+                        info["thread_title"],
+                    )
+                    fallback: list[str] = []
+                    for f in files:
+                        candidate = td / Path(f).name
+                        if candidate.exists():
+                            fallback.append(str(candidate))
+                    final_produced_files = fallback
+                if not final_produced_files:
+                    raise FileNotFoundError(
+                        f"Processing returned no valid files for '{info['thread_title']}'."
+                    )
 
                 # Find the largest existing file to determine the main file.
                 main_file_path = max(

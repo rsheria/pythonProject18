@@ -871,6 +871,12 @@ class FileProcessor:
 
                 produced = books + media_archives
 
+                if compression_ok:
+                    if is_multipart and all_parts:
+                        self._safely_remove_original_archives(archive_path, all_parts)
+                    else:
+                        self._safely_remove_original_archives(archive_path, None)
+
                 final_files: list[Path] = []
                 for p in produced:
                     dest = download_folder / p.name
@@ -878,11 +884,6 @@ class FileProcessor:
                         shutil.move(str(p), dest)
                     final_files.append(dest)
 
-                if compression_ok:
-                    if is_multipart and all_parts:
-                        self._safely_remove_original_archives(archive_path, all_parts)
-                    else:
-                        self._safely_remove_original_archives(archive_path, None)
                 # If compression failed we keep the original archive untouched
                 self._safely_remove_directory(root_folder)
                 self._safely_remove_directory(extract_dir)
