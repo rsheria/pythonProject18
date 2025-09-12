@@ -168,18 +168,82 @@ class FileProcessor:
 
         files = sorted([p for p in root_dir.glob("*") if p.is_file()])
         return root_dir, files
+
+    def _is_book_ext(self, p: Path) -> bool:
+        """
+        يعتبر الملف كتاباً مقروءاً إذا كان امتداده من صيغ الكتب المعروفة.
+        يشمل ذلك صيغ الأرشيف الخاصة بالكتب المصورة (CBR/CBZ) كملف كتاب واحد.
+        """
+        ext = p.suffix.lower()
+        book_exts = {".pdf", ".epub", ".mobi", ".azw3", ".djvu", ".txt"}
+        archive_book_containers = {".cbz", ".cbr"}  # هذه تُعد كتباً بذاتها ولا تُفك
+        return (ext in book_exts) or (ext in archive_book_containers)
+
+    def _archive_contains_book_entries(self, archive_path: Path) -> bool:
+        """
+        فحص سريع لمحتويات الأرشيف لمعرفة إن كان يحتوي على صيغ كتب مقروءة.
+        لا يقوم بالاستخراج الفعلي. يستخدم zipfile لملفات ZIP وWinRAR/UnRAR لملفات RAR،
+        ويحاول 7z لملفات 7z إن توفر.
+        """
+        exts = (".pdf", ".epub", ".mobi", ".azw3", ".djvu", ".txt")
+        ext = archive_path.suffix.lower()
+
+        # ZIP: استخدم zipfile بدون تعديل الواردات العامة (import محلي)
+        if ext == ".zip":
+            try:
+                import zipfile  # import محلي لتفادي تعديل الواردات أعلى الملف
+                with zipfile.ZipFile(archive_path) as zf:
+                    for name in zf.namelist():
+                        n = name.lower()
+                        if any(n.endswith(e) for e in exts):
+                            return True
+            except Exception:
+                return False
+
+        # RAR: استخدم WinRAR/UnRAR لسرد الأسماء (lb = list bare)
+        if ext == ".rar":
+            try:
+                cmd = [str(self.winrar_path), "lb", str(archive_path)]
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                out = (res.stdout or b"").decode(errors="ignore").lower().splitlines()
+                for n in out:
+                    if any(n.endswith(e) for e in exts):
+                        return True
+            except Exception:
+                return False
+
+        # 7z: محاولة باستخدام 7z l -ba إن وُجد
+        if ext == ".7z":
+            try:
+                res = subprocess.run(["7z", "l", "-ba", str(archive_path)],
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                out = (res.stdout or b"").decode(errors="ignore").lower().splitlines()
+                for n in out:
+                    # سطور 7z قد تحتوي مسارات وأوصاف؛ نتحقق بنهاية السطر بعد تجريده
+                    n = n.strip()
+                    if any(n.endswith(e) for e in exts):
+                        return True
+            except Exception:
+                return False
+
+        return False
+
     def process_downloads(
-        self,
-        thread_dir: Path,
-        downloaded_files: List[str],
-        thread_title: str,
-        password: str | None = None,
+            self,
+            thread_dir: Path,
+            downloaded_files: List[str],
+            thread_title: str,
+            password: str | None = None,
     ) -> Optional[List[str] | tuple[str, List[str]]]:
         """
         Process downloaded files and return list of processed file paths.
         1) Move the downloaded files to the thread_dir.
         2) If there's exactly one file or a multi-part scenario => rename final archive with thread_title.
         3) If multiple distinct files => now re-process each one with its original name.
+
+        تعديل: إضافة وضع "كتب مقروءة" يجبر عدم الضغط مهما كان الإعداد،
+        مع استخراج الأرشيفات التي تحتوي كتباً ورفع كل ملف كتاب على حدة،
+        واعتبار CBR/CBZ كتباً مفردة لا تُفك.
         """
         try:
             # First sanitize & shorten the thread title to avoid Windows path issues
@@ -202,6 +266,89 @@ class FileProcessor:
                 self.recompress_mode,
             )
 
+            # -------------------------------
+            # 🔎 كشف وضع الكتب المقروءة (إجبار عدم الضغط)
+            # -------------------------------
+            force_books_mode = False
+
+            # 1) لو الملفات نفسها كتب/CBZ/CBR → إجبار وضع الكتب
+            for f in moved_files:
+                if self._is_book_ext(f):
+                    force_books_mode = True
+                    break
+
+            # 2) لو أي أرشيف يحتوي كتباً بالداخل → إجبار وضع الكتب
+            if not force_books_mode:
+                for f in moved_files:
+                    if self._is_archive_file(f):
+                        # CBR/CBZ تعتبر كتاباً قائمًا بذاته
+                        if f.suffix.lower() in {".cbz", ".cbr"}:
+                            force_books_mode = True
+                            break
+                        # فحص محتوى الأرشيف سريعاً
+                        if self._archive_contains_book_entries(f):
+                            force_books_mode = True
+                            break
+
+            # --------------------------------------
+            # 📚 وضع الكتب: عدم الضغط + استخراج الكتب فقط
+            # --------------------------------------
+            if force_books_mode:
+                thread_id = thread_dir.name
+                root_dir = thread_dir
+                produced: List[Path] = []
+
+                for f in moved_files:
+                    # ملفات CBR/CBZ تُرفع كما هي (لا تفك)
+                    if f.suffix.lower() in {".cbz", ".cbr"}:
+                        root_dir.mkdir(parents=True, exist_ok=True)
+                        dest = root_dir / f.name
+                        counter = 1
+                        while dest.exists():
+                            dest = root_dir / f"{f.stem}_{counter}{f.suffix}"
+                            counter += 1
+                        shutil.move(str(f), dest)
+                        produced.append(dest)
+                        continue
+
+                    if self._is_archive_file(f):
+                        # استخرج وطبّع ثم خذ فقط ملفات الكتب (PDF/EPUB/...)
+                        root_dir, files = self.extract_and_normalize(f, thread_dir, thread_id)
+                        for p in files:
+                            if self._is_book_ext(p):
+                                produced.append(p)
+                        # إن لم نجد كتباً، لا نضيف شيئاً (Avoid empty titles)
+                    else:
+                        # ملف عادي: إن كان كتاباً أضفه كما هو، غير ذلك تجاهله
+                        if self._is_book_ext(f):
+                            root_dir.mkdir(parents=True, exist_ok=True)
+                            dest = root_dir / f.name
+                            counter = 1
+                            while dest.exists():
+                                dest = root_dir / f"{f.stem}_{counter}{f.suffix}"
+                                counter += 1
+                            shutil.move(str(f), dest)
+                            produced.append(dest)
+                        else:
+                            # ليس كتاباً: نتخلص منه بأمان حتى لا يختلط بالنتيجة
+                            self._safely_remove_file(f)
+
+                # 🧹 تنظيف شامل: أبقِ فقط الجذر + الملفات المنتَجة
+                root_dir.mkdir(parents=True, exist_ok=True)
+                keep = {root_dir.resolve()} | {p.resolve() for p in produced}
+                for item in list(thread_dir.iterdir()):
+                    if item.resolve() not in keep:
+                        if item.is_dir():
+                            self._safely_remove_directory(item)
+                        else:
+                            self._safely_remove_file(item)
+
+                logging.info("📚 BOOKS MODE → ROOT=%s, FILES=%d", root_dir, len(produced))
+                return str(root_dir), [str(p) for p in produced]
+
+            # --------------------------------------
+            # الوضع القديم كما هو (احترام المنطق الحالي)
+            # --------------------------------------
             # Decide processing path based on recompress_mode
             if self.recompress_mode == "never":
                 thread_id = thread_dir.name
@@ -236,10 +383,10 @@ class FileProcessor:
                     logging.info("ROOT=%s, FILES=%d", root_dir, len(produced))
                     return str(root_dir), [str(p) for p in produced]
             elif (
-                self.recompress_mode == "if_needed"
-                and len(moved_files) == 1
-                and self._is_archive_file(moved_files[0])
-                and self.split_bytes == 0
+                    self.recompress_mode == "if_needed"
+                    and len(moved_files) == 1
+                    and self._is_archive_file(moved_files[0])
+                    and self.split_bytes == 0
             ):
                 processed_files = [str(moved_files[0])]
             elif self._detect_if_single_item(moved_files):
@@ -252,16 +399,110 @@ class FileProcessor:
                 processed_files = self._process_multi_distinct(
                     moved_files, thread_dir, password
                 )
-            
+
             # 🧹 Final comprehensive cleanup - keep only processed files
             if processed_files:
                 self._final_directory_cleanup(thread_dir, processed_files)
-                
+
             return processed_files
 
         except Exception as e:
             logging.error(f"Error in process_downloads: {str(e)}")
             return None
+
+    # file_processor.py: دوال المانيفست والتصنيف (لا تغيّر التواقيع العامة)
+
+    from pathlib import Path
+
+    def _is_audio_ext(self, p: Path) -> bool:
+        """
+        يعتبر الملف صوتياً لو امتداده من صيغ الصوت الشائعة (لأغراض التصنيف فقط).
+        """
+        ext = p.suffix.lower()
+        audio_exts = {".m4b", ".mp3", ".flac", ".aac", ".ogg", ".m4a", ".wav"}
+        return ext in audio_exts
+
+    def _infer_format_label(self, p: Path) -> str:
+        """
+        تحويل الامتداد إلى Label عرض مفهوم (PDF/EPUB/M4B/MP3/CBZ/CBR/…).
+        """
+        ext = p.suffix.lower().lstrip(".")
+        return ext.upper()
+
+    def _infer_content_type(self, p: Path, category_hint: str | None) -> str:
+        """
+        استنتاج نوع المحتوى الدلالي:
+        - ebooks_readable: صيغ الكتب المقروءة المعروفة (PDF/EPUB/…)
+        - audiobooks: صوتيات (M4B/MP3/…)، لكن يُفضّل الحكم النهائي بالكاتيجوري
+        - music: صوتيات لكن الكاتيجوري تلمّح أنها موسيقى (مثلاً Alben)
+        - unknown: أي شيء آخر
+        """
+        cat = (category_hint or "").strip().lower()
+        # حكم مبني على الكاتيجوري أولاً
+        if self._is_book_ext(p):
+            return "ebooks_readable"
+
+        if self._is_audio_ext(p):
+            # ترجيح الموسيقى لو كاتيجوري ألبومات
+            if any(k in cat for k in ("alben", "album", "musik", "music")):
+                return "music"
+            # ترجيح الكتب الصوتية لو كاتيجوري كتب/ه Hörbücher
+            if any(k in cat for k in ("hörbücher", "hörspiele", "audiobook", "audio", "hoerbuch", "hoerspiel")):
+                return "audiobooks"
+            # إن لم تحسم الكاتيجوري، اعتبرها Audiobook كافتراضي قابل للتعديل لاحقاً
+            return "audiobooks"
+
+        # غير ذلك
+        return "unknown"
+
+    def build_upload_manifest(
+        self,
+        root_dir: str | Path,
+        produced_files: list[str] | list[Path],
+        category_hint: str | None = None,
+    ) -> list[dict]:
+        """
+        يبني مانيفست للرفع من ناتج المعالجة بدون تغيير أي signatures خارجية.
+        كل عنصر يحتوي: path, name, type, format, size_bytes, sha1(optional)
+        - type: ebooks_readable / audiobooks / music / unknown
+        - format: PDF/EPUB/M4B/MP3/CBZ/CBR/… (من الامتداد)
+        """
+        out: list[dict] = []
+        try:
+            root = Path(root_dir)
+            for item in produced_files or []:
+                p = Path(item)
+                if not p.exists() or not p.is_file():
+                    # نتجاهل غير الملفات
+                    continue
+
+                ctype = self._infer_content_type(p, category_hint)
+                fmt = self._infer_format_label(p)
+                try:
+                    size_b = p.stat().st_size
+                except Exception:
+                    size_b = 0
+
+                # يمكن لاحقاً إضافة hash سريع لو محتاجين (بدون كلفة عالية هنا)
+                manifest_item = {
+                    "path": str(p),
+                    "name": p.name,
+                    "type": ctype,
+                    "format": fmt,
+                    "size_bytes": int(size_b),
+                    # "sha1": self._fast_sha1(p),  # اختيارى لو عندك دالة سريعة
+                }
+
+                # احترام قاعدة الكتب: إن كان كتاباً مقروءاً فقد جرى بالفعل عدم الضغط
+                # المانيفست هنا مجرد توصيف ولن يغير ملفاتك.
+                out.append(manifest_item)
+
+        except Exception:
+            # فشل المانيفست لا يجب أن يكسر البروسيس؛ نرجّع قائمة آمنة
+            return []
+
+        return out
+
 
     def _sanitize_and_shorten_title(self, text: str, max_length: int = 60) -> str:
         """

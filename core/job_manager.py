@@ -157,7 +157,92 @@ class QueueOrchestrator(QObject):
 
     # ------------------------------------------------------------------
     # Persistence helpers
-    # ------------------------------------------------------------------
+
+
+        def _host_from_url(self, url: str) -> str:
+            """
+            استخرج اسم المضيف طبيعي (بدون www)؛ أى خطأ يرجّع سلسلة فاضية.
+            """
+            try:
+                from urllib.parse import urlparse
+                host = (urlparse(url).netloc or "").lower()
+                if host.startswith("www."):
+                    host = host[4:]
+                return host
+            except Exception:
+                return ""
+
+        def _media_kind_and_ext(self, source_filename: str) -> tuple[str, str]:
+            """
+            حدد النوع (book|audio) والامتداد من اسم الملف الأصلي.
+            لو غير معروف يرجّع ("", "") كـ fallback.
+            """
+            try:
+                import os
+                ext = os.path.splitext(source_filename)[1].lower().lstrip(".")
+                if not ext:
+                    return "", ""
+                book_exts = {"pdf", "epub", "azw3", "mobi", "djvu"}
+                audio_exts = {"mp3", "m4b", "flac", "ogg", "wav"}
+                if ext in book_exts:
+                    return "book", ext
+                if ext in audio_exts:
+                    return "audio", ext
+                return "", ext  # امتداد غير معروف لكن ممكن نخزنه تحت all فقط
+            except Exception:
+                return "", ""
+
+        def record_uploaded_urls(self, topic_id: str, source_filename: str, urls: list[str]) -> None:
+            """
+            نادِى الدالة دى بعد كل رفع ناجح لملف واحد:
+            - topic_id: معرف التوبك الجاري.
+            - source_filename: اسم الملف الأصلي اللى اترفع (نستخدمه لتحديد النوع والامتداد).
+            - urls: قائمة الروابط الراجعة من المضيفين (Rapidgator/Nitroflare/...).
+            بتحدّث state.host_results بالشكل:
+            {
+              "<host>": {
+                "all": [..],
+                "by_type": {
+                  "book": { "pdf": [..], "epub": [..], ... },
+                  "audio": { "m4b": [..], "mp3": [..], ... }
+                }
+              },
+              ...
+            }
+            """
+            try:
+                state = self.topics.get(topic_id)
+                if not state or not urls:
+                    return
+
+                kind, ext = self._media_kind_and_ext(source_filename)
+
+                for u in urls:
+                    h = self._host_from_url(u)
+                    if not h:
+                        continue
+
+                    host_bucket = state.host_results.setdefault(h, {})
+                    all_list = host_bucket.setdefault("all", [])
+                    by_type = host_bucket.setdefault("by_type", {"book": {}, "audio": {}})
+
+                    # append to 'all' (مع إزالة التكرارات مع الحفاظ على الترتيب)
+                    if u not in all_list:
+                        all_list.append(u)
+
+                    # لو قدرنا نحدد النوع
+                    if kind in ("book", "audio") and ext:
+                        type_map = by_type.setdefault(kind, {})
+                        ext_list = type_map.setdefault(ext, [])
+                        if u not in ext_list:
+                            ext_list.append(u)
+
+                # حفظ سنابشوت علشان الواجهة تقدر تعرض "View Links" فورًا بنفس المنطق الحالى
+                self._save_snapshot()
+            except Exception:
+                import logging
+                logging.debug("record_uploaded_urls failed", exc_info=True)
+
     def _save_snapshot(self) -> None:
         """Persist queue state for the current user."""
         if not self.user_manager or not getattr(self.user_manager, "save_user_data", None):
@@ -322,6 +407,92 @@ class QueueOrchestrator(QObject):
             message=message or ("Waiting…" if stage is OpStage.QUEUED else ""),
         )
         self.progress_update.emit(status)
+
+        # job_manager.py:
+
+    def _host_from_url(self, url: str) -> str:
+            """
+            استخرج اسم المضيف طبيعي (بدون www)؛ أى خطأ يرجّع سلسلة فاضية.
+            """
+            try:
+                from urllib.parse import urlparse
+                host = (urlparse(url).netloc or "").lower()
+                if host.startswith("www."):
+                    host = host[4:]
+                return host
+            except Exception:
+                return ""
+
+    def _media_kind_and_ext(self, source_filename: str) -> tuple[str, str]:
+            """
+            حدد النوع (book|audio) والامتداد من اسم الملف الأصلي.
+            لو غير معروف يرجّع ("", "") كـ fallback.
+            """
+            try:
+                import os
+                ext = os.path.splitext(source_filename)[1].lower().lstrip(".")
+                if not ext:
+                    return "", ""
+                book_exts = {"pdf", "epub", "azw3", "mobi", "djvu"}
+                audio_exts = {"mp3", "m4b", "flac", "ogg", "wav"}
+                if ext in book_exts:
+                    return "book", ext
+                if ext in audio_exts:
+                    return "audio", ext
+                return "", ext  # امتداد غير معروف لكن ممكن نخزنه تحت all فقط
+            except Exception:
+                return "", ""
+
+    def record_uploaded_urls(self, topic_id: str, source_filename: str, urls: list[str]) -> None:
+            """
+            نادِى الدالة دى بعد كل رفع ناجح لملف واحد:
+            - topic_id: معرف التوبك الجاري.
+            - source_filename: اسم الملف الأصلي اللى اترفع (نستخدمه لتحديد النوع والامتداد).
+            - urls: قائمة الروابط الراجعة من المضيفين (Rapidgator/Nitroflare/...).
+            بتحدّث state.host_results بالشكل:
+            {
+              "<host>": {
+                "all": [..],
+                "by_type": {
+                  "book": { "pdf": [..], "epub": [..], ... },
+                  "audio": { "m4b": [..], "mp3": [..], ... }
+                }
+              },
+              ...
+            }
+            """
+            try:
+                state = self.topics.get(topic_id)
+                if not state or not urls:
+                    return
+
+                kind, ext = self._media_kind_and_ext(source_filename)
+
+                for u in urls:
+                    h = self._host_from_url(u)
+                    if not h:
+                        continue
+
+                    host_bucket = state.host_results.setdefault(h, {})
+                    all_list = host_bucket.setdefault("all", [])
+                    by_type = host_bucket.setdefault("by_type", {"book": {}, "audio": {}})
+
+                    # append to 'all' (مع إزالة التكرارات مع الحفاظ على الترتيب)
+                    if u not in all_list:
+                        all_list.append(u)
+
+                    # لو قدرنا نحدد النوع
+                    if kind in ("book", "audio") and ext:
+                        type_map = by_type.setdefault(kind, {})
+                        ext_list = type_map.setdefault(ext, [])
+                        if u not in ext_list:
+                            ext_list.append(u)
+
+                # حفظ سنابشوت علشان الواجهة تقدر تعرض "View Links" فورًا بنفس المنطق الحالى
+                self._save_snapshot()
+            except Exception:
+                import logging
+                logging.debug("record_uploaded_urls failed", exc_info=True)
 
     # ------------------------------------------------------------------
     def retry_topic(self, topic_id: str) -> None:

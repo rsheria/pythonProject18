@@ -65,6 +65,55 @@ class TemplateManager:
     def all_templates(self) -> Dict[str, str]:
         return dict(self.templates)
 
+    def render_with_links(
+        self,
+        category: str,
+        host_results: dict,
+        template_text: Optional[str] = None,
+        host_labels: dict | None = None,
+        host_order: list[str] | None = None,
+    ) -> str:
+        """
+        Build final BBCode by injecting link blocks grouped by type/format/host into the template for *category*.
+
+        The ``host_results`` structure should mirror the data stored by the upload pipeline, typically a nested
+        mapping of host → {all, by_type}. If ``template_text`` is not provided, the method will load the
+        template for ``category`` using ``get_template``.
+
+        The method performs the following steps:
+
+        1. Load the base template and remove any legacy link placeholders or panels.
+        2. Use ``utils.link_template`` helpers to build a hierarchical link block respecting host order and labels.
+        3. Replace the first occurrence of ``{LINKS}``/``{links}``/``[LINKS]``/``[links]`` in the cleaned template with
+           the generated block. If none of these placeholders are found, append the block at the end.
+
+        In case of any error, the original template is returned unchanged.
+        """
+        base = template_text if template_text is not None else (self.get_template(category) or "")
+        try:
+            # Import helpers locally to avoid altering module-level imports
+            from utils import link_template as lt  # type: ignore
+            cleaned = lt.strip_legacy_link_blocks(base)
+            block_text, _ = lt.build_type_format_host_blocks(
+                host_results or {},
+                host_order=host_order,
+                host_labels=host_labels,
+            )
+            if not block_text:
+                return cleaned
+            # Replace placeholders if present
+            placeholders = ["{LINKS}", "{links}", "[LINKS]", "[links]"]
+            for ph in placeholders:
+                if ph in cleaned:
+                    return cleaned.replace(ph, block_text)
+            # Otherwise append the block
+            if cleaned and not cleaned.endswith("\n"):
+                cleaned += "\n"
+            return f"{cleaned}\n{block_text}\n"
+        except Exception:
+            # Fallback to original base if anything goes wrong
+            return base
+
 
 # Global instance used across the application
 _template_manager = TemplateManager()

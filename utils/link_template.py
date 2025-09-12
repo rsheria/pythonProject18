@@ -1,5 +1,5 @@
 """Utilities for applying user-defined link templates."""
-from typing import Any, List, Dict
+from typing import Any, List, Dict, Tuple
 import re
 
 # ---------------------------------------------------------------------------
@@ -142,6 +142,163 @@ def _normalize_links_dict(links_dict: Dict[Any, Any]) -> Dict[str, List[str]]:
     for h in out:
         out[h] = _uniq_keep_order(out[h])
     return out
+
+
+
+def _invert_host_results_by_type_format(host_results: Dict) -> Dict[str, Dict[str, Dict[str, List[str]]]]:
+    """
+    يعكس بنية host_results (المجمعة تحت كل مضيف) إلى:
+      by_type[type][format][host] = [urls...]
+    - يتحمل حالات نقص المفاتيح (fallbacks).
+    - يمنع التكرارات ويحافظ على ترتيب الإدراج.
+    """
+    def _uniq(seq: List[str]) -> List[str]:
+        seen = set()
+        out: List[str] = []
+        for x in seq or []:
+            if x not in seen:
+                seen.add(x)
+                out.append(x)
+        return out
+
+    out: Dict[str, Dict[str, Dict[str, List[str]]]] = {}
+    if not isinstance(host_results, dict):
+        return out
+
+    for host, bucket in (host_results or {}).items():
+        if not host or not isinstance(bucket, dict):
+            continue
+        by_type = (bucket.get("by_type") or {}) if isinstance(bucket.get("by_type"), dict) else {}
+        # نتعامل مع book/audio فقط، وأى أنواع أخرى نتجاهلها فى هذه المرحلة
+        for t in ("book", "audio"):
+            tmap = by_type.get(t) or {}
+            if not isinstance(tmap, dict):
+                continue
+            for fmt, urls in tmap.items():
+                if not fmt:
+                    continue
+                urls = _uniq([u for u in (urls or []) if isinstance(u, str) and u.strip()])
+                if not urls:
+                    continue
+                out.setdefault(t, {}).setdefault(fmt, {}).setdefault(host, [])
+                # دمج بدون تكرار مع الحفاظ على الترتيب
+                merged = out[t][fmt][host] + [u for u in urls if u not in out[t][fmt][host]]
+                out[t][fmt][host] = merged
+    return out
+
+
+def strip_legacy_link_blocks(template_text: str) -> str:
+    """
+    يحذف أى بلوكات/Placeholders قديمة خاصة بعرض اللينكات لمنع التكرار قبل الحقن.
+    لا يغيّر أى نص آخر أو URLs.
+    القواعد العامة:
+      - مسح أسطر تحتوى {LINKS} أو {LINK_KEEP} أو {LINK_RG}/{LINK_DDL}/{LINK_KF}/{LINK_NF}/{LINK_MEGA}
+      - مسح بلوكات CENTER صغيرة مع عنوان DOWNLOAD LINKS التقليدى إن وُجدت.
+    """
+    import re
+    if not isinstance(template_text, str) or not template_text:
+        return template_text or ""
+    txt = template_text
+
+    # أمسح placeholders المعروفة
+    tokens = [
+        r"\{LINKS\}", r"\{LINK_KEEP\}",
+        r"\{LINK_RG\}", r"\{LINK_DDL\}", r"\{LINK_KF\}", r"\{LINK_NF\}", r"\{LINK_MEGA\}",
+        r"\{AUDIOBOOK_LINKS_BLOCK\}", r"\{EBOOK_LINKS_BLOCK\}", r"\{MUSIC_LINKS_BLOCK\}",
+    ]
+    pattern_tokens = re.compile("|".join(tokens))
+    lines = []
+    for line in txt.splitlines():
+        if pattern_tokens.search(line or ""):
+            continue
+        lines.append(line)
+    txt = "\n".join(lines)
+
+    # إزالة بلوك مركزى شائع لعنوان DOWNLOAD LINKS لو موجود (اختيارى وآمن)
+    txt = re.sub(
+        r"\[center\][^\[]*?DOWNLOAD\s+LINKS[^\]]*?\[/center\]\s*",
+        "",
+        txt,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return txt
+
+
+def build_type_format_host_blocks(
+    host_results: Dict,
+    host_order: List[str] = None,
+    host_labels: Dict[str, str] = None,
+) -> Tuple[str, Dict[str, str]]:
+    """
+    يبنى بلوكات BBCode مفصّلة حسب النوع ثم الصيغة ثم المضيف.
+    يعيد:
+      full_block_text, {"book": "...", "audio": "..."}  # بلوكات النوع منفصلة أيضاً
+    - يحترم ترتيب المضيفين (host_order) لو متوفر، وإلا يستخدم ترتيب الظهور.
+    - يستخدم host_labels لأسماء العرض.
+    - لا يضيف عناوين فارغة لو مفيش بيانات.
+    """
+    from .link_template import HOST_ORDER as DEFAULT_HOST_ORDER, HOST_LABELS as DEFAULT_HOST_LABELS  # type: ignore
+
+    inv = _invert_host_results_by_type_format(host_results)
+    if not inv:
+        return "", {}
+
+    order = list(host_order) if (host_order and isinstance(host_order, list)) else list(DEFAULT_HOST_ORDER)
+    labels = dict(host_labels) if (host_labels and isinstance(host_labels, dict)) else dict(DEFAULT_HOST_LABELS)
+
+    def _sorted_hosts(d: Dict[str, List[str]]) -> List[str]:
+        # رتب حسب order ثم أى مضيفين آخرين بالترتيب الطبيعى
+        present = list(d.keys())
+        in_order = [h for h in order if h in present]
+        rest = [h for h in present if h not in in_order]
+        return in_order + rest
+
+    parts: List[str] = []
+    parts_by_type: Dict[str, List[str]] = {"book": [], "audio": []}
+
+    # خريطة عناوين للنوع
+    type_headers = {
+        "book": "[b]Links – eBooks[/b]",
+        "audio": "[b]Links – Audiobooks[/b]",
+    }
+
+    for t in ("book", "audio"):
+        tmap = inv.get(t) or {}
+        if not tmap:
+            continue
+        t_parts: List[str] = [type_headers.get(t, f"[b]Links – {t}[/b]")]
+        # لكل صيغة
+        for fmt in sorted(tmap.keys()):
+            hmap = tmap.get(fmt) or {}
+            if not hmap:
+                continue
+            t_parts.append(f"[u]{fmt}[/u]")
+            # رتب المضيفين
+            for host in _sorted_hosts(hmap):
+                urls = [u for u in (hmap.get(host) or []) if u]
+                if not urls:
+                    continue
+                host_display = labels.get(host.split(".")[0], labels.get(host, host))
+                # سطر لكل مضيف
+                t_parts.append(f"{host_display}: " + " | ".join(f"[url={u}]{i+1}[/url]" for i, u in enumerate(urls)))
+            # فاصل صغير بين الصيغ
+            if t_parts and not t_parts[-1].endswith("\n"):
+                t_parts.append("")
+
+        # لا تضف بلوك النوع لو مفيش بيانات داخله
+        block_text = "\n".join([x for x in t_parts if x is not None]).strip()
+        if block_text:
+            parts_by_type[t].append(block_text)
+            parts.append(block_text)
+
+    # جمع النهائى
+    full_text = "\n\n".join([p for p in parts if p]).strip()
+    per_type_text = {
+        k: ("\n\n".join(v).strip() if v else "")
+        for k, v in parts_by_type.items()
+    }
+    return full_text, per_type_text
+
 
 def _strip_host_placeholder(line: str, token: str) -> str:
     """
