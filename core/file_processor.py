@@ -181,52 +181,136 @@ class FileProcessor:
 
     def _archive_contains_book_entries(self, archive_path: Path) -> bool:
         """
-        فحص سريع لمحتويات الأرشيف لمعرفة إن كان يحتوي على صيغ كتب مقروءة.
-        لا يقوم بالاستخراج الفعلي. يستخدم zipfile لملفات ZIP وWinRAR/UnRAR لملفات RAR،
-        ويحاول 7z لملفات 7z إن توفر.
+        Quick, no-extract check to see if an archive contains readable book files.
+        - ZIP: uses Python's zipfile
+        - RAR: uses the configured RAR tool (WinRAR/UnRAR) to list contents without extracting
+        Returns True if any readable book extension is found.
+        Silently returns False on errors (no popups).
         """
-        exts = (".pdf", ".epub", ".mobi", ".azw3", ".djvu", ".txt")
-        ext = archive_path.suffix.lower()
+        try:
+            exts = (".pdf", ".epub", ".mobi", ".azw3", ".cbz", ".cbr", ".djvu", ".txt")
+            ext = (archive_path.suffix or "").lower()
 
-        # ZIP: استخدم zipfile بدون تعديل الواردات العامة (import محلي)
-        if ext == ".zip":
-            try:
-                import zipfile  # import محلي لتفادي تعديل الواردات أعلى الملف
-                with zipfile.ZipFile(archive_path) as zf:
-                    for name in zf.namelist():
-                        n = name.lower()
+            # ZIP: safe & silent
+            if ext == ".zip":
+                try:
+                    import zipfile
+                    with zipfile.ZipFile(archive_path) as zf:
+                        for name in zf.namelist():
+                            n = (name or "").lower()
+                            if any(n.endswith(e) for e in exts):
+                                return True
+                    return False
+                except Exception:
+                    return False
+
+            # RAR: list the archive contents for .rar files
+            if ext == ".rar":
+                try:
+                    import subprocess
+                    exe_path = str(self.winrar_path)
+                    exe_name = exe_path.lower()
+
+                    def run_list(list_cmd: str) -> subprocess.CompletedProcess:
+                        cmd = [
+                            exe_path,
+                            list_cmd,
+                            "-c-",  # no comments
+                            "-p-",  # do not prompt for password
+                            "-y",   # assume Yes on prompts
+                        ]
+                        # Try to append -ibck if supported
+                        try:
+                            cmd.append("-ibck")
+                        except Exception:
+                            pass
+                        cmd.append(str(archive_path))
+                        return subprocess.run(
+                            cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                        )
+
+                    # WinRAR.exe does not support 'lb'; only use 'l'. For other rar/unrar use 'lb' first.
+                    if "winrar" in exe_name:
+                        res = run_list("l")
+                    else:
+                        res = run_list("lb")
+                        # fallback to 'l' if 'lb' fails or unknown
+                        if res.returncode not in (0, 1) or (res.stderr and "unknown" in res.stderr.lower()):
+                            res = run_list("l")
+
+                    if res.returncode not in (0, 1):
+                        return False
+
+                    for line in (res.stdout or "").splitlines():
+                        n = line.strip().lower()
                         if any(n.endswith(e) for e in exts):
                             return True
-            except Exception:
-                return False
+                    return False
+                except Exception:
+                    return False
 
-        # RAR: استخدم WinRAR/UnRAR لسرد الأسماء (lb = list bare)
-        if ext == ".rar":
-            try:
-                cmd = [str(self.winrar_path), "lb", str(archive_path)]
-                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                out = (res.stdout or b"").decode(errors="ignore").lower().splitlines()
-                for n in out:
-                    if any(n.endswith(e) for e in exts):
+            # Other archive types: not handled here
+            return False
+        except Exception:
+            return False
+
+
+    def _is_readable_book_ext(self, p: Path) -> bool:
+        """Return True if *p* has an ebook-readable extension.
+
+        Recognised formats are PDF/EPUB/MOBI/AZW3 and the comic-book
+        containers CBZ/CBR. The check is case-insensitive and expects
+        *p* to be a ``pathlib.Path`` instance.
+        """
+        try:
+            ext = (p.suffix or "").lower()
+        except Exception:
+            return False
+        return ext in {".pdf", ".epub", ".mobi", ".azw3", ".cbz", ".cbr"}
+
+    def should_skip_compression_for_tree(self, root: Path) -> bool:
+        """Scan ``root`` and return ``True`` if any readable book file exists.
+
+        Used as a quick gate before any compression work; if a readable
+        book is found we will avoid re-compressing and instead upload the
+        files directly.
+        """
+        try:
+            for f in Path(root).rglob("*"):
+                try:
+                    if f.is_file() and self._is_readable_book_ext(f):
                         return True
-            except Exception:
-                return False
+                except Exception:
+                    # Ignore per-file errors and continue scanning
+                    continue
+            return False
+        except Exception:
+            return False
 
-        # 7z: محاولة باستخدام 7z l -ba إن وُجد
-        if ext == ".7z":
-            try:
-                res = subprocess.run(["7z", "l", "-ba", str(archive_path)],
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                out = (res.stdout or b"").decode(errors="ignore").lower().splitlines()
-                for n in out:
-                    # سطور 7z قد تحتوي مسارات وأوصاف؛ نتحقق بنهاية السطر بعد تجريده
-                    n = n.strip()
-                    if any(n.endswith(e) for e in exts):
-                        return True
-            except Exception:
-                return False
+    def split_tree_by_media_kind(self, root: Path) -> tuple[list[Path], list[Path]]:
+        """Return ``(book_files, other_files)`` from ``root``.
 
-        return False
+        ``book_files`` contains items with readable book extensions while
+        ``other_files`` holds everything else (audio/unknown).  Both lists
+        preserve the discovery order.
+        """
+        books: list[Path] = []
+        others: list[Path] = []
+        try:
+            for f in Path(root).rglob("*"):
+                if not f.is_file():
+                    continue
+                if self._is_readable_book_ext(f):
+                    books.append(f)
+                else:
+                    others.append(f)
+        except Exception:
+            pass
+        return books, others
 
     def process_downloads(
             self,
@@ -273,7 +357,7 @@ class FileProcessor:
 
             # 1) لو الملفات نفسها كتب/CBZ/CBR → إجبار وضع الكتب
             for f in moved_files:
-                if self._is_book_ext(f):
+                if self._is_readable_book_ext(f):
                     force_books_mode = True
                     break
 
@@ -291,12 +375,11 @@ class FileProcessor:
                             break
 
             # --------------------------------------
-            # 📚 وضع الكتب: عدم الضغط + استخراج الكتب فقط
+            # 📚 وضع الكتب: عدم الضغط + استخراج الملفات كما هى
             # --------------------------------------
             if force_books_mode:
                 thread_id = thread_dir.name
                 root_dir = thread_dir
-                produced: List[Path] = []
 
                 for f in moved_files:
                     # ملفات CBR/CBZ تُرفع كما هي (لا تفك)
@@ -308,30 +391,49 @@ class FileProcessor:
                             dest = root_dir / f"{f.stem}_{counter}{f.suffix}"
                             counter += 1
                         shutil.move(str(f), dest)
-                        produced.append(dest)
                         continue
 
                     if self._is_archive_file(f):
-                        # استخرج وطبّع ثم خذ فقط ملفات الكتب (PDF/EPUB/...)
-                        root_dir, files = self.extract_and_normalize(f, thread_dir, thread_id)
-                        for p in files:
-                            if self._is_book_ext(p):
-                                produced.append(p)
-                        # إن لم نجد كتباً، لا نضيف شيئاً (Avoid empty titles)
+                        # عالج الأرشيف؛ لو احتوى كتباً سيتم ضغط الصوتيات داخلياً
+                        self.handle_archive_file(f, thread_dir, thread_id, password)
                     else:
-                        # ملف عادي: إن كان كتاباً أضفه كما هو، غير ذلك تجاهله
-                        if self._is_book_ext(f):
-                            root_dir.mkdir(parents=True, exist_ok=True)
+                        # ملف عادي: انقله كما هو
+                        root_dir.mkdir(parents=True, exist_ok=True)
+                        dest = root_dir / f.name
+                        counter = 1
+                        while dest.exists():
+                            dest = root_dir / f"{f.stem}_{counter}{f.suffix}"
+                            counter += 1
+                        shutil.move(str(f), dest)
+
+                # بعد معالجة الملفات، اضغط أى ملفات غير الكتب فى أرشيف واحد
+                books, others = self.split_tree_by_media_kind(root_dir)
+                existing_archives = [p for p in others if self._is_archive_file(p)]
+                others = [p for p in others if not self._is_archive_file(p)]
+
+                media_archives: list[Path] = existing_archives[:]
+                if others:
+                    media_dir = root_dir / "_media_tmp"
+                    media_dir.mkdir(exist_ok=True)
+                    for f in others:
+                        shutil.move(str(f), media_dir / f.name)
+                    out_base = root_dir / cleaned_thread_title
+                    success = self._create_rar_archive(media_dir, out_base, cleaned_thread_title)
+                    if success:
+                        media_archives.extend(sorted(root_dir.glob(f"{cleaned_thread_title}.part*.rar")))
+                        single = root_dir / f"{cleaned_thread_title}.rar"
+                        if single.exists():
+                            media_archives.append(single)
+                    else:
+                        restored: list[Path] = []
+                        for f in media_dir.iterdir():
                             dest = root_dir / f.name
-                            counter = 1
-                            while dest.exists():
-                                dest = root_dir / f"{f.stem}_{counter}{f.suffix}"
-                                counter += 1
                             shutil.move(str(f), dest)
-                            produced.append(dest)
-                        else:
-                            # ليس كتاباً: نتخلص منه بأمان حتى لا يختلط بالنتيجة
-                            self._safely_remove_file(f)
+                            restored.append(dest)
+                        media_archives.extend(restored)
+                    self._safely_remove_directory(media_dir)
+
+                produced = books + media_archives
 
                 # 🧹 تنظيف شامل: أبقِ فقط الجذر + الملفات المنتَجة
                 root_dir.mkdir(parents=True, exist_ok=True)
@@ -711,6 +813,61 @@ class FileProcessor:
             logging.info(f"Total size of extracted files: {total_size / self.GIGABYTE:.2f} GB")
 
             root_folder = self.ensure_single_root(extract_dir, thread_title)
+            # إذا وُجدت كتب مقروءة داخل الأرشيف، نفصل الكتب ونضغط الباقي فى أرشيف واحد
+            if self.should_skip_compression_for_tree(root_folder):
+                books, others = self.split_tree_by_media_kind(root_folder)
+
+                media_archives: list[Path] = []
+                compression_ok = False
+                if others:
+                    media_dir = root_folder / "_media_tmp"
+                    media_dir.mkdir(exist_ok=True)
+                    for f in others:
+                        shutil.move(str(f), media_dir / f.name)
+                    out_base = root_folder / thread_title
+                    if is_zip:
+                        success = self._create_zip_archive(media_dir, out_base, thread_title)
+                        compression_ok = success
+                        if success:
+                            media_archives.extend(sorted(root_folder.glob(f"{thread_title}.z*")))
+                    else:
+                        success = self._create_rar_archive(media_dir, out_base, thread_title)
+                        compression_ok = success
+                        if success:
+                            media_archives.extend(sorted(root_folder.glob(f"{thread_title}.part*.rar")))
+                            single = root_folder / f"{thread_title}.rar"
+                            if single.exists():
+                                media_archives.append(single)
+                    if not compression_ok:
+                        # Restore originals and fall back to keeping the input archive
+                        for f in list(media_dir.iterdir()):
+                            dest = root_folder / f.name
+                            shutil.move(str(f), dest)
+                        media_archives = [archive_path]
+                    self._safely_remove_directory(media_dir)
+                else:
+                    # No non-book files; just return the book list
+                    media_archives = []
+                    compression_ok = False
+
+                produced = books + media_archives
+
+                final_files: list[Path] = []
+                for p in produced:
+                    dest = download_folder / p.name
+                    if p.parent != download_folder:
+                        shutil.move(str(p), dest)
+                    final_files.append(dest)
+
+                if compression_ok:
+                    if is_multipart and all_parts:
+                        self._safely_remove_original_archives(archive_path, all_parts)
+                    else:
+                        self._safely_remove_original_archives(archive_path, None)
+                # If compression failed we keep the original archive untouched
+                self._safely_remove_directory(root_folder)
+                self._safely_remove_directory(extract_dir)
+                return [str(p) for p in final_files]
 
 
             # Re-archive everything => final name based on thread_title
@@ -918,7 +1075,6 @@ class FileProcessor:
                 'x',
                 '-y',
                 '-o+',
-                '-ibck',
             ]
             if password:
                 cmd.append(f'-p{password}')

@@ -11,7 +11,7 @@ class ProceedTemplateWorker(QThread):
     progress_update = pyqtSignal(object)  # OperationStatus
     finished = pyqtSignal(str, str, str)  # category, title, processed bbcode
 
-    def __init__(self, bot, bot_lock, category, title, raw_bbcode, author, links_block, cancel_event=None):
+    def __init__(self, bot, bot_lock, category, title, raw_bbcode, author, links_block, cancel_event=None, host_results=None):
         super().__init__()
         self.bot = bot
         self.bot_lock = bot_lock
@@ -21,6 +21,16 @@ class ProceedTemplateWorker(QThread):
         self.author = author
         self.links_block = links_block
         self.cancel_event = cancel_event
+        self.host_results = host_results or {}
+
+    def _merge_links_into_bbcode(self, category: str, filled: str, host_results: dict) -> str:
+        """Use TemplateManager to inject link blocks into *filled* BBCode."""
+        try:
+            from core.template_manager import get_template_manager
+            tm = get_template_manager()
+            return tm.render_with_links(category, host_results, template_text=filled)
+        except Exception:
+            return filled
     def run(self):
         status = OperationStatus(
             section="Template",
@@ -45,8 +55,14 @@ class ProceedTemplateWorker(QThread):
                 self.author,
                 thread_title=self.title,
             )
-            if "{LINKS}" in bbcode_filled:
+            if self.host_results:
+                bbcode_filled = self._merge_links_into_bbcode(
+                    self.category, bbcode_filled, self.host_results
+                )
+            elif "{LINKS}" in bbcode_filled:
                 bbcode_filled = bbcode_filled.replace("{LINKS}", self.links_block)
+            elif self.links_block:
+                bbcode_filled = (bbcode_filled + ("\n" if not bbcode_filled.endswith("\n") else "") + self.links_block)
             self.progress_update.emit(status)
 
             if self.cancel_event and self.cancel_event.is_set():

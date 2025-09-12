@@ -5904,6 +5904,18 @@ class ForumBotGUI(QMainWindow):
                 if (isinstance(v, str) and v) or (isinstance(v, list) and v)
             }
 
+            # 3.5) احتفظ بالهيكل المصنف للروابط لاستخدامه مع TemplateManager
+            host_results = urls_dict.get("host_results", {}) if isinstance(urls_dict, dict) else {}
+            thread_info["host_results"] = host_results
+            if thread_info.get("versions"):
+                latest = thread_info["versions"][-1]
+                latest["host_results"] = host_results
+            if tid and getattr(self.orch, "topics", None) and tid in self.orch.topics:
+                try:
+                    self.orch.topics[tid].host_results = host_results
+                except Exception:
+                    pass
+
             # 3) تحديث خلايا الجدول (الأولوية: أول RG فقط فى العمود)
             model = self.process_threads_table.model()
             # Set text for RG, RG_BAK, and Keeplinks columns
@@ -10842,6 +10854,7 @@ class ForumBotGUI(QMainWindow):
             raw_bbcode=raw_bbcode,
             author=thread.get("author", ""),
             links_block=links_block,
+            host_results=thread.get("host_results", {}),
         )
         # Keep a reference to the worker so it isn't garbage collected while
         # running.  Losing the reference causes ``QThread: Destroyed while

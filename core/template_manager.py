@@ -91,27 +91,70 @@ class TemplateManager:
         """
         base = template_text if template_text is not None else (self.get_template(category) or "")
         try:
-            # Import helpers locally to avoid altering module-level imports
             from utils import link_template as lt  # type: ignore
             cleaned = lt.strip_legacy_link_blocks(base)
-            block_text, _ = lt.build_type_format_host_blocks(
-                host_results or {},
+
+            # Extract Keeplinks (container link) if provided and remove from host_results
+            keeplink = ""
+            hr = dict(host_results or {})
+            kl = hr.pop("keeplinks", None)
+            if isinstance(kl, dict):
+                urls = kl.get("urls") or kl.get("url") or []
+                if isinstance(urls, str):
+                    keeplink = urls
+                elif urls:
+                    keeplink = urls[0]
+            elif isinstance(kl, str):
+                keeplink = kl
+
+            block_text, per_type = lt.build_type_format_host_blocks(
+                hr,
                 host_order=host_order,
                 host_labels=host_labels,
             )
+
+            # Prepend Keeplinks block if available
+            if keeplink:
+                keep_line = f"[url={keeplink}]Keeplinks[/url]"
+                block_text = keep_line + ("\n\n" + block_text if block_text else "")
+                per_type = {k: (keep_line + ("\n\n" + v if v else "")) for k, v in per_type.items()}
+
             if not block_text:
                 return cleaned
-            # Replace placeholders if present
-            placeholders = ["{LINKS}", "{links}", "[LINKS]", "[links]"]
-            for ph in placeholders:
-                if ph in cleaned:
-                    return cleaned.replace(ph, block_text)
-            # Otherwise append the block
-            if cleaned and not cleaned.endswith("\n"):
-                cleaned += "\n"
-            return f"{cleaned}\n{block_text}\n"
+
+            # Replace single numbered links with host label text when the line has only one URL
+            import re
+            labels = getattr(lt, "HOST_LABELS", {})
+            for label in labels.values():
+                pat = rf"{label}: \[url=([^\]]+)\]1\[/url\](?!\s*\|)"
+                repl = lambda m, lbl=label: f"{label}: [url={m.group(1)}]{lbl}[/url]"
+                block_text = re.sub(pat, repl, block_text)
+                for t in per_type:
+                    per_type[t] = re.sub(pat, repl, per_type[t])
+
+            injector = getattr(lt, "inject_links_blocks", None)
+            if callable(injector):
+                return injector(cleaned, block_text, per_type)
+            # Fallback manual injection
+            placeholders = [
+                ("{AUDIOBOOK_LINKS_BLOCK}", per_type.get("audio")),
+                ("{EBOOK_LINKS_BLOCK}", per_type.get("book")),
+                ("{LINKS}", block_text),
+                ("{links}", block_text),
+                ("[LINKS]", block_text),
+                ("[links]", block_text),
+            ]
+            replaced = False
+            for ph, blk in placeholders:
+                if blk and ph in cleaned:
+                    cleaned = cleaned.replace(ph, blk)
+                    replaced = True
+            if not replaced:
+                if cleaned and not cleaned.endswith("\n"):
+                    cleaned += "\n"
+                cleaned = f"{cleaned}\n{block_text}" if block_text else cleaned
+            return cleaned
         except Exception:
-            # Fallback to original base if anything goes wrong
             return base
 
 

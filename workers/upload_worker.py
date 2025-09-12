@@ -93,9 +93,32 @@ class UploadWorker(QThread):
             idx: {"status": "not_attempted", "urls": []}
             for idx in range(len(self.hosts))
         }
+        self._host_results: dict = {}
 
     def _get_files(self) -> List[Path]:
         return sorted(f for f in self.folder_path.iterdir() if f.is_file())
+
+    def _host_from_url(self, url: str) -> str:
+        """Extract hostname from *url* without ``www`` prefix."""
+        try:
+            from urllib.parse import urlparse
+            host = (urlparse(url).netloc or "").lower()
+            return host[4:] if host.startswith("www.") else host
+        except Exception:
+            return ""
+
+    def _ext_from_name(self, name: str) -> str:
+        """Return file extension without leading dot."""
+        return Path(name).suffix.lower().lstrip(".")
+
+    def _kind_from_name(self, name: str) -> str:
+        """Classify filename into book/audio/other kinds."""
+        ext = self._ext_from_name(name)
+        if ext in {"pdf", "epub", "mobi", "azw3", "cbz", "cbr"}:
+            return "book"
+        if ext in {"m4b", "mp3", "flac", "aac", "ogg", "m4a", "wav"}:
+            return "audio"
+        return "other"
 
     @pyqtSlot()
     def pause_uploads(self):
@@ -161,7 +184,9 @@ class UploadWorker(QThread):
             if not self.files:
                 msg = "لا توجد ملفات للرفع."
                 self.upload_error.emit(self.row, msg)
-                self.upload_complete.emit(self.row, {"error": msg})
+                self.upload_complete.emit(
+                    self.row, {"error": msg, "host_results": self._host_results}
+                )
                 return
 
             self._check_control()
@@ -193,9 +218,21 @@ class UploadWorker(QThread):
             # Prepare final URLs dict using canonical schema
             final = self._prepare_final_urls()
 
+            kl = final.get("keeplinks")
+            if kl and "keeplinks" not in self._host_results:
+                if isinstance(kl, dict):
+                    urls = kl.get("urls") or kl.get("url") or []
+                    urls = [urls] if isinstance(urls, str) else list(urls)
+                else:
+                    urls = [kl]
+                if urls:
+                    self._host_results["keeplinks"] = {"urls": urls}
+
             if "error" in final:
                 self.upload_error.emit(self.row, final["error"])
-                self.upload_complete.emit(self.row, final)
+                self.upload_complete.emit(
+                    self.row, {**final, "host_results": self._host_results}
+                )
                 return
 
             # Update host progress/finish statuses
@@ -229,7 +266,9 @@ class UploadWorker(QThread):
             self.progress_update.emit(status)
             self.upload_success.emit(self.row)
             # Emit canonical final result
-            self.upload_complete.emit(self.row, final)
+            self.upload_complete.emit(
+                self.row, {**final, "host_results": self._host_results}
+            )
             logging.info(
                 "Finished uploading from %s with %d files",
                 self.folder_path,
@@ -239,14 +278,19 @@ class UploadWorker(QThread):
             msg = str(e)
             if "cancelled" in msg.lower():
                 self.upload_error.emit(self.row, "أُلغي من المستخدم")
-                self.upload_complete.emit(self.row, {"error": "أُلغي من المستخدم"})
+                self.upload_complete.emit(
+                    self.row,
+                    {"error": "أُلغي من المستخدم", "host_results": self._host_results},
+                )
             else:
                 logging.error("UploadWorker.run crashed: %s", msg, exc_info=True)
                 # تلوين كل الصفوف بالأحمر
                 for idx in range(len(self.hosts)):
                     self.host_progress.emit(self.row, idx, 0, f"Error: {msg}", 0, 0)
                 self.upload_error.emit(self.row, msg)
-                self.upload_complete.emit(self.row, {"error": msg})
+                self.upload_complete.emit(
+                    self.row, {"error": msg, "host_results": self._host_results}
+                )
 
     def _upload_host_all(self, host_idx: int) -> str:
         urls = []
@@ -256,6 +300,17 @@ class UploadWorker(QThread):
             if u is None:
                 return "failed"
             urls.append(u)
+            host = self._host_from_url(u)
+            if host:
+                kind = self._kind_from_name(f.name)
+                ext = self._ext_from_name(f.name)
+                bucket = self._host_results.setdefault(host, {"by_type": {}})
+                by_type = bucket.setdefault("by_type", {})
+                type_bucket = by_type.setdefault(kind, {})
+                if ext:
+                    lst = type_bucket.setdefault(ext, [])
+                    if u not in lst:
+                        lst.append(u)
         self.upload_results[host_idx]["urls"] = urls
         return "success"
 
@@ -581,6 +636,15 @@ class UploadWorker(QThread):
 
             # Build final URLs and emit statuses
             final = self._prepare_final_urls()
+            kl = final.get("keeplinks")
+            if kl and "keeplinks" not in self._host_results:
+                if isinstance(kl, dict):
+                    urls = kl.get("urls") or kl.get("url") or []
+                    urls = [urls] if isinstance(urls, str) else list(urls)
+                else:
+                    urls = [kl]
+                if urls:
+                    self._host_results["keeplinks"] = {"urls": urls}
             self._emit_final_statuses(row)
             # Emit a finished status if no error
             if "error" not in final:
@@ -603,10 +667,10 @@ class UploadWorker(QThread):
                     keeplinks_url=final.get("keeplinks", ""),
                 )
                 self.progress_update.emit(status)
-            self.upload_complete.emit(row, final)
+            self.upload_complete.emit(row, {**final, "host_results": self._host_results})
         except Exception as e:
             logging.error("retry_failed_uploads crashed: %s", e, exc_info=True)
-            self.upload_complete.emit(row, {"error": str(e)})
+            self.upload_complete.emit(row, {"error": str(e), "host_results": self._host_results})
 
     @pyqtSlot(int)
     def resume_pending_uploads(self, row: int):
@@ -617,6 +681,15 @@ class UploadWorker(QThread):
             ]
             if not to_retry:
                 final = self._prepare_final_urls()
+                kl = final.get("keeplinks")
+                if kl and "keeplinks" not in self._host_results:
+                    if isinstance(kl, dict):
+                        urls = kl.get("urls") or kl.get("url") or []
+                        urls = [urls] if isinstance(urls, str) else list(urls)
+                    else:
+                        urls = [kl]
+                    if urls:
+                        self._host_results["keeplinks"] = {"urls": urls}
                 self._emit_final_statuses(row)
                 if "error" not in final:
                     # Build links payload using canonical host keys
@@ -639,7 +712,7 @@ class UploadWorker(QThread):
                         keeplinks_url=final.get("keeplinks", ""),
                     )
                     self.progress_update.emit(status)
-                self.upload_complete.emit(row, final)
+                self.upload_complete.emit(row, {**final, "host_results": self._host_results})
                 return
             for i in to_retry:
                 self.upload_results[i] = {"status": "not_attempted", "urls": []}
@@ -666,6 +739,15 @@ class UploadWorker(QThread):
                 else:
                     self.upload_results[i]["status"] = "failed"
             final = self._prepare_final_urls()
+            kl = final.get("keeplinks")
+            if kl and "keeplinks" not in self._host_results:
+                if isinstance(kl, dict):
+                    urls = kl.get("urls") or kl.get("url") or []
+                    urls = [urls] if isinstance(urls, str) else list(urls)
+                else:
+                    urls = [kl]
+                if urls:
+                    self._host_results["keeplinks"] = {"urls": urls}
             self._emit_final_statuses(row)
             if "error" not in final:
                 # Build links payload using canonical host keys
@@ -688,10 +770,10 @@ class UploadWorker(QThread):
                     keeplinks_url=final.get("keeplinks", ""),
                 )
                 self.progress_update.emit(status)
-            self.upload_complete.emit(row, final)
+            self.upload_complete.emit(row, {**final, "host_results": self._host_results})
         except Exception as e:
             logging.error("resume_pending_uploads crashed: %s", e, exc_info=True)
-            self.upload_complete.emit(row, {"error": str(e)})
+            self.upload_complete.emit(row, {"error": str(e), "host_results": self._host_results})
 
     @pyqtSlot(int)
     def reupload_all(self, row: int):
@@ -721,8 +803,17 @@ class UploadWorker(QThread):
                     self.upload_results[i]["status"] = "success"
                 else:
                     self.upload_results[i]["status"] = "failed"
-            final = self._prepare_final_urls()
-            self._emit_final_statuses(row)
+                final = self._prepare_final_urls()
+                kl = final.get("keeplinks")
+                if kl and "keeplinks" not in self._host_results:
+                    if isinstance(kl, dict):
+                        urls = kl.get("urls") or kl.get("url") or []
+                        urls = [urls] if isinstance(urls, str) else list(urls)
+                    else:
+                        urls = [kl]
+                    if urls:
+                        self._host_results["keeplinks"] = {"urls": urls}
+                self._emit_final_statuses(row)
             if "error" not in final:
                 # Build links payload using canonical host keys
                 links_payload = {
@@ -744,7 +835,7 @@ class UploadWorker(QThread):
                     keeplinks_url=final.get("keeplinks", ""),
                 )
                 self.progress_update.emit(status)
-            self.upload_complete.emit(row, final)
+            self.upload_complete.emit(row, {**final, "host_results": self._host_results})
         except Exception as e:
             logging.error("reupload_all crashed: %s", e, exc_info=True)
-            self.upload_complete.emit(row, {"error": str(e)})
+            self.upload_complete.emit(row, {"error": str(e), "host_results": self._host_results})
