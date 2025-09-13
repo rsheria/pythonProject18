@@ -104,6 +104,7 @@ HOST_COLS = {
     "ddownload": "DDL",
     "katfile": "KF",
     "nitroflare": "NF",
+    "uploady": "UPY",
 }
 
 log = logging.getLogger(__name__)
@@ -161,7 +162,7 @@ class StatusWidget(QWidget):
         self.table = QTableWidget(self)
         headers = [
             "Section", "Item", "Stage", "Message", "Speed", "ETA",
-            "Progress", "RG", "DDL", "KF", "NF", "RG_BAK",
+            "Progress", "RG", "DDL", "KF", "NF", "UPY", "RG_BAK",
         ]
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
@@ -652,7 +653,7 @@ class StatusWidget(QWidget):
 
         This helper locates the row associated with ``tid`` and updates
         the Rapidgator (RG), rapidgator backup (RG_BAK), ddownload (DDL),
-        katfile (KF) and nitroflare (NF) columns based on the provided
+        katfile (KF), nitroflare (NF) and uploady (UPY) columns based on the provided
         ``links`` mapping.  It also writes the protected URL into a
         Keeplinks/Links column when present.  Nested link structures and
         boolean placeholders are normalised to lists of strings.  Only
@@ -665,7 +666,7 @@ class StatusWidget(QWidget):
                 attempted (splitting ``tid`` on the first ``:``).
             links: Mapping of host names to one or more URLs.  Supported
                 keys include ``rapidgator``, ``rapidgator_bak``,
-                ``ddownload``, ``katfile`` and ``nitroflare``.  Values may
+                ``ddownload``, ``katfile``, ``nitroflare`` and ``uploady``.  Values may
                 be strings, lists, dicts with ``urls``/``url`` keys, or
                 nested combinations thereof.  Any boolean values are
                 ignored.
@@ -1061,6 +1062,7 @@ class StatusWidget(QWidget):
                 "ddownload": prog("DDL"),
                 "katfile": prog("KF"),
                 "nitroflare": prog("NF"),
+                "uploady": prog("UPY"),
                 "rapidgator_bak": prog("RG_BAK"),
             },
             "key": list(key_tuple) if key_tuple else None,  # (section,item,op_type)
@@ -1465,7 +1467,7 @@ class StatusWidget(QWidget):
             return "rapidgator_bak"
         if h.startswith("rapidgator"):
             return "rapidgator"
-        for base in ("ddownload", "katfile", "nitroflare"):
+        for base in ("ddownload", "katfile", "nitroflare", "uploady"):
             if h.startswith(base):
                 return base
         return h
@@ -1707,6 +1709,8 @@ class StatusWidget(QWidget):
                 host_name = "KF"
             elif host_raw.startswith("nitroflare"):
                 host_name = "NF"
+            elif host_raw.startswith("uploady"):
+                host_name = "UPY"
             else:
                 host_name = ""
             if host_name:
@@ -1915,7 +1919,7 @@ class StatusWidget(QWidget):
             # After handling the status update, if this is a completed upload
             # operation then populate the host and keeplinks columns for the
             # corresponding thread.  This ensures that newly generated links
-            # (Rapidgator, backup, ddownload, katfile, nitroflare) and the
+            # (Rapidgator, backup, ddownload, katfile, nitroflare, uploady) and the
             # protected Keeplinks URL are written into the table once an
             # upload finishes.  Keep this call inside the queued slot so
             # that UI changes occur on the main thread.

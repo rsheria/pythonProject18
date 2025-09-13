@@ -119,8 +119,16 @@ def render_with_links(
         use_hierarchical_builder = any(ph in cleaned_template for ph in new_placeholders)
 
         # Strategy B: Legacy placeholders OR the generic {LINKS} placeholder
-        legacy_placeholders = ["{LINK_RG}", "{LINK_DDL}", "{LINK_KF}", "{LINK_NF}", "{LINK_MEGA}", "{LINK_KEEP}",
-                               "{PART}"]
+        legacy_placeholders = [
+            "{LINK_RG}",
+            "{LINK_DDL}",
+            "{LINK_KF}",
+            "{LINK_NF}",
+            "{LINK_UPY}",
+            "{LINK_MEGA}",
+            "{LINK_KEEP}",
+            "{PART}",
+        ]
         generic_placeholders = ["{LINKS}", "[LINKS]", "{links}", "[links]", "{LINKS_BLOCK}"]
         use_legacy_builder = any(ph in cleaned_template for ph in legacy_placeholders) or any(
             ph in cleaned_template for ph in generic_placeholders)
@@ -172,6 +180,7 @@ def render_with_links(
                 "[url={LINK_DDL}]DDownload[/url] ‖ "
                 "[url={LINK_RG}]Rapidgator[/url] ‖ "
                 "[url={LINK_KF}]Katfile[/url] ‖ "
+                "[url={LINK_UPY}]Uploady.io[/url] ‖ "
                 "[url={LINK_NF}]Nitroflare[/url]\n"
                 "[/center]"
             )

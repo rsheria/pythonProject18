@@ -16,6 +16,7 @@ from uploaders.ddownload_upload_handler import DDownloadUploadHandler
 from uploaders.katfile_upload_handler import KatfileUploadHandler
 from uploaders.nitroflare_upload_handler import NitroflareUploadHandler
 from uploaders.rapidgator_upload_handler import RapidgatorUploadHandler
+from uploaders.uploady_upload_handler import UploadyUploadHandler
 class UploadStatus(Enum):
     WAITING = "waiting"
     UPLOADING = "uploading"
@@ -127,7 +128,7 @@ class UploadWorker(QThread):
 
             # التحقق من صحة المضيفين
             valid_hosts = []
-            supported_hosts = ["rapidgator", "rapidgator-backup", "katfile", "nitroflare", "ddownload"]
+            supported_hosts = ["rapidgator", "rapidgator-backup", "katfile", "nitroflare", "ddownload", "uploady"]
 
             for host in upload_hosts:
                 if isinstance(host, str) and host.lower() in [h.lower() for h in supported_hosts]:
@@ -210,6 +211,8 @@ class UploadWorker(QThread):
                         self.handlers[host] = DDownloadUploadHandler(self.bot)
                     elif host == "katfile":
                         self.handlers[host] = KatfileUploadHandler(self.bot)
+                    elif host == "uploady":
+                        self.handlers[host] = UploadyUploadHandler()
                     # ملاحظة: rapidgator handlers يتم إنشاؤها في _upload_single
 
                     logging.info(f"✅ Handler created for {host}")
@@ -426,6 +429,7 @@ class UploadWorker(QThread):
                 "ddownload": _get_urls("ddownload.com"),
                 "katfile": _get_urls("katfile.com"),
                 "nitroflare": _get_urls("nitroflare.com"),
+                "uploady": _get_urls("uploady.io"),
                 "rapidgator_bak": _get_urls("rapidgator-backup"),
             }
             status = OperationStatus(
@@ -670,6 +674,7 @@ class UploadWorker(QThread):
             "ddownload": [],
             "katfile": [],
             "nitroflare": [],
+            "uploady": [],
             "rapidgator_bak": [],
         }
         all_urls: list[str] = []
@@ -718,6 +723,11 @@ class UploadWorker(QThread):
         if links["nitroflare"]:
             canonical["nitroflare.com"] = {
                 "urls": links["nitroflare"],
+            }
+        # Uploady
+        if links["uploady"]:
+            canonical["uploady.io"] = {
+                "urls": links["uploady"],
             }
         # Rapidgator backup
         if links["rapidgator_bak"]:
@@ -848,6 +858,7 @@ class UploadWorker(QThread):
                     "ddownload": final.get("ddownload", []),
                     "katfile": final.get("katfile", []),
                     "nitroflare": final.get("nitroflare", []),
+                    "uploady": final.get("uploady", []),
                     "rapidgator_bak": final.get("rapidgator_backup", []),
                 }
                 status = OperationStatus(
@@ -893,6 +904,7 @@ class UploadWorker(QThread):
                         "ddownload": (final.get("ddownload.com") or {}).get("urls", []),
                         "katfile": (final.get("katfile.com") or {}).get("urls", []),
                         "nitroflare": (final.get("nitroflare.com") or {}).get("urls", []),
+                        "uploady": (final.get("uploady.io") or {}).get("urls", []),
                         "rapidgator_bak": (final.get("rapidgator-backup") or {}).get("urls", []),
                     }
                     status = OperationStatus(
@@ -951,6 +963,7 @@ class UploadWorker(QThread):
                     "ddownload": (final.get("ddownload.com") or {}).get("urls", []),
                     "katfile": (final.get("katfile.com") or {}).get("urls", []),
                     "nitroflare": (final.get("nitroflare.com") or {}).get("urls", []),
+                    "uploady": (final.get("uploady.io") or {}).get("urls", []),
                     "rapidgator_bak": (final.get("rapidgator-backup") or {}).get("urls", []),
                 }
                 status = OperationStatus(
@@ -1016,6 +1029,7 @@ class UploadWorker(QThread):
                     "ddownload": (final.get("ddownload.com") or {}).get("urls", []),
                     "katfile": (final.get("katfile.com") or {}).get("urls", []),
                     "nitroflare": (final.get("nitroflare.com") or {}).get("urls", []),
+                    "uploady": (final.get("uploady.io") or {}).get("urls", []),
                     "rapidgator_bak": (final.get("rapidgator-backup") or {}).get("urls", []),
                 }
                 status = OperationStatus(

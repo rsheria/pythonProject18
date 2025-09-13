@@ -418,7 +418,7 @@ class UserManager:
             # Set default settings if not present
             env_upload_hosts = os.getenv('UPLOAD_HOSTS', '')
             default_upload_hosts = [h.strip() for h in env_upload_hosts.split(',') if h.strip()] or [
-                'rapidgator', 'nitroflare', 'ddownload', 'katfile'
+                'rapidgator', 'nitroflare', 'ddownload', 'katfile', 'uploady'
             ]
 
             env_priority = os.getenv('DOWNLOAD_HOSTS_PRIORITY', '')

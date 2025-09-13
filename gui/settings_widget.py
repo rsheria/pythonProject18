@@ -790,7 +790,7 @@ class SettingsWidget(QWidget):
             if current_user:
                 hosts = settings_source.get("upload_hosts", [])
                 if not isinstance(hosts, list) or not hosts:
-                    hosts = ["rapidgator", "nitroflare", "ddownload", "katfile"]
+                    hosts = ["rapidgator", "nitroflare", "ddownload", "katfile", "uploady"]
             else:
                 hosts = []
             for h in [h for h in hosts if isinstance(h, str) and h.strip()]:

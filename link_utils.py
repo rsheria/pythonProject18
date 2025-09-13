@@ -16,6 +16,7 @@ The canonical schema is a flat dictionary with the following keys:
     - ``nitroflare.com``: ``list[str]`` – direct Nitroflare download links
     - ``ddownload.com``: ``list[str]`` – direct DDownload links
     - ``katfile.com``: ``list[str]`` – direct Katfile links
+    - ``uploady.io``: ``list[str]`` – direct Uploady.io links
     - ``rapidgator-backup``: ``list[str]`` – backup Rapidgator links (if any)
     - ``keeplinks``: ``str`` – the Keeplinks short URL
 
@@ -54,6 +55,8 @@ _KEY_ALIASES = {
     "ddownload.com": "ddownload.com",
     "katfile": "katfile.com",
     "katfile.com": "katfile.com",
+    "uploady": "uploady.io",
+    "uploady.io": "uploady.io",
     # keeplinks
     "keeplinks": "keeplinks",
 }

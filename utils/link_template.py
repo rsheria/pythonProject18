@@ -63,6 +63,7 @@ HOST_TOKENS = {
     "rapidgator": "RG",
     "katfile":    "KF",
     "nitroflare": "NF",
+    "uploady":    "UPY",
     "mega":       "MEGA",
     "keeplinks":  "KEEP",
 }
@@ -72,11 +73,12 @@ HOST_LABELS = {
     "rapidgator": "Rapidgator",
     "katfile":    "Katfile",
     "nitroflare": "Nitroflare",
+    "uploady":    "Uploady.io",
     "mega":       "MEGA",
     "keeplinks":  "Keeplinks",
 }
 
-HOST_ORDER = ["ddownload", "rapidgator", "katfile", "nitroflare", "mega"]
+HOST_ORDER = ["ddownload", "rapidgator", "katfile", "nitroflare", "uploady", "mega"]
 
 def _guess_host_from_url(url: str) -> str:
     u = url.lower()
@@ -84,6 +86,7 @@ def _guess_host_from_url(url: str) -> str:
     if "ddownload"  in u or "//ddl" in u: return "ddownload"
     if "katfile"    in u: return "katfile"
     if "nitroflare" in u: return "nitroflare"
+    if "uploady"   in u: return "uploady"
     if "mega.nz"    in u or "mega.co.nz" in u: return "mega"
     if "keeplinks"  in u: return "keeplinks"
     return ""
@@ -381,7 +384,7 @@ def apply_links_template(template: str, links_dict: dict) -> str:
     """
     يطبّق التيمبلت بذكاء:
       - {LINK_KEEP} يتبدّل بأول Keeplinks لو موجود (مرة واحدة فقط).
-      - لباقي المضيفين {LINK_DDL}/{LINK_RG}/{LINK_KF}/{LINK_NF}/{LINK_MEGA}:
+      - لباقي المضيفين {LINK_DDL}/{LINK_RG}/{LINK_KF}/{LINK_NF}/{LINK_UPY}/{LINK_MEGA}:
           * 0 لينك  => يمسح العنصر بالكامل.
           * 1 لينك  => يستبدل الـ placeholder بالرابط (لو داخل [url=...] هيفضل التنسيق).
           * +1 لينك => يمسح العنصر من السطر الرئيسي ويضيف بلوك منفصل مرقّم 01..N تحت.

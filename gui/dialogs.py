@@ -43,7 +43,14 @@ class LinksDialog(QDialog):
             layout.addWidget(keeplinks_edit)
 
         # 2) ترتيب الهوستات: RG, DDL, KF, NF, RG_BAK ثم أى مفاتيح أخرى
-        preferred = ["rapidgator.net", "ddownload.com", "katfile.com", "nitroflare.com", "rapidgator-backup"]
+        preferred = [
+            "rapidgator.net",
+            "ddownload.com",
+            "katfile.com",
+            "nitroflare.com",
+            "uploady.io",
+            "rapidgator-backup",
+        ]
         order, seen = [], set()
         for h in preferred:
             if flat.get(h):
