@@ -123,7 +123,7 @@ class LinksDialog(QDialog):
                 return "rapidgator.net"
             if k in ("rg_bak", "rapidgator_bak", "rapidgatorbackup"):
                 return "rapidgator-backup"
-            if k.startswith("uploady"):
+            if k in ("uploady", "uploady.io"):  # إصلاح المشكلة - دعم uploady و uploady.io
                 return "uploady.io"
             return k
 
