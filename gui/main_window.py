@@ -2653,6 +2653,9 @@ class ForumBotGUI(QMainWindow):
             mega_links = _as_url_list(
                 urls_dict.get('mega') or urls_dict.get('mega.nz')
             )
+            uploady_links = _as_url_list(
+                urls_dict.get('uploady') or urls_dict.get('uploady.io')
+            )
 
             # Combined new links (excluding Rapidgator backup من الواجهة العامة)
             new_links = (
@@ -2661,6 +2664,7 @@ class ForumBotGUI(QMainWindow):
                     + ddownload_links
                     + katfile_links
                     + mega_links
+                    + uploady_links
             )
 
             # Fallback: لو لسه فاضى، لف على كل الـ urls_dict واستخرج أى http(s)
@@ -2715,6 +2719,8 @@ class ForumBotGUI(QMainWindow):
                     canonical_links['ddownload.com'] = {'urls': list(ddownload_links)}
                 if katfile_links:
                     canonical_links['katfile.com'] = {'urls': list(katfile_links)}
+                if uploady_links:
+                    canonical_links['uploady.io'] = {'urls': list(uploady_links)}
                 if backup_rg_urls:
                     canonical_links['rapidgator-backup'] = {'urls': list(backup_rg_urls), 'is_backup': True}
                 if keeplinks_url:
@@ -5876,6 +5882,7 @@ class ForumBotGUI(QMainWindow):
             nf_links = to_list(urls_dict.get("nitroflare") or urls_dict.get("nitroflare.com"))
             dd_links = to_list(urls_dict.get("ddownload") or urls_dict.get("ddownload.com"))
             kf_links = to_list(urls_dict.get("katfile") or urls_dict.get("katfile.com"))
+            upy_links = to_list(urls_dict.get("uploady") or urls_dict.get("uploady.io"))
             keeplink = (urls_dict.get("keeplinks") or "")
 
             merged_links = {
@@ -5883,6 +5890,7 @@ class ForumBotGUI(QMainWindow):
                 "nitroflare.com": nf_links,
                 "ddownload.com": dd_links,
                 "katfile.com": kf_links,
+                "uploady.io": upy_links,
                 "rapidgator-backup": rg_backup,
                 "keeplinks": keeplink,
             }
@@ -5949,6 +5957,7 @@ class ForumBotGUI(QMainWindow):
             updated_cols = []
             if rg_links:   updated_cols.append("RG")
             if rg_backup:  updated_cols.append("RG_BAK")
+            if upy_links:  updated_cols.append("UPY")
             if keeplink:   updated_cols.append("Keeplinks")
             logging.info("POPULATE-LINKS tid=%s row=%s updated=%s", tid, current_row, updated_cols)
         except Exception as e:
