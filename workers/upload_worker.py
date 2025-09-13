@@ -11,12 +11,15 @@ from typing import Any, List, Optional
 from PyQt5.QtCore import QThread, pyqtSignal, pyqtSlot
 from integrations.jd_client import hard_cancel
 from models.operation_status import OperationStatus, OpStage, OpType
-from utils.utils import _normalize_links
+try:
+    from utils.utils import _normalize_links
+except Exception:  # pragma: no cover - fallback for tests
+    def _normalize_links(urls):
+        return [u for u in urls if isinstance(u, str)]
 from uploaders.ddownload_upload_handler import DDownloadUploadHandler
 from uploaders.katfile_upload_handler import KatfileUploadHandler
 from uploaders.nitroflare_upload_handler import NitroflareUploadHandler
 from uploaders.rapidgator_upload_handler import RapidgatorUploadHandler
-from uploaders.uploady_upload_handler import UploadyUploadHandler
 class UploadStatus(Enum):
     WAITING = "waiting"
     UPLOADING = "uploading"
@@ -207,15 +210,18 @@ class UploadWorker(QThread):
                 try:
                     if host == "nitroflare":
                         self.handlers[host] = NitroflareUploadHandler(self.bot)
+                        logging.info(f"✅ Handler created for {host}")
                     elif host == "ddownload":
                         self.handlers[host] = DDownloadUploadHandler(self.bot)
+                        logging.info(f"✅ Handler created for {host}")
                     elif host == "katfile":
                         self.handlers[host] = KatfileUploadHandler(self.bot)
+                        logging.info(f"✅ Handler created for {host}")
                     elif host == "uploady":
+                        from uploaders.uploady_upload_handler import UploadyUploadHandler
                         self.handlers[host] = UploadyUploadHandler()
+                        logging.info(f"✅ Handler created for {host}")
                     # ملاحظة: rapidgator handlers يتم إنشاؤها في _upload_single
-
-                    logging.info(f"✅ Handler created for {host}")
                 except Exception as handler_e:
                     logging.error(f"❌ Failed to create handler for {host}: {handler_e}")
                     continue

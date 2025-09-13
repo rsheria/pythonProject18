@@ -9,22 +9,23 @@ import re
 LINK_TEMPLATE_PRESETS: List[str] = [
     (
         "[center][size=3][b]DOWNLOAD LINKS[/b][/size]\n\n"
-        "[url={LINK_KEEP}]Keeplinks[/url] ‖ "
-        "[url={LINK_DDL}]DDownload[/url] ‖ "
-        "[url={LINK_RG}]Rapidgator[/url] ‖ "
-        "[url={LINK_KF}]Katfile[/url] ‖ "
-        "[url={LINK_NF}]Nitroflare[/url]\n"
+        "[url={LINK_KEEP}]Keeplinks[/url] - "
+        "[url={LINK_DDL}]DDownload[/url] - "
+        "[url={LINK_RG}]Rapidgator[/url] - "
+        "[url={LINK_KF}]Katfile[/url] - "
+        "[url={LINK_NF}]Nitroflare[/url] - "
+        "[url={LINK_UPY}]Uploady-io[/url]\n"
         "[/center]"
     ),
-    "RG: {LINK_RG}\nNF: {LINK_NF}\nDDL: {LINK_DDL}\nKF: {LINK_KF}\nKeep: {LINK_KEEP}",
-    "[url={LINK_RG}]RG[/url] | [url={LINK_NF}]NF[/url] | {LINK_DDL}",
-    "RG {PART}: {LINK_RG}\nNF {PART}: {LINK_NF}\nDDL {PART}: {LINK_DDL}",
-    "{LINK_RG}\n{LINK_NF}\n{LINK_DDL}\n{LINK_KF}",
-    "[b]RG[/b]: {LINK_RG}\n[b]NF[/b]: {LINK_NF}",
-    "[url={LINK_KEEP}]Keep[/url]\n[url={LINK_RG}]RG {PART}[/url]\n[url={LINK_NF}]NF {PART}[/url]",
-    "Download:\n{LINK_RG}\n{LINK_NF}\n{LINK_MEGA}",
-    "[center]{LINK_KEEP}\n{LINK_RG}\n{LINK_NF}\n{LINK_DDL}[/center]",
-    "RG: {LINK_RG} | NF: {LINK_NF} | KF: {LINK_KF} | MEGA: {LINK_MEGA}",
+    "RG: {LINK_RG}\nNF: {LINK_NF}\nDDL: {LINK_DDL}\nKF: {LINK_KF}\nUPY: {LINK_UPY}\nKeep: {LINK_KEEP}",
+    "[url={LINK_RG}]RG[/url] - [url={LINK_NF}]NF[/url] - {LINK_DDL} - {LINK_UPY}",
+    "RG {PART}: {LINK_RG}\nNF {PART}: {LINK_NF}\nDDL {PART}: {LINK_DDL}\nUPY {PART}: {LINK_UPY}",
+    "{LINK_RG}\n{LINK_NF}\n{LINK_DDL}\n{LINK_KF}\n{LINK_UPY}",
+    "[b]RG[/b]: {LINK_RG}\n[b]NF[/b]: {LINK_NF}\n[b]UPY[/b]: {LINK_UPY}",
+    "[url={LINK_KEEP}]Keep[/url]\n[url={LINK_RG}]RG {PART}[/url]\n[url={LINK_NF}]NF {PART}[/url]\n[url={LINK_UPY}]UPY {PART}[/url]",
+    "Download:\n{LINK_RG}\n{LINK_NF}\n{LINK_DDL}\n{LINK_KF}\n{LINK_UPY}",
+    "[center]{LINK_KEEP}\n{LINK_RG}\n{LINK_NF}\n{LINK_DDL}\n{LINK_KF}\n{LINK_UPY}[/center]",
+    "RG: {LINK_RG} - NF: {LINK_NF} - KF: {LINK_KF} - UPY: {LINK_UPY} - MEGA: {LINK_MEGA}",
 ]
 
 # ----------------------------- helpers -------------------------------------
@@ -73,7 +74,7 @@ HOST_LABELS = {
     "rapidgator": "Rapidgator",
     "katfile":    "Katfile",
     "nitroflare": "Nitroflare",
-    "uploady":    "Uploady.io",
+    "uploady":    "Uploady-io",
     "mega":       "MEGA",
     "keeplinks":  "Keeplinks",
 }

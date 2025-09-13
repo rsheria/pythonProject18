@@ -174,7 +174,7 @@ class StatusWidget(QWidget):
             self._progress_col = None
 
         # أعمدة الهوستات بالترتيب الثابت
-        host_header_names = ["RG", "DDL", "KF", "NF", "RG_BAK"]  # ثابتة زى ما انت محدد
+        host_header_names = ["RG", "DDL", "KF", "NF", "UPY", "RG_BAK"]  # ثابتة زى ما انت محدد
         self._host_cols = []
         for name in host_header_names:
             try:

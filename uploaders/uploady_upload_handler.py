@@ -1,58 +1,65 @@
 import logging
 import os
-from pathlib import Path
 from typing import Optional
 
-import requests
-from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 from dotenv import load_dotenv
+
+try:
+    from .uploady_client import UploadyClient
+except Exception:  # pragma: no cover - dependency missing
+    UploadyClient = None
 
 load_dotenv()
 
-API_SERVER_URL = "https://uploady.io/api/upload/server"
 
 class UploadyUploadHandler:
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = (api_key or os.getenv("UPLOADY_API_KEY", "")).strip()
-        self.session = requests.Session()
+        self.client = UploadyClient() if UploadyClient else None
         if not self.api_key:
             logging.warning("Uploady API key is missing")
 
     def upload_file(self, file_path: str, progress_callback=None) -> Optional[str]:
-        if not self.api_key:
-            logging.error("UploadyUploadHandler: API key required")
+        if not self.api_key or not self.client:
+            logging.error("UploadyUploadHandler: API key or client missing")
             return None
         try:
-            # Step 1: fetch upload server
-            resp = self.session.get(API_SERVER_URL, params={"key": self.api_key}, timeout=30)
-            data = resp.json()
-            upload_url = data.get("result")
-            if resp.status_code != 200 or not upload_url:
-                logging.error(f"Uploady server fetch failed: {data}")
+            upload_url = self.client.get_upload_server(self.api_key)
+            if not upload_url:
+                logging.error("UploadyUploadHandler: could not fetch upload server")
                 return None
-            path = Path(file_path)
-            with path.open("rb") as f:
-                encoder = MultipartEncoder({"file": (path.name, f)})
-                if progress_callback:
-                    monitor = MultipartEncoderMonitor(encoder, lambda m: progress_callback(m.bytes_read, m.len))
-                else:
-                    monitor = encoder
-                headers = {"Content-Type": monitor.content_type}
-                upload_resp = self.session.post(upload_url, data=monitor, headers=headers, timeout=3600)
-            result = {}
-            try:
-                result = upload_resp.json()
-            except Exception:
-                logging.error("Uploady upload response not JSON", exc_info=True)
-            url = result.get("result") if isinstance(result, dict) else None
-            if isinstance(url, dict):
-                url = url.get("url") or url.get("download_url") or url.get("link")
-            elif isinstance(url, list):
-                url = url[0] if url else None
-            if not url:
-                logging.error(f"Uploady upload failed: {result}")
+            sess_id = self.client.get_sess_id(self.client.session)
+            resp = self.client.upload_file(
+                upload_url, sess_id, file_path, progress_callback
+            )
+            if isinstance(resp, list):
+                resp = resp[0] if resp else {}
+            if not isinstance(resp, dict):
+                resp = {"result": resp}
+
+            file_code = (
+                resp.get("file_code")
+                or resp.get("filecode")
+                or resp.get("code")
+            )
+            if not file_code:
+                result = resp.get("result")
+                if isinstance(result, list):
+                    result = result[0] if result else {}
+                if isinstance(result, dict):
+                    file_code = (
+                        result.get("file_code")
+                        or result.get("filecode")
+                        or result.get("code")
+                    )
+                elif isinstance(result, str):
+                    file_code = result
+            if isinstance(file_code, list):
+                file_code = file_code[0] if file_code else None
+            if not file_code:
+                logging.error(f"Uploady upload failed: {resp}")
                 return None
-            return url
+            return f"https://uploady.io/{file_code}"
         except Exception as e:
             logging.error(f"Uploady upload error: {e}", exc_info=True)
             return None

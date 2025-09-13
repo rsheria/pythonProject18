@@ -6176,6 +6176,10 @@ class ForumBotGUI(QMainWindow):
                             canonical.setdefault('nitroflare.com', {})
                             canonical['nitroflare.com']['urls'] = vals
                             continue
+                        if 'uploady' in key_norm or key_norm.startswith('upy'):
+                            canonical.setdefault('uploady.io', {})
+                            canonical['uploady.io']['urls'] = vals
+                            continue
                         # fallback to raw host key
                         host_label = raw_key.strip()
                         if host_label:

@@ -1,5 +1,5 @@
 from .base_uploader import BaseUploader
-from uploady_upload_handler import UploadyUploadHandler
+from .uploady_upload_handler import UploadyUploadHandler
 
 class UploadyUploader(BaseUploader):
     def __init__(self, api_key: str | None = None):
