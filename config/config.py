@@ -52,6 +52,8 @@ def load_configuration(env_path: str = None) -> dict:
     config.setdefault('data_dir', DATA_DIR)
     config.setdefault('single_host_mode', True)
     config.setdefault('auto_replace_container', True)
+    # Default cooldown between individual upload attempts in seconds
+    config.setdefault('upload_cooldown_seconds', 30)
     return config
 
 

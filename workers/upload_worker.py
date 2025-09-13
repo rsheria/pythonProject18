@@ -31,6 +31,9 @@ class UploadWorker(QThread):
     upload_error = pyqtSignal(int, str)
     progress_update = pyqtSignal(object)  # OperationStatus
 
+    # إصلاح في __init__ method في upload_worker.py
+    # تحسين Constructor لتجنب الكراش
+
     def __init__(
             self,
             bot,
@@ -45,58 +48,221 @@ class UploadWorker(QThread):
             package_label: str = "audio",
     ):
         super().__init__()  # QThread init
-        self.bot = bot
-        self.row = row
-        self.folder_path = Path(folder_path)
-        self.thread_id = thread_id
-        self.config = bot.config  # Store config reference for quick access
-        self.section = section
-        self.package_label = package_label
-        # إذا كنا نعيد الرفع لروابط موجودة مسبقاً في Keeplinks،
-        # نمرّر الرابط القديم كي لا يتم إنشاء رابط جديد.
-        self.keeplinks_url = keeplinks_url
-        self.keeplinks_sent = False
-        # تحكم بالإيقاف والإلغاء
-        self.is_cancelled = False
-        self.is_paused = False
-        self.lock = Lock()
-        self.cancel_event = cancel_event
-        # ThreadPool لرفع متوازٍ
-        self.thread_pool = ThreadPoolExecutor(max_workers=5)
 
-        # استرجِع قائمة الهوستات
-        if upload_hosts is None:
-            upload_hosts = bot.config.get("upload_hosts", [])
+        # معالجة آمنة للمعاملات الأساسية
+        try:
+            self.bot = bot
+            self.row = int(row) if row is not None else 0
+            self.thread_id = str(thread_id) if thread_id else ""
+            self.config = getattr(bot, 'config', {}) if bot else {}
+            self.section = str(section) if section else "Uploads"
+            self.package_label = str(package_label) if package_label else "audio"
 
-        self.hosts = list(upload_hosts)
+            logging.info(f"🔧 UploadWorker initializing for row {self.row}, thread {self.thread_id}")
 
+        except Exception as basic_e:
+            logging.error(f"❌ Basic parameter initialization failed: {basic_e}")
+            # استخدام قيم افتراضية آمنة
+            self.bot = bot
+            self.row = 0
+            self.thread_id = "unknown"
+            self.config = {}
+            self.section = "Uploads"
+            self.package_label = "audio"
 
-        # Handlers (لمستضيفين لا يحتاجون مسار ملف عند الإنشاء)
-        self.handlers: dict[str, Any] = {}
-        if "nitroflare" in self.hosts:
-            self.handlers["nitroflare"] = NitroflareUploadHandler(self.bot)
-        if "ddownload" in self.hosts:
-            self.handlers["ddownload"] = DDownloadUploadHandler(self.bot)
-        if "katfile" in self.hosts:
-            self.handlers["katfile"] = KatfileUploadHandler(self.bot)
-        # ملاحظة: Rapidgator handler سيُنشأ لكل ملف على حدة داخل ‎_upload_single
+        # معالجة آمنة للمسار
+        try:
+            self.folder_path = Path(str(folder_path)).resolve()
+            if not self.folder_path.exists():
+                logging.warning(f"⚠️ Folder path does not exist: {folder_path}")
+                # محاولة إنشاء المجلد
+                try:
+                    self.folder_path.mkdir(parents=True, exist_ok=True)
+                    logging.info(f"✅ Created missing folder: {self.folder_path}")
+                except Exception as mkdir_e:
+                    logging.error(f"❌ Cannot create folder: {mkdir_e}")
+                    # استخدام مجلد مؤقت
+                    import tempfile
+                    self.folder_path = Path(tempfile.gettempdir()) / f"upload_{self.thread_id}"
+                    self.folder_path.mkdir(exist_ok=True)
+                    logging.info(f"🔄 Using temp folder: {self.folder_path}")
 
-        # جمع الملفات
-        self.explicit_files = [Path(f) for f in files] if files else None
-        self.files = self.explicit_files or self._get_files()
-        self.total_files = len(self.files)
-        if not self.files:
-            logging.warning("UploadWorker: لا توجد ملفات في المجلد %s", folder_path)
+        except Exception as path_e:
+            logging.error(f"❌ Folder path processing failed: {path_e}")
+            import tempfile
+            self.folder_path = Path(tempfile.gettempdir()) / "upload_fallback"
+            self.folder_path.mkdir(exist_ok=True)
 
-        # تهيئة نتائج الرفع
-        self.upload_results = {
-            idx: {"status": "not_attempted", "urls": []}
-            for idx in range(len(self.hosts))
-        }
-        self._host_results: dict = {}
+        # معالجة آمنة لإعدادات التحكم
+        try:
+            self.upload_cooldown = int(self.config.get("upload_cooldown_seconds", 30))
+            if self.upload_cooldown < 5:  # حد أدنى معقول
+                self.upload_cooldown = 30
+        except (TypeError, ValueError):
+            logging.warning("Invalid upload_cooldown_seconds, using default 30")
+            self.upload_cooldown = 30
 
+        # معالجة آمنة لإعدادات الإلغاء والتوقف
+        try:
+            self.keeplinks_url = str(keeplinks_url) if keeplinks_url else None
+            self.keeplinks_sent = False
+            self.is_cancelled = False
+            self.is_paused = False
+            self.lock = Lock()
+            self.cancel_event = cancel_event
+
+        except Exception as control_e:
+            logging.error(f"❌ Control settings failed: {control_e}")
+            self.keeplinks_url = None
+            self.keeplinks_sent = False
+            self.is_cancelled = False
+            self.is_paused = False
+            self.lock = Lock()
+            self.cancel_event = None
+
+        # معالجة آمنة لقائمة المضيفين
+        try:
+            if upload_hosts is None:
+                upload_hosts = self.config.get("upload_hosts", ["rapidgator", "katfile"])
+
+            # التحقق من صحة المضيفين
+            valid_hosts = []
+            supported_hosts = ["rapidgator", "rapidgator-backup", "katfile", "nitroflare", "ddownload"]
+
+            for host in upload_hosts:
+                if isinstance(host, str) and host.lower() in [h.lower() for h in supported_hosts]:
+                    valid_hosts.append(host.lower())
+                else:
+                    logging.warning(f"⚠️ Invalid or unsupported host: {host}")
+
+            if not valid_hosts:
+                logging.warning("⚠️ No valid hosts found, using defaults")
+                valid_hosts = ["rapidgator", "katfile"]
+
+            self.hosts = valid_hosts
+            logging.info(f"✅ Upload hosts configured: {self.hosts}")
+
+        except Exception as hosts_e:
+            logging.error(f"❌ Hosts configuration failed: {hosts_e}")
+            self.hosts = ["rapidgator", "katfile"]  # افتراضي آمن
+
+        # معالجة آمنة للملفات
+        try:
+            self.explicit_files = None
+            if files:
+                validated_files = []
+                for f in files:
+                    try:
+                        file_path = Path(str(f))
+                        if file_path.exists() and file_path.is_file():
+                            # التحقق من أن الملف ليس معطوباً
+                            try:
+                                size = file_path.stat().st_size
+                                if size > 0:  # الملف ليس فارغاً
+                                    validated_files.append(file_path)
+                                    logging.info(f"✅ Validated file: {file_path.name} ({size} bytes)")
+                                else:
+                                    logging.warning(f"⚠️ Empty file skipped: {f}")
+                            except Exception as stat_e:
+                                logging.warning(f"⚠️ Cannot stat file {f}: {stat_e}")
+                        else:
+                            logging.warning(f"⚠️ File not found: {f}")
+                    except Exception as file_e:
+                        logging.error(f"❌ Error processing file {f}: {file_e}")
+                        continue
+
+                if validated_files:
+                    self.explicit_files = validated_files
+                    logging.info(f"✅ {len(validated_files)} files validated successfully")
+                else:
+                    logging.warning("⚠️ No valid files provided, will scan folder")
+
+        except Exception as files_e:
+            logging.error(f"❌ Files processing failed: {files_e}")
+            self.explicit_files = None
+
+        # جمع الملفات النهائي
+        try:
+            self.files = self.explicit_files or self._get_files()
+            self.total_files = len(self.files)
+
+            if not self.files:
+                logging.warning(f"⚠️ No files found in {self.folder_path}")
+            else:
+                logging.info(f"📁 Found {self.total_files} files to upload")
+
+        except Exception as final_files_e:
+            logging.error(f"❌ Final files collection failed: {final_files_e}")
+            self.files = []
+            self.total_files = 0
+
+        # تهيئة الـ handlers والنتائج
+        try:
+            self.thread_pool = ThreadPoolExecutor(max_workers=min(5, len(self.hosts)))
+
+            # إنشاء handlers للمضيفين المدعومين
+            self.handlers = {}
+            for host in self.hosts:
+                try:
+                    if host == "nitroflare":
+                        self.handlers[host] = NitroflareUploadHandler(self.bot)
+                    elif host == "ddownload":
+                        self.handlers[host] = DDownloadUploadHandler(self.bot)
+                    elif host == "katfile":
+                        self.handlers[host] = KatfileUploadHandler(self.bot)
+                    # ملاحظة: rapidgator handlers يتم إنشاؤها في _upload_single
+
+                    logging.info(f"✅ Handler created for {host}")
+                except Exception as handler_e:
+                    logging.error(f"❌ Failed to create handler for {host}: {handler_e}")
+                    continue
+
+            # تهيئة نتائج الرفع
+            self.upload_results = {
+                idx: {"status": "not_attempted", "urls": []}
+                for idx in range(len(self.hosts))
+            }
+            self._host_results = {}
+
+            logging.info(f"🔧 UploadWorker initialization completed successfully")
+            logging.info(f"   - Files: {self.total_files}")
+            logging.info(f"   - Hosts: {len(self.hosts)}")
+            logging.info(f"   - Handlers: {len(self.handlers)}")
+
+        except Exception as init_e:
+            logging.error(f"❌ Final initialization failed: {init_e}")
+            # قيم افتراضية للطوارئ
+            self.thread_pool = ThreadPoolExecutor(max_workers=2)
+            self.handlers = {}
+            self.upload_results = {}
+            self._host_results = {}
+
+    # إضافة method مساعدة محسنة
     def _get_files(self) -> List[Path]:
-        return sorted(f for f in self.folder_path.iterdir() if f.is_file())
+        """جمع الملفات من المجلد مع معالجة أفضل للأخطاء"""
+        try:
+            if not self.folder_path.exists():
+                logging.error(f"❌ Folder does not exist: {self.folder_path}")
+                return []
+
+            files = []
+            for item in self.folder_path.iterdir():
+                try:
+                    if item.is_file() and item.stat().st_size > 0:
+                        files.append(item)
+                except Exception as file_e:
+                    logging.warning(f"⚠️ Error checking file {item}: {file_e}")
+                    continue
+
+            # ترتيب الملفات حسب الحجم (الأكبر أولاً)
+            files.sort(key=lambda f: f.stat().st_size, reverse=True)
+
+            logging.info(f"📁 Found {len(files)} valid files in folder")
+            return files
+
+        except Exception as e:
+            logging.error(f"❌ Error scanning folder {self.folder_path}: {e}")
+            return []
 
     def _host_from_url(self, url: str) -> str:
         """Extract hostname from *url* without ``www`` prefix."""
@@ -301,10 +467,16 @@ class UploadWorker(QThread):
                 self.upload_complete.emit(
                     self.row, {"error": msg, "host_results": self._host_results}
                 )
+        finally:
+            # Release worker threads after final status emission
+            try:
+                self.thread_pool.shutdown(wait=False)
+            except Exception:
+                logging.exception("UploadWorker: thread pool shutdown failed")
 
     def _upload_host_all(self, host_idx: int) -> str:
         urls = []
-        for f in self.files:
+        for idx, f in enumerate(self.files):
             self._check_control()
             u = self._upload_single(host_idx, f)
             if u is None:
@@ -327,6 +499,13 @@ class UploadWorker(QThread):
                     lst = type_bucket.setdefault(ext, [])
                     if u not in lst:
                         lst.append(u)
+            # Respect host rate limits by pausing before next upload
+            if idx < len(self.files) - 1:
+                logging.debug(
+                    "UploadWorker: sleeping %d seconds before next file",
+                    self.upload_cooldown,
+                )
+                time.sleep(self.upload_cooldown)
         self.upload_results[host_idx]["urls"] = urls
         return "success"
 

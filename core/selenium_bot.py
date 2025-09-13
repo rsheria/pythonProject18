@@ -3394,24 +3394,26 @@ class ForumBotSelenium:
                 return None
 
             # Step 2: Create MultipartEncoder for upload with progress tracking
-            encoder = MultipartEncoder(
-                fields={
-                    'files': (os.path.basename(file_path), open(file_path, 'rb')),
-                    'user': nitroflare_user_hash
-                }
-            )
-
             total_size = os.path.getsize(file_path)
 
-            def upload_callback(monitor):
-                if progress_callback:
-                    progress_callback(monitor.bytes_read, total_size)
+            with open(file_path, 'rb') as f:
+                encoder = MultipartEncoder(
+                    fields={
+                        'files': (os.path.basename(file_path), f),
+                        'user': nitroflare_user_hash
+                    }
+                )
 
-            monitor = MultipartEncoderMonitor(encoder, upload_callback)
+                def upload_callback(monitor):
+                    if progress_callback:
+                        progress_callback(monitor.bytes_read, total_size)
 
-            # Step 3: Upload the file with progress tracking
-            headers = {'Content-Type': monitor.content_type}
-            response = requests.post(server_url, data=monitor, headers=headers)
+                monitor = MultipartEncoderMonitor(encoder, upload_callback)
+
+                # Step 3: Upload the file with progress tracking
+                headers = {'Content-Type': monitor.content_type}
+                response = requests.post(server_url, data=monitor, headers=headers)
+
             logging.debug(f"Nitroflare Response: {response.text}")
 
             if response.status_code == 200:
@@ -3474,32 +3476,33 @@ class ForumBotSelenium:
 
                 if upload_url and sess_id:
                     # Step 2: Create MultipartEncoder for upload with progress tracking
-                    encoder = MultipartEncoder(
-                        fields={
-                            'file': (os.path.basename(file_path), open(file_path, 'rb')),
-                            'sess_id': sess_id,
-                            'utype': 'prem'
-                        }
-                    )
-
-                    # Create a monitor for progress tracking
                     total_size = os.path.getsize(file_path)
                     last_bytes_read = 0
 
-                    def upload_callback(monitor):
-                        nonlocal last_bytes_read
-                        if progress_callback:
-                            bytes_read = monitor.bytes_read
-                            # Only update if there's actual progress
-                            if bytes_read > last_bytes_read:
-                                progress_callback(bytes_read, total_size)
-                                last_bytes_read = bytes_read
+                    with open(file_path, 'rb') as f:
+                        encoder = MultipartEncoder(
+                            fields={
+                                'file': (os.path.basename(file_path), f),
+                                'sess_id': sess_id,
+                                'utype': 'prem'
+                            }
+                        )
 
-                    monitor = MultipartEncoderMonitor(encoder, upload_callback)
+                        def upload_callback(monitor):
+                            nonlocal last_bytes_read
+                            if progress_callback:
+                                bytes_read = monitor.bytes_read
+                                # Only update if there's actual progress
+                                if bytes_read > last_bytes_read:
+                                    progress_callback(bytes_read, total_size)
+                                    last_bytes_read = bytes_read
 
-                    # Step 3: Upload the file with progress tracking
-                    headers = {'Content-Type': monitor.content_type}
-                    response = requests.post(upload_url, data=monitor, headers=headers, verify=False)
+                        monitor = MultipartEncoderMonitor(encoder, upload_callback)
+
+                        # Step 3: Upload the file with progress tracking
+                        headers = {'Content-Type': monitor.content_type}
+                        response = requests.post(upload_url, data=monitor, headers=headers, verify=False)
+
                     logging.debug(f"DDownload Upload Response: {response.text}")
 
                     if response.status_code == 200:
@@ -3547,32 +3550,33 @@ class ForumBotSelenium:
 
                 if upload_url and sess_id:
                     # Step 2: Create MultipartEncoder for upload with progress tracking
-                    encoder = MultipartEncoder(
-                        fields={
-                            'file': (os.path.basename(file_path), open(file_path, 'rb')),
-                            'sess_id': sess_id,
-                            'utype': 'prem'  # Premium user type
-                        }
-                    )
-
-                    # Create a monitor for progress tracking
                     total_size = os.path.getsize(file_path)
                     last_bytes_read = 0
 
-                    def upload_callback(monitor):
-                        nonlocal last_bytes_read
-                        if progress_callback:
-                            bytes_read = monitor.bytes_read
-                            # Only update if there's actual progress
-                            if bytes_read > last_bytes_read:
-                                progress_callback(bytes_read, total_size)
-                                last_bytes_read = bytes_read
+                    with open(file_path, 'rb') as f:
+                        encoder = MultipartEncoder(
+                            fields={
+                                'file': (os.path.basename(file_path), f),
+                                'sess_id': sess_id,
+                                'utype': 'prem'  # Premium user type
+                            }
+                        )
 
-                    monitor = MultipartEncoderMonitor(encoder, upload_callback)
+                        def upload_callback(monitor):
+                            nonlocal last_bytes_read
+                            if progress_callback:
+                                bytes_read = monitor.bytes_read
+                                # Only update if there's actual progress
+                                if bytes_read > last_bytes_read:
+                                    progress_callback(bytes_read, total_size)
+                                    last_bytes_read = bytes_read
 
-                    # Step 3: Upload the file with progress tracking
-                    headers = {'Content-Type': monitor.content_type}
-                    response = requests.post(upload_url, data=monitor, headers=headers, verify=False)
+                        monitor = MultipartEncoderMonitor(encoder, upload_callback)
+
+                        # Step 3: Upload the file with progress tracking
+                        headers = {'Content-Type': monitor.content_type}
+                        response = requests.post(upload_url, data=monitor, headers=headers, verify=False)
+
                     logging.debug(f"KatFile Upload Response: {response.text}")
 
                     if response.status_code == 200:

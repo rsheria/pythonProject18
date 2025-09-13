@@ -786,11 +786,16 @@ class DownloadWorker(QThread):
         self.thread_pool.submit(download_job)
 
     def process_thread_files(self, thread_id):
+        """معالجة محسنة لتجنب كراش الذاكرة"""
         if self._is_cancelled():
             return
-        info = self.thread_info_map[thread_id]
-        row = info["row"]
 
+        info = self.thread_info_map.get(thread_id)
+        if not info:
+            logging.error(f"Thread info not found for {thread_id}")
+            return
+
+        row = info["row"]
         files = info.get("downloaded_files", [])
 
         if not files:
@@ -798,6 +803,8 @@ class DownloadWorker(QThread):
             return
 
         self.status_update.emit(f"Processing '{info['thread_title']}'")
+
+        # إنشاء status object مع معالجة آمنة للذاكرة
         proc_status = OperationStatus(
             section="Downloads",
             item=info["thread_title"],
@@ -805,7 +812,12 @@ class DownloadWorker(QThread):
             stage=OpStage.RUNNING,
             message="Processing files",
         )
-        self.progress_update.emit(proc_status)
+
+        try:
+            self.progress_update.emit(proc_status)
+        except Exception as e:
+            logging.warning(f"Failed to emit progress update: {e}")
+
         try:
             td = Path(self._save_to_for(info["category_name"], thread_id))
             password = (
@@ -813,118 +825,192 @@ class DownloadWorker(QThread):
                 .get(info["thread_title"], {})
                 .get("password")
             )
-            processed = self.file_processor.process_downloads(
-                td,
-                files,
-                info["thread_title"],
-                password,
-            )
 
-            if processed:
-                # <<< START OF FINAL SAFETY FIX FOR MEMORY CRASH >>>
-                root_dir_str = ""
-                final_produced_files = []
+            # معالجة آمنة للملفات مع تحرير الذاكرة
+            processed = None
+            try:
+                processed = self.file_processor.process_downloads(
+                    td, files, info["thread_title"], password,
+                )
 
-                # Unpack results safely
-                if isinstance(processed, tuple) and len(processed) == 2:
-                    root_dir_str, produced_files_str_list = processed
-                    final_produced_files = [str(p) for p in produced_files_str_list if Path(p).exists()]
+                if not processed:
+                    raise ValueError("No processed output returned")
+
+            except Exception as proc_e:
+                logging.error(f"File processing failed: {proc_e}", exc_info=True)
+                # تنظيف الذاكرة في حالة الفشل
+                if 'processed' in locals():
+                    del processed
+                raise
+
+            # معالجة آمنة للنتائج مع حماية من الكراش
+            root_dir_str = ""
+            final_produced_files = []
+
+            try:
+                # فحص نوع البيانات المرجعة
+                if isinstance(processed, tuple) and len(processed) >= 2:
+                    root_dir_str, produced_files_list = processed[0], processed[1]
+                    # تحويل آمن للمسارات
+                    if produced_files_list:
+                        final_produced_files = [
+                            str(p) for p in produced_files_list
+                            if p and Path(str(p)).exists()
+                        ]
+
                 elif isinstance(processed, list):
                     root_dir_str = str(td)
-                    final_produced_files = [str(p) for p in processed if Path(p).exists()]
+                    final_produced_files = [
+                        str(p) for p in processed
+                        if p and Path(str(p)).exists()
+                    ]
+                else:
+                    # نوع غير متوقع من البيانات
+                    logging.warning(f"Unexpected processed data type: {type(processed)}")
+                    root_dir_str = str(td)
+                    final_produced_files = []
 
-                if not final_produced_files:
-                    logging.warning(
-                        "Processing returned no files for '%s'; falling back to raw downloads.",
-                        info["thread_title"],
-                    )
-                    fallback: list[str] = []
+            except Exception as parse_e:
+                logging.error(f"Error parsing processed results: {parse_e}")
+                # استخدام fallback آمن
+                root_dir_str = str(td)
+                final_produced_files = []
+
+            # تنظيف المتغير processed من الذاكرة
+            del processed
+
+            # التأكد من وجود ملفات صالحة
+            if not final_produced_files:
+                logging.warning(f"No valid processed files, using fallback for '{info['thread_title']}'")
+                # البحث عن الملفات الأصلية كـ fallback
+                fallback_files = []
+                try:
                     for f in files:
                         candidate = td / Path(f).name
                         if candidate.exists():
-                            fallback.append(str(candidate))
-                    final_produced_files = fallback
-                if not final_produced_files:
-                    raise FileNotFoundError(
-                        f"Processing returned no valid files for '{info['thread_title']}'."
-                    )
+                            fallback_files.append(str(candidate))
+                    final_produced_files = fallback_files
+                except Exception as fb_e:
+                    logging.error(f"Fallback file search failed: {fb_e}")
 
-                # Find the largest existing file to determine the main file.
-                main_file_path = max(
-                    (Path(p) for p in final_produced_files),
-                    key=lambda p: p.stat().st_size
-                )
-                main_file_str = str(main_file_path)
-                # <<< END OF FINAL SAFETY FIX FOR MEMORY CRASH >>>
+            if not final_produced_files:
+                raise FileNotFoundError(f"No valid files found after processing '{info['thread_title']}'")
 
+            # إيجاد الملف الرئيسي بطريقة آمنة
+            main_file_str = ""
+            try:
+                if final_produced_files:
+                    # ترتيب الملفات حسب الحجم واختيار الأكبر
+                    valid_files = []
+                    for fp in final_produced_files:
+                        try:
+                            path_obj = Path(fp)
+                            if path_obj.exists():
+                                size = path_obj.stat().st_size
+                                valid_files.append((path_obj, size))
+                        except Exception:
+                            continue
+
+                    if valid_files:
+                        # اختيار الملف الأكبر
+                        main_file_path = max(valid_files, key=lambda x: x[1])[0]
+                        main_file_str = str(main_file_path)
+
+            except Exception as main_e:
+                logging.error(f"Error finding main file: {main_e}")
+                if final_produced_files:
+                    main_file_str = str(final_produced_files[0])
+
+            # تحديث التقدم والبيانات
+            try:
                 self.file_progress.emit(row, 100)
-                entry = self.gui.process_threads[info["category_name"]][
-                    info["thread_title"]
-                ]
-                if main_file_str:
-                    entry.update({"file_name": os.path.basename(main_file_str), "file_path": main_file_str})
 
-                self.gui.save_process_threads_data()
-                logging.info(
-                    "Processed main file for '%s': %s", info["thread_title"], main_file_str
+                # تحديث بيانات الـ GUI بطريقة آمنة
+                if main_file_str and info["category_name"] in self.gui.process_threads:
+                    if info["thread_title"] in self.gui.process_threads[info["category_name"]]:
+                        entry = self.gui.process_threads[info["category_name"]][info["thread_title"]]
+                        entry.update({
+                            "file_name": os.path.basename(main_file_str),
+                            "file_path": main_file_str
+                        })
+                        self.gui.save_process_threads_data()
+
+            except Exception as update_e:
+                logging.warning(f"Failed to update GUI data: {update_e}")
+
+            logging.info(f"Processed main file for '{info['thread_title']}': {main_file_str}")
+
+            # إنشاء UploadWorker مع معالجة محسنة للأخطاء
+            try:
+                if not final_produced_files:
+                    raise ValueError("No files available for upload")
+
+                logging.info("Preparing UploadWorker...")
+
+                # جمع معلومات الرفع
+                hosts = getattr(self.gui, "active_upload_hosts", [])
+                package_label = (
+                    "book" if self._are_all_book_files(final_produced_files) else "audio"
                 )
 
-                # This block handles the creation and start of the UploadWorker.
-                # It's a critical point for potential memory errors.
-                try:
-                    logging.info("Preparing to start UploadWorker...")
-                    hosts = getattr(self.gui, "active_upload_hosts", [])
-                    package_label = (
-                        "book"
-                        if self._are_all_book_files(final_produced_files)
-                        else "audio"
-                    )
+                # إنشاء الـ worker مع حماية من الكراش
+                upload_worker = UploadWorker(
+                    self.bot,
+                    row,
+                    root_dir_str,
+                    thread_id,
+                    upload_hosts=hosts,
+                    files=final_produced_files.copy(),  # نسخة آمنة
+                    package_label=package_label,
+                )
 
-                    # Create the worker instance
-                    upload_worker = UploadWorker(
-                        self.bot,
-                        row,
-                        root_dir_str,
-                        thread_id,
-                        upload_hosts=hosts,
-                        files=final_produced_files,
-                        package_label=package_label,
-                    )
+                # تسجيل الـ worker
+                self.gui.register_worker(upload_worker)
 
-                    # Registering the worker connects its signals to the GUI's orchestrator.
-                    # This must be done carefully.
-                    self.gui.register_worker(upload_worker)
+                # بدء الـ worker
+                upload_worker.start()
+                logging.info(f"UploadWorker started successfully for '{info['thread_title']}'")
 
-                    # Start the worker thread.
-                    upload_worker.start()
-                    logging.info(f"UploadWorker started for thread '{info['thread_title']}'.")
+            except Exception as upload_e:
+                logging.error(f"UploadWorker creation failed for '{info['thread_title']}': {upload_e}", exc_info=True)
+                # إرسال إشارة خطأ بدلاً من الكراش
+                self.download_error.emit(row, f"Upload preparation failed: {upload_e}")
+                return
 
-                except Exception as e:
-                    logging.error(f"Failed to create or start UploadWorker for '{info['thread_title']}': {e}",
-                                  exc_info=True)
-                    # Even if upload fails to start, we should not crash.
-                    # We can emit an error signal.
-                    self.download_error.emit(row, f"Failed to start upload: {e}")
+            # تحديث حالة المعالجة
+            proc_status.stage = OpStage.FINISHED
+            proc_status.message = "Processing complete"
+            proc_status.progress = 100
 
-                proc_status.stage = OpStage.FINISHED
-                proc_status.message = "Processing complete"
-                proc_status.progress = 100
+            try:
                 self.progress_update.emit(proc_status)
                 self.download_success.emit(row)
-            else:
-                logging.warning("No processed output for '%s'", info["thread_title"])
-                proc_status.stage = OpStage.ERROR
-                proc_status.message = "Processing failed"
-                self.progress_update.emit(proc_status)
+            except Exception as signal_e:
+                logging.warning(f"Failed to emit completion signals: {signal_e}")
 
         except Exception as e:
-            err = f"Error processing '{info['thread_title']}': {e}"
-            logging.error(err, exc_info=True)
-            self.status_update.emit(err)
-            proc_status.stage = OpStage.ERROR
-            proc_status.message = str(e)
-            self.progress_update.emit(proc_status)
-            self.download_error.emit(row, str(e))
+            err_msg = f"Error processing '{info['thread_title']}': {str(e)}"
+            logging.error(err_msg, exc_info=True)
+
+            # معالجة آمنة للأخطاء
+            try:
+                self.status_update.emit(err_msg)
+                proc_status.stage = OpStage.ERROR
+                proc_status.message = str(e)[:100]  # تحديد طول الرسالة
+                self.progress_update.emit(proc_status)
+                self.download_error.emit(row, str(e)[:200])
+            except Exception as error_signal_e:
+                logging.critical(f"Failed to emit error signals: {error_signal_e}")
+
+        finally:
+            # تنظيف الذاكرة
+            try:
+                if 'final_produced_files' in locals():
+                    del final_produced_files
+                if 'proc_status' in locals():
+                    del proc_status
+            except Exception:
+                pass
 
     def _enqueue_links(self, links, job) -> bool:
         """Send links to JDownloader with a sanitized download path.

@@ -335,30 +335,29 @@ class RapidgatorUploadHandler:
         return data["response"]["upload"]
 
     def _upload_content(self, url: str, progress_cb) -> bool:
-        fields = {
-            "file": (self.filepath.name, open(self.filepath, "rb"), "application/octet-stream")
-        }
-        enc = MultipartEncoder(fields=fields)
-        monitor = (
-            MultipartEncoderMonitor(enc, lambda m: progress_cb(m.bytes_read, enc.len))
-            if progress_cb
-            else enc
-        )
-        headers = {
-            "Content-Type": monitor.content_type,
-            "User-Agent": "Mozilla/5.0",
-        }
-        r = requests.post(url, data=monitor, headers=headers, timeout=300)
-        if r.status_code != 200:
-            logging.error(f"RG upload HTTP error: {r.status_code}")
-            return False
-        try:
-            data = r.json()
-            return data.get("status") == 200
-        except json.JSONDecodeError:
-            return True  # ردّ غير JSON لكن 200 OK
-        finally:
-            monitor = None  # اغلق الملف ضمنيًا
+        with open(self.filepath, "rb") as f:
+            fields = {
+                "file": (self.filepath.name, f, "application/octet-stream")
+            }
+            enc = MultipartEncoder(fields=fields)
+            monitor = (
+                MultipartEncoderMonitor(enc, lambda m: progress_cb(m.bytes_read, enc.len))
+                if progress_cb
+                else enc
+            )
+            headers = {
+                "Content-Type": monitor.content_type,
+                "User-Agent": "Mozilla/5.0",
+            }
+            r = requests.post(url, data=monitor, headers=headers, timeout=300)
+            if r.status_code != 200:
+                logging.error(f"RG upload HTTP error: {r.status_code}")
+                return False
+            try:
+                data = r.json()
+                return data.get("status") == 200
+            except json.JSONDecodeError:
+                return True  # ردّ غير JSON لكن 200 OK
 
     def _poll_for_url(self, upload_id: str,
                       max_secs: int = 180, interval: int = 5) -> Optional[str]:
