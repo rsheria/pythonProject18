@@ -122,9 +122,11 @@ class UploadWorker(QThread):
             return "audio"
         # 3. Archives: use the package_label as a hint
         if ext in {"rar", "zip", "7z"}:
-            # If the worker was created with the 'audio' label, assume archives are audio.
+            # If the worker was created with the 'audio' or 'book' label, assume archives are that type.
             if self.package_label == "audio":
                 return "audio"
+            if self.package_label == "book":
+                return "book"
         # 4. Fallback
         return "other"
 

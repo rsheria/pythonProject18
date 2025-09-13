@@ -164,6 +164,17 @@ class DownloadWorker(QThread):
             "DownloadWorker initialized, max_concurrent=%d", self.max_concurrent
         )
 
+    @staticmethod
+    def _are_all_book_files(files: list[str]) -> bool:
+        """Return True if *files* are all recognised book formats."""
+        if not files:
+            return False
+        book_exts = {".pdf", ".epub", ".mobi", ".azw3", ".cbz", ".cbr"}
+        try:
+            return all(Path(f).suffix.lower() in book_exts for f in files)
+        except Exception:
+            return False
+
     # داخل الكلاس DownloadWorker
     def attach_jd_post(self, jd_post):
         """اربط نفس post() المستخدمة في الإضافة/المتابعة علشان الكانسيل يضرب نفس السيشن"""
@@ -863,6 +874,11 @@ class DownloadWorker(QThread):
                 try:
                     logging.info("Preparing to start UploadWorker...")
                     hosts = getattr(self.gui, "active_upload_hosts", [])
+                    package_label = (
+                        "book"
+                        if self._are_all_book_files(final_produced_files)
+                        else "audio"
+                    )
 
                     # Create the worker instance
                     upload_worker = UploadWorker(
@@ -872,6 +888,7 @@ class DownloadWorker(QThread):
                         thread_id,
                         upload_hosts=hosts,
                         files=final_produced_files,
+                        package_label=package_label,
                     )
 
                     # Registering the worker connects its signals to the GUI's orchestrator.

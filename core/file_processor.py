@@ -332,6 +332,24 @@ class FileProcessor:
             pass
         return books, others
 
+    def split_list_by_media_kind(self, files: list[Path]) -> tuple[list[Path], list[Path]]:
+        """Return ``(book_files, other_files)`` from a provided file list.
+
+        Similar to :func:`split_tree_by_media_kind` but operates on an explicit
+        collection of paths rather than scanning the filesystem again.
+        """
+        books: list[Path] = []
+        others: list[Path] = []
+        for f in files:
+            try:
+                if self._is_readable_book_ext(f):
+                    books.append(f)
+                else:
+                    others.append(f)
+            except Exception:
+                continue
+        return books, others
+
     def process_downloads(
             self,
             thread_dir: Path,
@@ -400,6 +418,7 @@ class FileProcessor:
             if force_books_mode:
                 thread_id = thread_dir.name
                 root_dir = thread_dir
+                processed: list[Path] = []
 
                 for f in moved_files:
                     # ملفات CBR/CBZ تُرفع كما هي (لا تفك)
@@ -411,11 +430,20 @@ class FileProcessor:
                             dest = root_dir / f"{f.stem}_{counter}{f.suffix}"
                             counter += 1
                         shutil.move(str(f), dest)
+                        processed.append(dest)
                         continue
 
                     if self._is_archive_file(f):
                         # عالج الأرشيف؛ لو احتوى كتباً سيتم ضغط الصوتيات داخلياً
-                        self.handle_archive_file(f, thread_dir, cleaned_thread_title, password)
+                        result = self.handle_archive_file(
+                            f, thread_dir, cleaned_thread_title, password
+                        )
+                        self._safely_remove_file(f)
+                        if isinstance(result, tuple):
+                            _, files = result
+                            processed.extend([Path(p) for p in files])
+                        elif result:
+                            processed.extend([Path(p) for p in result])
                     else:
                         # ملف عادي: انقله كما هو
                         root_dir.mkdir(parents=True, exist_ok=True)
@@ -425,9 +453,10 @@ class FileProcessor:
                             dest = root_dir / f"{f.stem}_{counter}{f.suffix}"
                             counter += 1
                         shutil.move(str(f), dest)
+                        processed.append(dest)
 
                 # بعد معالجة الملفات، اضغط أى ملفات غير الكتب فى أرشيف واحد
-                books, others = self.split_tree_by_media_kind(root_dir)
+                books, others = self.split_list_by_media_kind(processed)
                 existing_archives = [p for p in others if self._is_archive_file(p)]
                 others = [p for p in others if not self._is_archive_file(p)]
 
@@ -466,7 +495,7 @@ class FileProcessor:
                             self._safely_remove_file(item)
 
                 logging.info("📚 BOOKS MODE → ROOT=%s, FILES=%d", root_dir, len(produced))
-                return str(root_dir), [str(p) for p in produced]
+                return str(root_dir), [str(p) for p in books]
 
             # --------------------------------------
             # الوضع القديم كما هو (احترام المنطق الحالي)
@@ -868,6 +897,10 @@ class FileProcessor:
                     # No non-book files; just return the book list
                     media_archives = []
                     compression_ok = False
+                    if is_multipart and all_parts:
+                        self._safely_remove_original_archives(archive_path, all_parts)
+                    else:
+                        self._safely_remove_original_archives(archive_path, None)
 
                 produced = books + media_archives
 
