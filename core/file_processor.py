@@ -388,114 +388,173 @@ class FileProcessor:
                 self.recompress_mode,
             )
 
-            # -------------------------------
-            # 🔎 كشف وضع الكتب المقروءة (إجبار عدم الضغط)
-            # -------------------------------
+            # كشف وضع الكتب المقروءة
             force_books_mode = False
 
-            # 1) لو الملفات نفسها كتب/CBZ/CBR → إجبار وضع الكتب
+            # 1) فحص الملفات المنقولة مباشرة
             for f in moved_files:
                 if self._is_readable_book_ext(f):
                     force_books_mode = True
+                    logging.info(f"📚 Direct book file detected: {f.name}")
                     break
 
-            # 2) لو أي أرشيف يحتوي كتباً بالداخل → إجبار وضع الكتب
+            # 2) فحص محتوى الأرشيف
             if not force_books_mode:
                 for f in moved_files:
                     if self._is_archive_file(f):
-                        # CBR/CBZ تعتبر كتاباً قائمًا بذاته
                         if f.suffix.lower() in {".cbz", ".cbr"}:
                             force_books_mode = True
+                            logging.info(f"📚 Comic book archive detected: {f.name}")
                             break
-                        # فحص محتوى الأرشيف سريعاً
                         if self._archive_contains_book_entries(f):
                             force_books_mode = True
+                            logging.info(f"📚 Archive with books detected: {f.name}")
                             break
 
-            # --------------------------------------
-            # 📚 وضع الكتب: عدم الضغط + استخراج الملفات كما هى
-            # --------------------------------------
+            # **وضع الكتب المحسّن**
             if force_books_mode:
-                thread_id = thread_dir.name
-                root_dir = thread_dir
-                processed: list[Path] = []
+                logging.info("🔥 BOOKS MODE ACTIVATED - Enhanced Processing")
 
-                for f in moved_files:
-                    # ملفات CBR/CBZ تُرفع كما هي (لا تفك)
-                    if f.suffix.lower() in {".cbz", ".cbr"}:
-                        root_dir.mkdir(parents=True, exist_ok=True)
-                        dest = root_dir / f.name
-                        counter = 1
-                        while dest.exists():
-                            dest = root_dir / f"{f.stem}_{counter}{f.suffix}"
-                            counter += 1
-                        shutil.move(str(f), dest)
-                        processed.append(dest)
-                        continue
+                # إنشاء مجلد عمل مؤقت خارج thread_dir لتجنب التعارضات
+                work_temp_dir = thread_dir.parent / f"_temp_books_work_{uuid.uuid4().hex[:8]}"
+                work_temp_dir.mkdir(parents=True, exist_ok=True)
 
-                    if self._is_archive_file(f):
-                        # عالج الأرشيف؛ لو احتوى كتباً سيتم ضغط الصوتيات داخلياً
-                        result = self.handle_archive_file(
-                            f, thread_dir, cleaned_thread_title, password
-                        )
-                        self._safely_remove_file(f)
-                        if isinstance(result, tuple):
-                            _, files = result
-                            processed.extend([Path(p) for p in files])
-                        elif result:
-                            processed.extend([Path(p) for p in result])
-                    else:
-                        # ملف عادي: انقله كما هو
-                        root_dir.mkdir(parents=True, exist_ok=True)
-                        dest = root_dir / f.name
-                        counter = 1
-                        while dest.exists():
-                            dest = root_dir / f"{f.stem}_{counter}{f.suffix}"
-                            counter += 1
-                        shutil.move(str(f), dest)
-                        processed.append(dest)
+                try:
+                    books_collection: list[Path] = []
+                    media_collection: list[Path] = []
 
-                # بعد معالجة الملفات، اضغط أى ملفات غير الكتب فى أرشيف واحد
-                books, others = self.split_list_by_media_kind(processed)
-                existing_archives = [p for p in others if self._is_archive_file(p)]
-                others = [p for p in others if not self._is_archive_file(p)]
+                    for f in moved_files:
+                        logging.info(f"🔄 Processing file: {f.name}")
 
-                media_archives: list[Path] = existing_archives[:]
-                if others:
-                    media_dir = root_dir / "_media_tmp"
-                    media_dir.mkdir(exist_ok=True)
-                    for f in others:
-                        shutil.move(str(f), media_dir / f.name)
-                    out_base = root_dir / cleaned_thread_title
-                    success = self._create_rar_archive(media_dir, out_base, cleaned_thread_title)
-                    if success:
-                        media_archives.extend(sorted(root_dir.glob(f"{cleaned_thread_title}.part*.rar")))
-                        single = root_dir / f"{cleaned_thread_title}.rar"
-                        if single.exists():
-                            media_archives.append(single)
-                    else:
-                        restored: list[Path] = []
-                        for f in media_dir.iterdir():
-                            dest = root_dir / f.name
-                            shutil.move(str(f), dest)
-                            restored.append(dest)
-                        media_archives.extend(restored)
-                    self._safely_remove_directory(media_dir)
+                        # CBR/CBZ files - نقل مباشر كما هي
+                        if f.suffix.lower() in {".cbz", ".cbr"}:
+                            dest = work_temp_dir / f.name
+                            shutil.move(str(f), str(dest))
+                            books_collection.append(dest)
+                            logging.info(f"📖 Comic book moved: {f.name}")
+                            continue
 
-                produced = books + media_archives
+                        # ملفات كتب مقروءة عادية - نقل مباشر
+                        if self._is_readable_book_ext(f):
+                            dest = work_temp_dir / f.name
+                            shutil.move(str(f), str(dest))
+                            books_collection.append(dest)
+                            logging.info(f"📖 Ebook moved: {f.name}")
+                            continue
 
-                # 🧹 تنظيف شامل: أبقِ فقط الجذر + الملفات المنتَجة
-                root_dir.mkdir(parents=True, exist_ok=True)
-                keep = {root_dir.resolve()} | {p.resolve() for p in produced}
-                for item in list(thread_dir.iterdir()):
-                    if item.resolve() not in keep:
-                        if item.is_dir():
-                            self._safely_remove_directory(item)
+                        # معالجة الأرشيف
+                        if self._is_archive_file(f):
+                            # استخراج مؤقت
+                            extract_temp = work_temp_dir / f"extract_{uuid.uuid4().hex[:8]}"
+                            extract_temp.mkdir(parents=True, exist_ok=True)
+
+                            if self._extract_archive(f, extract_temp, password):
+                                # تسطيح المجلدات
+                                self._flatten_extracted_directory(extract_temp)
+                                # تعديل الهاش وإزالة الملفات المحظورة
+                                self._modify_files_for_hash_safely(extract_temp)
+                                self._remove_banned_files_safely(extract_temp)
+
+                                # فصل الكتب عن الملفات الأخرى
+                                extracted_books, extracted_others = self.split_tree_by_media_kind(extract_temp)
+
+                                # نقل الكتب للمجموعة النهائية
+                                for book in extracted_books:
+                                    dest = work_temp_dir / book.name
+                                    counter = 1
+                                    while dest.exists():
+                                        dest = work_temp_dir / f"{book.stem}_{counter}{book.suffix}"
+                                        counter += 1
+                                    shutil.move(str(book), str(dest))
+                                    books_collection.append(dest)
+                                    logging.info(f"📖 Extracted book: {dest.name}")
+
+                                # معالجة الملفات الأخرى (صوتيات، صور، etc.)
+                                if extracted_others:
+                                    # ضغط الملفات الأخرى في أرشيف منفصل
+                                    others_temp = work_temp_dir / f"others_{uuid.uuid4().hex[:8]}"
+                                    others_temp.mkdir(parents=True, exist_ok=True)
+
+                                    for other_file in extracted_others:
+                                        shutil.move(str(other_file), others_temp / other_file.name)
+
+                                    # إنشاء أرشيف للملفات الصوتية
+                                    archive_base = work_temp_dir / cleaned_thread_title
+                                    if self._create_rar_archive(others_temp, archive_base, cleaned_thread_title):
+                                        # البحث عن الأرشيف المُنشأ
+                                        created_archives = list(work_temp_dir.glob(f"{cleaned_thread_title}.part*.rar"))
+                                        single_archive = work_temp_dir / f"{cleaned_thread_title}.rar"
+                                        if single_archive.exists():
+                                            created_archives.append(single_archive)
+
+                                        media_collection.extend(created_archives)
+                                        logging.info(f"🎵 Created media archive: {len(created_archives)} parts")
+                                    else:
+                                        # في حالة فشل الضغط، احتفظ بالملفات كما هي
+                                        for other_file in others_temp.iterdir():
+                                            dest = work_temp_dir / other_file.name
+                                            shutil.move(str(other_file), str(dest))
+                                            media_collection.append(dest)
+                                        logging.warning("📦 Archive creation failed, keeping original files")
+
+                                    # تنظيف مجلد الـ others المؤقت
+                                    self._safely_remove_directory(others_temp)
+
+                                # تنظيف مجلد الاستخراج المؤقت
+                                self._safely_remove_directory(extract_temp)
+
+                            # حذف الأرشيف الأصلي
+                            self._safely_remove_file(f)
+
                         else:
-                            self._safely_remove_file(item)
+                            # ملفات أخرى عادية - نقل للمجموعة الإعلامية
+                            dest = work_temp_dir / f.name
+                            shutil.move(str(f), str(dest))
+                            media_collection.append(dest)
+                            logging.info(f"📄 Other file moved: {f.name}")
 
-                logging.info("📚 BOOKS MODE → ROOT=%s, FILES=%d", root_dir, len(produced))
-                return str(root_dir), [str(p) for p in books]
+                    # نقل النتائج النهائية لـ thread_dir
+                    final_files: list[Path] = []
+
+                    # نقل الكتب
+                    for book in books_collection:
+                        dest = thread_dir / book.name
+                        counter = 1
+                        while dest.exists():
+                            dest = thread_dir / f"{book.stem}_{counter}{book.suffix}"
+                            counter += 1
+                        shutil.move(str(book), str(dest))
+                        final_files.append(dest)
+
+                    # نقل الأرشيف الإعلامي
+                    for media in media_collection:
+                        dest = thread_dir / media.name
+                        counter = 1
+                        while dest.exists():
+                            dest = thread_dir / f"{media.stem}_{counter}{media.suffix}"
+                            counter += 1
+                        shutil.move(str(media), str(dest))
+                        final_files.append(dest)
+
+                    # تنظيف مجلد العمل المؤقت
+                    self._safely_remove_directory(work_temp_dir)
+
+                    # فصل النتائج النهائية
+                    final_books, final_media = self.split_list_by_media_kind(final_files)
+
+                    # تنظيف نهائي - إزالة أي ملفات أو مجلدات غير مرغوب فيها
+                    self._cleanup_thread_directory(thread_dir, final_files)
+
+                    logging.info(f"✅ BOOKS MODE SUCCESS → Books: {len(final_books)}, Media: {len(final_media)}")
+                    return str(thread_dir), [str(p) for p in final_books]
+
+                except Exception as books_error:
+                    logging.error(f"❌ Error in books mode: {books_error}", exc_info=True)
+                    # تنظيف في حالة الخطأ
+                    if work_temp_dir.exists():
+                        self._safely_remove_directory(work_temp_dir)
+                    # العودة للنمط العادي
+                    force_books_mode = False
 
             # --------------------------------------
             # الوضع القديم كما هو (احترام المنطق الحالي)
@@ -560,6 +619,28 @@ class FileProcessor:
         except Exception as e:
             logging.error(f"Error in process_downloads: {str(e)}")
             return None
+
+    def _cleanup_thread_directory(self, thread_dir: Path, keep_files: list[Path]) -> None:
+        """تنظيف شامل للمجلد مع الاحتفاظ بالملفات المحددة فقط"""
+        try:
+            keep_resolved = {f.resolve() for f in keep_files}
+            keep_resolved.add(thread_dir.resolve())  # احتفظ بالمجلد نفسه
+
+            # حذف الملفات غير المرغوب فيها
+            for item in thread_dir.rglob('*'):
+                if item.resolve() not in keep_resolved:
+                    if item.is_file():
+                        self._safely_remove_file(item)
+                    elif item.is_dir() and not any(item.iterdir()):
+                        try:
+                            item.rmdir()
+                        except:
+                            pass
+
+            logging.info(f"🧹 Thread directory cleaned, kept {len(keep_files)} files")
+
+        except Exception as e:
+            logging.warning(f"Cleanup warning: {e}")
 
     # file_processor.py: دوال المانيفست والتصنيف (لا تغيّر التواقيع العامة)
 
