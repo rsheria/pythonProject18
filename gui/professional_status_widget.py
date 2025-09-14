@@ -16,8 +16,9 @@ This transforms the "completely mess" into PURE PROFESSIONAL MAGIC!
 """
 
 import logging
+import threading
 from typing import Dict, Optional, Set
-from datetime import datetime
+from datetime import datetime, timedelta
 from PyQt5.QtWidgets import (
     QWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QHeaderView,
     QProgressBar, QLabel, QHBoxLayout, QPushButton, QStyleOptionProgressBar,
@@ -191,6 +192,8 @@ class StatusRow:
         self.operation_item: Optional[QTableWidgetItem] = None
         self.status_item: Optional[QTableWidgetItem] = None
         self.progress_bar: Optional[ProfessionalProgressBar] = None
+        self.speed_item: Optional[QTableWidgetItem] = None
+        self.eta_item: Optional[QTableWidgetItem] = None
         self.details_item: Optional[QTableWidgetItem] = None
         self.duration_item: Optional[QTableWidgetItem] = None
 
@@ -198,7 +201,9 @@ class StatusRow:
         """Check if row has all required UI items"""
         return all([
             self.section_item, self.item_item, self.operation_item,
-            self.status_item, self.progress_bar, self.details_item, self.duration_item
+            self.status_item, self.progress_bar,
+            self.speed_item, self.eta_item,
+            self.details_item, self.duration_item
         ])
 
 
@@ -250,6 +255,9 @@ class ProfessionalStatusWidget(QWidget):
         # Thread safety
         self._ui_mutex = QMutex()
 
+        # Global cancel event for workers
+        self.cancel_event = threading.Event()
+
         # Status manager connection
         self.status_manager = get_status_manager()
 
@@ -289,9 +297,17 @@ class ProfessionalStatusWidget(QWidget):
 
         # Status table
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
+        self.table.setColumnCount(9)
         self.table.setHorizontalHeaderLabels([
-            "Section", "Item", "Operation", "Status", "Progress", "Details", "Duration"
+            "Section",
+            "Item",
+            "Operation",
+            "Status",
+            "Progress",
+            "Speed",
+            "ETA",
+            "Details",
+            "Duration",
         ])
 
         # Configure table
@@ -300,8 +316,10 @@ class ProfessionalStatusWidget(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)  # Operation
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)  # Status
         self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Fixed)             # Progress
-        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)           # Details
-        self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)  # Duration
+        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)  # Speed
+        self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)  # ETA
+        self.table.horizontalHeader().setSectionResizeMode(7, QHeaderView.Stretch)           # Details
+        self.table.horizontalHeader().setSectionResizeMode(8, QHeaderView.ResizeToContents)  # Duration
 
         self.table.setColumnWidth(4, 150)  # Progress bar width
 
@@ -315,6 +333,11 @@ class ProfessionalStatusWidget(QWidget):
         # Statistics footer
         self.stats_label = QLabel("Ready - Waiting for operations...")
         layout.addWidget(self.stats_label)
+
+        # Cancel button
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.clicked.connect(self.on_cancel_clicked)
+        layout.addWidget(self.btn_cancel)
 
         # Apply theme styles after all UI elements are created
         self._apply_theme_styles()
@@ -384,6 +407,26 @@ class ProfessionalStatusWidget(QWidget):
                 padding: 4px;
                 font-size: {t.FONT_SIZE_SMALL};
                 font-family: {t.FONT_FAMILY};
+            }}
+        """)
+
+        # Cancel button styling
+        error_color = getattr(t, "ERROR", t.PRIMARY)
+        text_on_error = getattr(t, "TEXT_ON_PRIMARY", "#ffffff")
+        error_hover = getattr(t, "ERROR_HOVER", error_color)
+        self.btn_cancel.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {error_color};
+                color: {text_on_error};
+                border: none;
+                padding: 6px 12px;
+                border-radius: {t.RADIUS_SMALL};
+                font-family: {t.FONT_FAMILY};
+                font-size: {t.FONT_SIZE_NORMAL};
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {error_hover};
             }}
         """)
 
@@ -539,6 +582,31 @@ class ProfessionalStatusWidget(QWidget):
             if 'details' in changes:
                 self._update_details_cell(status_row, changes['details'])
 
+            # Update speed
+            speed = None
+            if 'transfer_speed' in changes:
+                speed = changes['transfer_speed']
+            elif operation:
+                speed = operation.transfer_speed
+            if speed is not None:
+                self._update_speed_cell(status_row, speed)
+
+            # Update ETA
+            eta_seconds = None
+            if 'estimated_completion' in changes:
+                eta_dt = changes['estimated_completion']
+                if isinstance(eta_dt, str):
+                    try:
+                        eta_dt = datetime.fromisoformat(eta_dt)
+                    except Exception:
+                        eta_dt = None
+                if eta_dt:
+                    eta_seconds = max(0, (eta_dt - datetime.now()).total_seconds())
+            elif operation and operation.estimated_completion:
+                eta_seconds = max(0, (operation.estimated_completion - datetime.now()).total_seconds())
+            if eta_seconds is not None:
+                self._update_eta_cell(status_row, eta_seconds)
+
             # Update statistics
             self._update_statistics()
             self._schedule_status_save()
@@ -654,16 +722,42 @@ class ProfessionalStatusWidget(QWidget):
                 status_row.progress_bar = None
                 self.table.setItem(row, 4, QTableWidgetItem(f"{progress}%"))
 
+            # Speed cell
+            speed = operation_data.get('transfer_speed', 0)
+            speed_text = self._format_speed(speed)
+            status_row.speed_item = QTableWidgetItem(speed_text)
+            status_row.speed_item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row, 5, status_row.speed_item)
+
+            # ETA cell
+            eta_seconds = None
+            if operation_data.get('estimated_completion'):
+                try:
+                    eta_dt = datetime.fromisoformat(operation_data['estimated_completion'])
+                    eta_seconds = max(0, (eta_dt - datetime.now()).total_seconds())
+                except Exception:
+                    eta_seconds = None
+            else:
+                total_bytes = operation_data.get('total_bytes', 0)
+                transferred = operation_data.get('bytes_transferred', 0)
+                if speed and speed > 0 and total_bytes > 0:
+                    remaining = max(0, total_bytes - transferred)
+                    eta_seconds = remaining / speed
+            eta_text = self._format_eta(eta_seconds)
+            status_row.eta_item = QTableWidgetItem(eta_text)
+            status_row.eta_item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row, 6, status_row.eta_item)
+
             # Details cell
             details = operation_data.get('details', 'Initializing...')
             status_row.details_item = QTableWidgetItem(details)
             status_row.details_item.setToolTip(details)  # Show full text on hover
-            self.table.setItem(row, 5, status_row.details_item)
+            self.table.setItem(row, 7, status_row.details_item)
 
             # Duration cell
             status_row.duration_item = QTableWidgetItem("0s")
             status_row.duration_item.setTextAlignment(Qt.AlignCenter)
-            self.table.setItem(row, 6, status_row.duration_item)
+            self.table.setItem(row, 8, status_row.duration_item)
 
         except Exception as e:
             logger.error(f"Error in _create_complete_row: {e}", exc_info=True)
@@ -696,6 +790,45 @@ class ProfessionalStatusWidget(QWidget):
         if status_row.details_item:
             status_row.details_item.setText(details)
             status_row.details_item.setToolTip(details)
+
+    @crash_safe_execute(max_retries=1, default_return=None, severity=ErrorSeverity.MEDIUM)
+    def _update_speed_cell(self, status_row: StatusRow, speed: float):
+        """Update speed cell"""
+        if status_row.speed_item:
+            status_row.speed_item.setText(self._format_speed(speed))
+
+    @crash_safe_execute(max_retries=1, default_return=None, severity=ErrorSeverity.MEDIUM)
+    def _update_eta_cell(self, status_row: StatusRow, eta_seconds: float):
+        """Update ETA cell"""
+        if status_row.eta_item:
+            status_row.eta_item.setText(self._format_eta(eta_seconds))
+
+    def _format_speed(self, bytes_per_sec: float) -> str:
+        """Format transfer speed for display"""
+        if not bytes_per_sec or bytes_per_sec <= 0:
+            return "--"
+        speed = float(bytes_per_sec)
+        units = ["B/s", "KB/s", "MB/s", "GB/s"]
+        idx = 0
+        while speed >= 1024 and idx < len(units) - 1:
+            speed /= 1024
+            idx += 1
+        return f"{speed:.1f} {units[idx]}"
+
+    def _format_eta(self, seconds: Optional[float]) -> str:
+        """Format ETA seconds into human-readable text"""
+        if seconds is None or seconds <= 0:
+            return "--"
+        seconds = int(seconds)
+        mins, secs = divmod(seconds, 60)
+        hours, mins = divmod(mins, 60)
+        parts = []
+        if hours:
+            parts.append(f"{hours}h")
+        if mins:
+            parts.append(f"{mins}m")
+        parts.append(f"{secs}s")
+        return " ".join(parts)
 
     def _apply_status_styling(self, item: QTableWidgetItem, status: str):
         """Apply beautiful status-based styling"""
@@ -877,6 +1010,8 @@ class ProfessionalStatusWidget(QWidget):
                         "status": operation.status.value if hasattr(operation.status, 'value') else str(operation.status),
                         "details": operation.details,
                         "progress": operation.progress,
+                        "transfer_speed": operation.transfer_speed,
+                        "estimated_completion": operation.estimated_completion.isoformat() if operation.estimated_completion else None,
                         "created_at": operation.created_at.isoformat() if hasattr(operation, 'created_at') else None,
                         "completed_at": operation.completed_at.isoformat() if hasattr(operation, 'completed_at') else None
                     }
@@ -989,10 +1124,37 @@ class ProfessionalStatusWidget(QWidget):
                 if hasattr(op, 'message'):
                     updates['details'] = op.message
 
+                # Speed
+                speed = None
+                if hasattr(op, 'speed'):
+                    speed = op.speed
+                elif hasattr(op, 'transfer_speed'):
+                    speed = op.transfer_speed
+                if speed is not None:
+                    updates['transfer_speed'] = speed
+
+                # ETA (seconds)
+                eta_seconds = None
+                if hasattr(op, 'eta'):
+                    try:
+                        eta_seconds = float(op.eta)
+                        updates['estimated_completion'] = datetime.now() + timedelta(seconds=eta_seconds)
+                    except Exception:
+                        eta_seconds = None
+
                 # Update through StatusManager for real-time display!
                 if updates:
                     self.status_manager.update_operation(operation_id, **updates)
                     logger.info(f"📊 UPDATED: {section}:{item} - {updates.get('details', '')} ({int(updates.get('progress', 0) * 100)}%)")
+
+                # Immediate speed/ETA update
+                if speed is not None or eta_seconds is not None:
+                    status_row = self._operation_rows.get(operation_id)
+                    if status_row:
+                        if speed is not None:
+                            self._update_speed_cell(status_row, speed)
+                        if eta_seconds is not None:
+                            self._update_eta_cell(status_row, eta_seconds)
 
         except Exception as e:
             logger.error(f"Error in on_progress_update: {e}", exc_info=True)
@@ -1053,6 +1215,9 @@ class ProfessionalStatusWidget(QWidget):
                     if operation:
                         operation.status = OperationStatus(op_data["status"])
                         operation.progress = op_data["progress"]
+                        operation.transfer_speed = op_data.get("transfer_speed", 0.0)
+                        if op_data.get("estimated_completion"):
+                            operation.estimated_completion = datetime.fromisoformat(op_data["estimated_completion"])
                         if op_data.get("created_at"):
                             operation.created_at = datetime.fromisoformat(op_data["created_at"])
                         if op_data.get("completed_at"):
@@ -1103,8 +1268,14 @@ class ProfessionalStatusWidget(QWidget):
             logger.error(f"Failed to complete operation: {e}")
 
     def connect_worker(self, worker):
-        """Connect worker signals for live tracking updates"""
+        """Connect worker signals for live tracking updates and cancellation"""
         try:
+            # Propagate cancel event to worker
+            if hasattr(worker, 'set_cancel_event'):
+                worker.set_cancel_event(self.cancel_event)
+            elif hasattr(worker, 'cancel_event'):
+                worker.cancel_event = self.cancel_event
+
             # Track live thread discoveries for real-time progress updates
             if hasattr(worker, 'thread_discovered'):
                 worker.thread_discovered.connect(self._on_live_thread_discovered, Qt.QueuedConnection)
@@ -1159,3 +1330,15 @@ class ProfessionalStatusWidget(QWidget):
     # It was redundant and conflicted with the main 'on_progress_update' handler,
     # causing a race condition that prevented proper UI updates.
     # All progress updates now flow through the orchestrator to 'on_progress_update'.
+
+    @pyqtSlot()
+    def on_cancel_clicked(self):
+        """Handle user pressing the cancel button"""
+        try:
+            self.cancel_event.set()
+            parent = self.parent()
+            if parent and hasattr(parent, "cancel_downloads"):
+                parent.cancel_downloads()
+            logger.info("User requested cancellation of running operations")
+        except Exception as e:
+            logger.debug(f"cancel_downloads call failed: {e}")
