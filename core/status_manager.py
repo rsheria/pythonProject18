@@ -246,14 +246,45 @@ class StatusManager(QObject):
                 operation = self._operations[operation_id]
                 old_status = operation.status
 
+                # Convert status strings to enum before applying changes
+                if 'status' in changes:
+                    new_status = changes['status']
+                    if not isinstance(new_status, OperationStatus):
+                        try:
+                            new_status = OperationStatus(new_status)
+                        except Exception:
+                            logger.warning(f"Unknown status value: {new_status}")
+                            new_status = operation.status
+                    changes['status'] = new_status
+
+                # Normalise progress values and auto-promote status
+                if 'progress' in changes:
+                    progress = changes['progress']
+                    # Some callers still send 0-100 values - normalise to 0-1
+                    if isinstance(progress, (int, float)) and progress > 1:
+                        progress = progress / 100.0
+                    progress = max(0.0, min(1.0, float(progress)))
+                    changes['progress'] = progress
+
+                    # Determine the current status considering incoming changes
+                    current_status = changes.get('status', operation.status)
+
+                    # If progress is reported but status is still initializing,
+                    # automatically switch to RUNNING for a proper stage flow
+                    if current_status in (OperationStatus.PENDING, OperationStatus.INITIALIZING) and progress > 0:
+                        changes['status'] = OperationStatus.RUNNING
+
+                    # If progress reaches 100% and no explicit status provided,
+                    # mark the operation as completed to avoid lingering RUNNING state
+                    if progress >= 1.0 and 'status' not in changes and operation.status == OperationStatus.RUNNING:
+                        changes['status'] = OperationStatus.COMPLETED
+
                 # Apply changes to operation state
                 operation.update(**changes)
 
                 # Handle status transitions
                 if 'status' in changes:
                     new_status = changes['status']
-                    if isinstance(new_status, str):
-                        new_status = OperationStatus(new_status)
 
                     # Update statistics on status changes
                     if old_status in [OperationStatus.INITIALIZING, OperationStatus.RUNNING] and new_status in [OperationStatus.COMPLETED, OperationStatus.FAILED, OperationStatus.CANCELLED]:

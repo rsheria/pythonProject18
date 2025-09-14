@@ -641,6 +641,8 @@ class ProfessionalStatusWidget(QWidget):
                 progress = operation_data.get('progress_percentage', 0)
                 status_row.progress_bar.update_progress(progress, status, operation_type=op_type)
                 status_row.progress_bar.setVisible(True)  # Ensure it's visible
+                # Insert placeholder item to guarantee column rendering
+                self.table.setItem(row, 4, QTableWidgetItem())
                 self.table.setCellWidget(row, 4, status_row.progress_bar)
                 # Force immediate display
                 status_row.progress_bar.show()
@@ -912,9 +914,14 @@ class ProfessionalStatusWidget(QWidget):
                 logger.info(f"  Current operations in StatusManager: {len(all_ops)}")
 
                 for operation in all_ops:
-                    if operation.section == section and operation.item == item and not operation.is_finished:
+                    if operation.section == section and operation.item == item:
                         operation_id = operation.operation_id
                         logger.info(f"  Found existing operation {operation_id} for {section}:{item}")
+
+                        # If the operation is already finished, ignore duplicate finish signals
+                        if operation.is_finished:
+                            logger.info("  Operation already finished - ignoring update")
+                            return
 
                         # CRITICAL: Check if this operation has a UI row!
                         if operation_id not in self._operation_rows:
@@ -952,24 +959,31 @@ class ProfessionalStatusWidget(QWidget):
                 # Get stage/status
                 if hasattr(op, 'stage'):
                     stage = op.stage
-                    if hasattr(stage, 'value'):
-                        stage_str = stage.value
-                    else:
+
+                    # Enums from orchestrator use integer values - always prefer name when available
+                    stage_str = getattr(stage, 'name', None)
+                    if not stage_str:
                         stage_str = str(stage)
 
-                    # Map stage to status
-                    if stage_str == "FINISHED" or stage_str == "COMPLETED":
+                    stage_str = stage_str.upper()
+
+                    # Map stage to status in StatusManager terms
+                    if stage_str in {"FINISHED", "COMPLETED"}:
                         updates['status'] = OperationStatus.COMPLETED
-                    elif stage_str == "RUNNING" or stage_str == "IN_PROGRESS":
+                    elif stage_str in {"RUNNING", "IN_PROGRESS"}:
                         updates['status'] = OperationStatus.RUNNING
-                    elif stage_str == "ERROR" or stage_str == "FAILED":
+                    elif stage_str in {"ERROR", "FAILED"}:
                         updates['status'] = OperationStatus.FAILED
-                    elif stage_str == "INITIALIZING":
+                    elif stage_str in {"INITIALIZING", "QUEUED"}:
                         updates['status'] = OperationStatus.INITIALIZING
 
                 # Get progress percentage
                 if hasattr(op, 'progress'):
-                    updates['progress'] = op.progress / 100.0  # Convert to 0-1 range
+                    progress = op.progress
+                    # Accept either 0-1 or 0-100 inputs from orchestrator
+                    if isinstance(progress, (int, float)) and progress > 1:
+                        progress = progress / 100.0
+                    updates['progress'] = progress
 
                 # Get message/details
                 if hasattr(op, 'message'):
