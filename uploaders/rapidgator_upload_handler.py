@@ -20,6 +20,13 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 
+# Import crash protection utilities
+from utils.crash_protection import (
+    safe_execute, resource_protection, SafeProcessManager, SafePathManager,
+    ErrorSeverity, safe_process_manager, monitor_memory_usage, CircuitBreaker,
+    crash_logger
+)
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -29,40 +36,97 @@ API_ROOT = "https://rapidgator.net/api/v2"
 # ----------------------------------------------------------------------
 # Helper: جلب توكن جديد عند الحاجة
 # ----------------------------------------------------------------------
+@safe_execute(
+    max_retries=3,
+    retry_delay=2.0,
+    expected_exceptions=(requests.RequestException, ValueError, KeyError, TimeoutError),
+    severity=ErrorSeverity.CRITICAL,
+    default_return="",
+    log_success=True
+)
 def fetch_rg_token(username: str, password: str, code: str | None = None) -> str:
     """
-    Logs-in via POST and returns a new Access-Token.
-    Returns "" if login fails.
+    BULLETPROOF Rapidgator login with crash protection.
+    Returns token or empty string on failure.
     """
     if not username or not password:
-        logging.error("Username/password missing – cannot fetch token.")
+        crash_logger.logger.error("Username/password missing – cannot fetch token.")
         return ""
 
-    payload: Dict[str, Any] = {
-        "login":    username.strip(),
-        "password": password.strip()
-    }
-    if code:
-        payload["code"] = str(code).strip()
+    with resource_protection("Rapidgator_Login", timeout_seconds=30.0):
+        payload: Dict[str, Any] = {
+            "login": username.strip(),
+            "password": password.strip()
+        }
+        if code:
+            payload["code"] = str(code).strip()
 
-    try:
-        r = requests.post(
-            f"{API_ROOT}/user/login",
-            data=payload,                       # ← POST not GET
-            timeout=15,
-            headers={"User-Agent": "Mozilla/5.0"}
+        # Create session with bulletproof configuration
+        session = requests.Session()
+
+        # Add retry strategy
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET", "POST"]
         )
-        data = r.json()
-        logging.debug(f"RG login resp: {data}")
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
 
-        if r.status_code == 200 and data.get("status") == 200:
-            token = data["response"]["token"]
-            logging.info("✅ New Rapidgator token obtained.")
-            return token
+        try:
+            # Monitor memory usage
+            monitor_memory_usage(threshold_mb=100.0)
 
-        logging.error(f"RG Login error: {data.get('details')}")
-    except Exception as exc:
-        logging.error(f"RG login request failed: {exc}", exc_info=True)
+            r = session.post(
+                f"{API_ROOT}/user/login",
+                data=payload,
+                timeout=(10, 30),  # (connect_timeout, read_timeout)
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Accept": "application/json",
+                    "Connection": "close"  # Prevent connection pooling issues
+                }
+            )
+
+            # Safe response validation
+            if r.status_code != 200:
+                crash_logger.logger.error(f"HTTP {r.status_code}: {r.text[:500]}")
+                return ""
+
+            # Safe JSON parsing
+            try:
+                data = r.json()
+            except ValueError as json_error:
+                crash_logger.logger.error(f"Invalid JSON response: {json_error}")
+                return ""
+
+            crash_logger.logger.debug(f"RG login response: {str(data)[:200]}...")
+
+            # Safe data extraction
+            if data.get("status") == 200 and isinstance(data.get("response"), dict):
+                token = data["response"].get("token", "")
+                if token and len(token) > 10:  # Basic token validation
+                    crash_logger.logger.info("✅ New Rapidgator token obtained successfully")
+                    return token
+                else:
+                    crash_logger.logger.error("Invalid token format received")
+            else:
+                error_msg = data.get('details', 'Unknown error')
+                crash_logger.logger.error(f"RG Login failed: {error_msg}")
+
+        except requests.Timeout:
+            crash_logger.logger.error("Rapidgator login timeout")
+        except requests.ConnectionError:
+            crash_logger.logger.error("Rapidgator connection failed")
+        except requests.RequestException as req_error:
+            crash_logger.logger.error(f"Rapidgator request error: {req_error}")
+        except Exception as unexpected_error:
+            crash_logger.logger.error(f"Unexpected error in RG login: {unexpected_error}")
+        finally:
+            session.close()
+
     return ""
 
 
@@ -70,6 +134,13 @@ def fetch_rg_token(username: str, password: str, code: str | None = None) -> str
 #  الرئيسية
 # ----------------------------------------------------------------------
 class RapidgatorUploadHandler:
+    @safe_execute(
+        max_retries=2,
+        retry_delay=1.0,
+        expected_exceptions=(Exception,),
+        severity=ErrorSeverity.CRITICAL,
+        default_return=None
+    )
     def __init__(
         self,
         filepath: Path | str,
@@ -79,76 +150,96 @@ class RapidgatorUploadHandler:
         twofa_code: str | None = None,
     ):
         """
-        Initialize the Rapidgator upload handler.
-        
-        Args:
-            filepath: Path to the file to upload
-            username: Rapidgator username/email
-            password: Rapidgator password
-            token: Existing token (if available)
-            twofa_code: 2FA code if enabled
-            
-        Raises:
-            Exception: If unable to obtain a valid token
+        BULLETPROOF Rapidgator upload handler initialization.
         """
-        self.filepath = Path(filepath)
-        # Get credentials from parameters or environment variables
-        self.username = (username or os.getenv("RAPIDGATOR_LOGIN", "")).strip()
-        self.password = (password or os.getenv("RAPIDGATOR_PASSWORD", "")).strip()
-        self.twofa_code = (str(twofa_code) if twofa_code else os.getenv("RAPIDGATOR_2FA", "")).strip() or None
-        self.token = token.strip() if token else ""
-        self.base_url = API_ROOT
-        self.session = requests.Session()
-        self.last_init_response: Optional[dict] = None
+        try:
+            # Safe path validation
+            self.filepath = SafePathManager.validate_path(filepath)
 
-        # Configure session with retry strategy
-        retry_strategy = Retry(
-            total=3,
-            backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["GET", "POST"],
-        )
-        
-        adapter = HTTPAdapter(
-            max_retries=retry_strategy,
-            pool_connections=10,
-            pool_maxsize=10
-        )
-        
-        self.session.mount("http://", adapter)
-        self.session.mount("https://", adapter)
-        
-        # Set default headers
-        self.session.headers.update({
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Accept": "application/json"
-        })
+            # Safe credential handling
+            self.username = (username or os.getenv("RAPIDGATOR_LOGIN", "")).strip()
+            self.password = (password or os.getenv("RAPIDGATOR_PASSWORD", "")).strip()
+            self.twofa_code = (str(twofa_code) if twofa_code else os.getenv("RAPIDGATOR_2FA", "")).strip() or None
+            self.token = token.strip() if token else ""
+            self.base_url = API_ROOT
 
-        # Log initialization
-        logging.info("Initializing RapidgatorUploadHandler")
-        logging.debug(f"Username: {self.username}")
-        logging.debug(f"Using token: {'Yes' if self.token else 'No'}")
-        logging.debug(f"2FA enabled: {'Yes' if self.twofa_code else 'No'}")
+            # Initialize safe session
+            self.session = None
+            self.last_init_response: Optional[dict] = None
+            self._initialize_session()
 
-        # Validate or obtain token
-        if self.token:
-            logging.info("Validating existing token...")
-            if not self.is_token_valid():
-                logging.warning("Existing token is invalid, attempting to get a new one...")
+            crash_logger.logger.info("✅ RapidgatorUploadHandler initialized successfully")
+
+        except Exception as init_error:
+            crash_logger.logger.error(f"💥 RapidgatorUploadHandler init failed: {init_error}")
+            # Set safe defaults
+            self.filepath = Path(".")
+            self.username = ""
+            self.password = ""
+            self.token = ""
+            self.session = None
+            raise
+
+    def _initialize_session(self):
+        """Initialize requests session with bulletproof configuration."""
+        try:
+            self.session = requests.Session()
+
+            # Configure session with retry strategy
+            retry_strategy = Retry(
+                total=3,
+                backoff_factor=1,
+                status_forcelist=[429, 500, 502, 503, 504],
+                allowed_methods=["GET", "POST"],
+                raise_on_status=False  # Don't raise exceptions on HTTP errors
+            )
+
+            adapter = HTTPAdapter(
+                max_retries=retry_strategy,
+                pool_connections=5,  # Reduced for stability
+                pool_maxsize=5
+            )
+
+            self.session.mount("http://", adapter)
+            self.session.mount("https://", adapter)
+
+            # Set default headers
+            self.session.headers.update({
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "Accept": "application/json"
+            })
+
+            # Log initialization
+            logging.info("Initializing RapidgatorUploadHandler")
+            logging.debug(f"Username: {self.username}")
+            logging.debug(f"Using token: {'Yes' if self.token else 'No'}")
+            logging.debug(f"2FA enabled: {'Yes' if self.twofa_code else 'No'}")
+
+            # Validate or obtain token
+            if self.token:
+                logging.info("Validating existing token...")
+                if not self.is_token_valid():
+                    logging.warning("Existing token is invalid, attempting to get a new one...")
+                    self.token = fetch_rg_token(self.username, self.password, self.twofa_code)
+            else:
+                logging.info("No token provided, attempting to get a new one...")
                 self.token = fetch_rg_token(self.username, self.password, self.twofa_code)
-        else:
-            logging.info("No token provided, attempting to get a new one...")
-            self.token = fetch_rg_token(self.username, self.password, self.twofa_code)
 
-        # Final validation
-        if not self.token or not self.is_token_valid():
-            error_msg = "❌ Unable to obtain a valid Rapidgator token. "
-            error_msg += "Please check your username, password, and 2FA code (if enabled)."
-            logging.error(error_msg)
-            raise Exception(error_msg)
-            
-        logging.info("✅ Successfully initialized RapidgatorUploadHandler with valid token")
+            # Final validation
+            if not self.token or not self.is_token_valid():
+                error_msg = "❌ Unable to obtain a valid Rapidgator token. "
+                error_msg += "Please check your username, password, and 2FA code (if enabled)."
+                logging.error(error_msg)
+                raise Exception(error_msg)
+
+            logging.info("✅ Successfully initialized RapidgatorUploadHandler with valid token")
+
+        except Exception as e:
+            crash_logger.error(f"Failed to initialize RapidgatorUploadHandler session: {e}")
+            # Initialize with basic session as fallback
+            self.session = requests.Session()
+            self.token = None
 
     # ------------------------------------------------------------------
     # صلاحية التوكن

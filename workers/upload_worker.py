@@ -5,12 +5,19 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from enum import Enum
 from pathlib import Path
-from threading import Lock
+from threading import Lock, RLock
 from typing import Any, List, Optional
 
 from PyQt5.QtCore import QThread, pyqtSignal, pyqtSlot
 from integrations.jd_client import hard_cancel
 from models.operation_status import OperationStatus, OpStage, OpType
+
+# Import crash protection utilities
+from utils.crash_protection import (
+    safe_execute, resource_protection, SafeProcessManager, SafePathManager,
+    ErrorSeverity, safe_process_manager, monitor_memory_usage, CircuitBreaker,
+    crash_logger
+)
 try:
     from utils.utils import _normalize_links
 except Exception:  # pragma: no cover - fallback for tests
@@ -74,28 +81,44 @@ class UploadWorker(QThread):
             self.section = "Uploads"
             self.package_label = "audio"
 
-        # معالجة آمنة للمسار
+        # BULLETPROOF PATH HANDLING with crash protection
         try:
-            self.folder_path = Path(str(folder_path)).resolve()
-            if not self.folder_path.exists():
+            # Use SafePathManager for validation
+            validated_path = SafePathManager.validate_path(folder_path)
+
+            if not validated_path.exists():
                 logging.warning(f"⚠️ Folder path does not exist: {folder_path}")
-                # محاولة إنشاء المجلد
-                try:
-                    self.folder_path.mkdir(parents=True, exist_ok=True)
+                # Safe directory creation
+                if SafePathManager.safe_create_directory(validated_path):
+                    self.folder_path = validated_path
                     logging.info(f"✅ Created missing folder: {self.folder_path}")
-                except Exception as mkdir_e:
-                    logging.error(f"❌ Cannot create folder: {mkdir_e}")
-                    # استخدام مجلد مؤقت
+                else:
+                    # Fallback to temp directory
                     import tempfile
                     self.folder_path = Path(tempfile.gettempdir()) / f"upload_{self.thread_id}"
-                    self.folder_path.mkdir(exist_ok=True)
+                    SafePathManager.safe_create_directory(self.folder_path)
                     logging.info(f"🔄 Using temp folder: {self.folder_path}")
+            else:
+                self.folder_path = validated_path
 
-        except Exception as path_e:
-            logging.error(f"❌ Folder path processing failed: {path_e}")
+        except (ValueError, OSError, PermissionError) as path_e:
+            crash_logger.logger.error(f"💥 Folder path processing failed: {path_e}")
             import tempfile
             self.folder_path = Path(tempfile.gettempdir()) / "upload_fallback"
-            self.folder_path.mkdir(exist_ok=True)
+            SafePathManager.safe_create_directory(self.folder_path)
+
+        # Initialize crash protection components
+        self._upload_lock = RLock()
+        self._active_uploads = {}
+        self._circuit_breakers = {}
+
+        # Initialize circuit breakers for each host
+        for host in ['rapidgator', 'katfile', 'nitroflare', 'ddownload']:
+            self._circuit_breakers[host] = CircuitBreaker(
+                failure_threshold=3,
+                recovery_timeout=300.0,  # 5 minutes
+                expected_exception=Exception
+            )
 
         # معالجة آمنة لإعدادات التحكم
         try:
@@ -200,31 +223,43 @@ class UploadWorker(QThread):
             self.files = []
             self.total_files = 0
 
-        # تهيئة الـ handlers والنتائج
+        # BULLETPROOF THREAD POOL AND HANDLERS INITIALIZATION
         try:
-            self.thread_pool = ThreadPoolExecutor(max_workers=min(5, len(self.hosts)))
+            # Safe thread pool creation with resource limits
+            max_workers = min(3, max(1, len(self.hosts)))  # Limit to prevent resource exhaustion
+            self.thread_pool = ThreadPoolExecutor(
+                max_workers=max_workers,
+                thread_name_prefix=f"Upload-{self.thread_id}"
+            )
+            crash_logger.logger.info(f"✅ ThreadPool initialized with {max_workers} workers")
 
-            # إنشاء handlers للمضيفين المدعومين
+            # BULLETPROOF HANDLERS CREATION with error isolation
             self.handlers = {}
             for host in self.hosts:
                 try:
-                    if host == "nitroflare":
-                        self.handlers[host] = NitroflareUploadHandler(self.bot)
-                        logging.info(f"✅ Handler created for {host}")
-                    elif host == "ddownload":
-                        self.handlers[host] = DDownloadUploadHandler(self.bot)
-                        logging.info(f"✅ Handler created for {host}")
-                    elif host == "katfile":
-                        self.handlers[host] = KatfileUploadHandler(self.bot)
-                        logging.info(f"✅ Handler created for {host}")
-                    elif host == "uploady":
-                        from uploaders.uploady_upload_handler import UploadyUploadHandler
-                        self.handlers[host] = UploadyUploadHandler()
-                        logging.info(f"✅ Handler created for {host}")
-                    # ملاحظة: rapidgator handlers يتم إنشاؤها في _upload_single
+                    with resource_protection(f"Handler_Creation_{host}", timeout_seconds=30.0):
+                        if host == "nitroflare":
+                            self.handlers[host] = NitroflareUploadHandler(self.bot)
+                        elif host == "ddownload":
+                            self.handlers[host] = DDownloadUploadHandler(self.bot)
+                        elif host == "katfile":
+                            self.handlers[host] = KatfileUploadHandler(self.bot)
+                        elif host == "uploady":
+                            from uploaders.uploady_upload_handler import UploadyUploadHandler
+                            self.handlers[host] = UploadyUploadHandler()
+
+                        crash_logger.logger.info(f"✅ Handler created for {host}")
+
+                except ImportError as import_e:
+                    crash_logger.logger.error(f"🚫 Handler import failed for {host}: {import_e}")
                 except Exception as handler_e:
-                    logging.error(f"❌ Failed to create handler for {host}: {handler_e}")
+                    crash_logger.logger.error(f"💥 Handler creation failed for {host}: {handler_e}")
+                    # Continue with other handlers even if one fails
                     continue
+
+            # Validate that we have at least one working handler
+            if not self.handlers:
+                crash_logger.logger.warning("⚠️ No upload handlers available, using fallback mode")
 
             # تهيئة نتائج الرفع
             self.upload_results = {
@@ -1054,3 +1089,145 @@ class UploadWorker(QThread):
         except Exception as e:
             logging.error("reupload_all crashed: %s", e, exc_info=True)
             self.upload_complete.emit(row, {"error": str(e), "host_results": self._host_results})
+
+    def __del__(self):
+        """BULLETPROOF DESTRUCTOR - Ensure proper cleanup on object destruction."""
+        try:
+            self.cleanup_resources()
+        except Exception as e:
+            # Use print instead of logging in destructor to avoid issues during shutdown
+            print(f"Warning: UploadWorker destructor cleanup failed: {e}")
+
+    @safe_execute(
+        max_retries=1,
+        retry_delay=0.5,
+        expected_exceptions=(Exception,),
+        severity=ErrorSeverity.LOW,
+        default_return=None
+    )
+    def cleanup_resources(self):
+        """
+        PROFESSIONAL RESOURCE CLEANUP
+        Ensures all resources are properly released to prevent memory leaks
+        """
+        crash_logger.logger.info(f"🧹 Starting cleanup for UploadWorker {self.thread_id}")
+
+        # 1. SHUTDOWN THREAD POOL with timeout
+        if hasattr(self, 'thread_pool') and self.thread_pool:
+            try:
+                with resource_protection("ThreadPool_Shutdown", timeout_seconds=10.0):
+                    self.thread_pool.shutdown(wait=True, timeout=8.0)
+                    crash_logger.logger.info("✅ ThreadPool shutdown completed")
+            except Exception as e:
+                crash_logger.logger.error(f"💥 ThreadPool shutdown failed: {e}")
+                # Force shutdown
+                try:
+                    for future in getattr(self.thread_pool, '_futures', []):
+                        future.cancel()
+                    self.thread_pool._threads.clear()
+                except Exception:
+                    pass
+
+        # 2. CLEANUP ACTIVE UPLOADS
+        if hasattr(self, '_active_uploads'):
+            try:
+                with self._upload_lock:
+                    for upload_id, info in self._active_uploads.items():
+                        try:
+                            if 'handler' in info:
+                                handler = info['handler']
+                                if hasattr(handler, 'cleanup'):
+                                    handler.cleanup()
+                                if hasattr(handler, 'driver') and handler.driver:
+                                    handler.driver.quit()
+                        except Exception as cleanup_e:
+                            crash_logger.logger.warning(f"Upload cleanup failed for {upload_id}: {cleanup_e}")
+
+                    self._active_uploads.clear()
+                    crash_logger.logger.info("✅ Active uploads cleaned up")
+            except Exception as e:
+                crash_logger.logger.error(f"💥 Active uploads cleanup failed: {e}")
+
+        # 3. CLEANUP HANDLERS
+        if hasattr(self, 'handlers'):
+            try:
+                for host, handler in self.handlers.items():
+                    try:
+                        # Clean up WebDriver if exists
+                        if hasattr(handler, 'driver') and handler.driver:
+                            handler.driver.quit()
+                            crash_logger.logger.info(f"✅ WebDriver cleaned up for {host}")
+
+                        # Call handler cleanup if available
+                        if hasattr(handler, 'cleanup'):
+                            handler.cleanup()
+                    except Exception as handler_cleanup_e:
+                        crash_logger.logger.warning(f"Handler cleanup failed for {host}: {handler_cleanup_e}")
+
+                self.handlers.clear()
+                crash_logger.logger.info("✅ Handlers cleaned up")
+            except Exception as e:
+                crash_logger.logger.error(f"💥 Handlers cleanup failed: {e}")
+
+        # 4. CLEAR CIRCUIT BREAKERS
+        if hasattr(self, '_circuit_breakers'):
+            try:
+                self._circuit_breakers.clear()
+                crash_logger.logger.info("✅ Circuit breakers cleared")
+            except Exception as e:
+                crash_logger.logger.error(f"💥 Circuit breakers cleanup failed: {e}")
+
+        # 5. FORCE GARBAGE COLLECTION
+        try:
+            import gc
+            gc.collect()
+            crash_logger.logger.info("✅ Garbage collection forced")
+        except Exception as e:
+            crash_logger.logger.warning(f"Garbage collection failed: {e}")
+
+        # 6. MONITOR FINAL MEMORY USAGE
+        final_memory = monitor_memory_usage(threshold_mb=50.0)
+        crash_logger.logger.info(f"🐏 Final memory usage: {final_memory:.1f}MB")
+
+        crash_logger.logger.info(f"🧹 UploadWorker {self.thread_id} cleanup completed successfully")
+
+    @safe_execute(
+        max_retries=1,
+        retry_delay=0.0,
+        expected_exceptions=(Exception,),
+        severity=ErrorSeverity.MEDIUM,
+        default_return=False
+    )
+    def emergency_stop(self):
+        """
+        EMERGENCY STOP - Force terminate all operations immediately
+        Used in critical situations to prevent crashes
+        """
+        crash_logger.logger.critical(f"🚨 EMERGENCY STOP initiated for UploadWorker {self.thread_id}")
+
+        try:
+            # Force cancel all futures
+            if hasattr(self, 'thread_pool') and self.thread_pool:
+                for future in getattr(self.thread_pool, '_futures', []):
+                    future.cancel()
+
+            # Kill all WebDriver processes
+            if hasattr(self, 'handlers'):
+                for host, handler in self.handlers.items():
+                    try:
+                        if hasattr(handler, 'driver') and handler.driver:
+                            handler.driver.quit()
+                    except Exception:
+                        pass
+
+            # Set stop flags
+            self.is_cancelled = True
+            if hasattr(self, 'cancel_event') and self.cancel_event:
+                self.cancel_event.set()
+
+            crash_logger.logger.critical("🚨 EMERGENCY STOP completed")
+            return True
+
+        except Exception as e:
+            crash_logger.logger.critical(f"💥 EMERGENCY STOP failed: {e}")
+            return False

@@ -13,7 +13,8 @@ class WorkerThread(QThread):
     - في وضع 'Track Once' ينفّذ مرة واحدة.
     - في وضع 'Keep Tracking' يكرّر العملية كل 60 ثانية حتى تُلغى.
     """
-    update_threads = pyqtSignal(str, dict)  # category_name, new_threads
+    update_threads = pyqtSignal(str, dict)  # category_name, new_threads (final batch)
+    thread_discovered = pyqtSignal(str, str, dict)  # category_name, thread_id, thread_data (live discovery)
     finished = pyqtSignal(str)             # category_name when done
     progress_update = pyqtSignal(object)   # OperationStatus
 
@@ -35,24 +36,30 @@ class WorkerThread(QThread):
         self.is_cancelled    = False
         self._is_running     = True  # إضافة الـ attribute المفقود
         self.control_lock    = Lock()
+        self.live_thread_count = 0  # Track threads discovered live
 
     def run(self):
         """Main thread loop for monitoring the category."""
         logging.info(f"🚀 Starting WorkerThread for category '{self.category_name}'")
 
-        # Notify UI that this category has been queued
+        # Notify UI that this category has been queued - emit RUNNING immediately to trigger UI creation
         try:
+            # Emit RUNNING status immediately with 0% to create the operation in UI
             self.progress_update.emit(
                 OperationStatus(
                     section=self.section,
                     item=self.category_name,
                     op_type=OpType.POST,
-                    stage=OpStage.QUEUED,
+                    stage=OpStage.RUNNING,
                     progress=0,
+                    message="Initializing tracking..."
                 )
             )
-        except Exception:
-            pass
+            # Small delay to ensure UI processes it
+            import time
+            time.sleep(0.1)
+        except Exception as e:
+            logging.error(f"Failed to emit initial progress update: {e}")
         
         # WORKER STATE RESET: Ensure clean start state
         logging.info(f" Resetting worker state for '{self.category_name}'")
@@ -97,6 +104,11 @@ class WorkerThread(QThread):
                             break
                     # Continue tracking after error if not stopped
                 
+                # For 'Track Once' mode, exit after one iteration
+                if self.mode == 'Track Once':
+                    logging.info(f"✅ Track Once completed for '{self.category_name}', exiting loop")
+                    break
+
                 # For 'Keep Tracking' mode, sleep with frequent stop checks
                 if self.mode == 'Keep Tracking':
                     # Check stop condition again before sleep
@@ -173,11 +185,37 @@ class WorkerThread(QThread):
                         )
                         break
                 try:
+                    # Keep track of discovered threads for progress updates
+                    discovered_count = [0]  # Use list to allow modification in nested function
+
+                    # Create live discovery callback for instant process threads display
+                    def live_discovery_callback(thread_id, thread_data):
+                        # Only emit for live UI updates, don't count here to avoid double counting
+                        self.thread_discovered.emit(self.category_name, thread_id, thread_data)
+
+                        # Track discovered count for progress updates
+                        discovered_count[0] += 1
+
+                        # Update progress every few threads
+                        if discovered_count[0] % 3 == 0 or discovered_count[0] == 1:
+                            progress_percent = min(20 + int(discovered_count[0] * 60 / 100), 85)
+                            self.progress_update.emit(
+                                OperationStatus(
+                                    section=self.section,
+                                    item=self.category_name,
+                                    op_type=OpType.POST,
+                                    stage=OpStage.RUNNING,
+                                    message=f"Found {discovered_count[0]} threads...",
+                                    progress=progress_percent,
+                                )
+                            )
+
                     success = self.bot.navigate_to_url(
                         base_url,
                         df_param,
                         page,
                         page,
+                        thread_discovery_callback=live_discovery_callback
                     )
                     if success:
                         threads.update(self.bot.extracted_threads.copy())
@@ -269,100 +307,102 @@ class WorkerThread(QThread):
         logging.info(
             f"🌐 Navigating to category '{self.category_name}' with filters: {self.date_filters}, pages: {self.page_from}-{self.page_to}"
         )
+
+        # Update progress with actual tracking status
+        self.progress_update.emit(
+            OperationStatus(
+                section=self.section,
+                item=self.category_name,
+                op_type=OpType.POST,
+                stage=OpStage.RUNNING,
+                message=f"Scanning pages {self.page_from}-{self.page_to}...",
+                progress=10,
+            )
+        )
+
         new_threads = self.navigate_to_category(self.page_from, self.page_to)
 
         if new_threads:
             logging.info(
                 f"✅ Found {len(new_threads)} new threads for '{self.category_name}'"
             )
-            for tid, info in new_threads.items():
-                title = info.get("thread_title") or str(tid)
-                url = info.get("thread_url", "")
-                label = f"{self.category_name} — {title}"
-                self.progress_update.emit(
-                    OperationStatus(
-                        section=self.section,
-                        item=label,
-                        op_type=OpType.POST,
-                        stage=OpStage.RUNNING,
-                        message="Found",
-                        progress=0,
-                        thread_id=str(tid),
-                    )
+            # Update main tracking progress with final thread count
+            self.progress_update.emit(
+                OperationStatus(
+                    section=self.section,
+                    item=self.category_name,
+                    op_type=OpType.POST,
+                    stage=OpStage.RUNNING,
+                    message=f"Found {len(new_threads)} threads, finalizing...",
+                    progress=90,
                 )
-                self.progress_update.emit(
-                    OperationStatus(
-                        section=self.section,
-                        item=label,
-                        op_type=OpType.POST,
-                        stage=OpStage.FINISHED,
-                        message="Done",
-                        progress=100,
-                        thread_id=str(tid),
-                        final_url=url,
-                    )
-                )
+            )
+            # Count actual threads discovered (not doubled)
+            self.live_thread_count = len(new_threads)
+            logging.info(f"📊 Actual thread count for '{self.category_name}': {self.live_thread_count}")
             self.update_threads.emit(self.category_name, new_threads)
         else:
             logging.info(
                 f"ℹ️ No new threads found for '{self.category_name}'"
             )
+            self.live_thread_count = 0
 
-        summary = f"{len(new_threads)} new / 0 updated / 0 skipped" if new_threads else "0 new / 0 updated / 0 skipped"
-        self.progress_update.emit(
-            OperationStatus(
-                section=self.section,
-                item=self.category_name,
-                op_type=OpType.POST,
-                stage=OpStage.FINISHED,
-                message=summary,
-                progress=100,
+        # FORCE COMPLETION STATUS - MUST SHOW FINISHED!
+        summary = f"COMPLETED: {self.live_thread_count} threads tracked" if self.live_thread_count > 0 else "COMPLETED: No new threads"
+
+        # Send completion status multiple times to ensure UI gets it
+        for _ in range(3):
+            self.progress_update.emit(
+                OperationStatus(
+                    section=self.section,
+                    item=self.category_name,
+                    op_type=OpType.POST,
+                    stage=OpStage.FINISHED,
+                    message=summary,
+                    progress=100,
+                )
             )
-        )
+            import time
+            time.sleep(0.05)  # Small delay to ensure UI processes it
 
     def keep_tracking(self):
         logging.info(f"WorkerThread: Keep tracking '{self.category_name}'.")
         new_threads = self.navigate_to_category(1, 1)
         if new_threads:
-            for tid, info in new_threads.items():
-                title = info.get("thread_title") or str(tid)
-                url = info.get("thread_url", "")
-                label = f"{self.category_name} — {title}"
-                self.progress_update.emit(
-                    OperationStatus(
-                        section=self.section,
-                        item=label,
-                        op_type=OpType.POST,
-                        stage=OpStage.RUNNING,
-                        message="Found",
-                        progress=0,
-                        thread_id=str(tid),
-                    )
+            # Update main tracking progress with final thread count
+            self.progress_update.emit(
+                OperationStatus(
+                    section=self.section,
+                    item=self.category_name,
+                    op_type=OpType.POST,
+                    stage=OpStage.RUNNING,
+                    message=f"Found {len(new_threads)} threads, finalizing...",
+                    progress=90,
                 )
-                self.progress_update.emit(
-                    OperationStatus(
-                        section=self.section,
-                        item=label,
-                        op_type=OpType.POST,
-                        stage=OpStage.FINISHED,
-                        message="Done",
-                        progress=100,
-                        thread_id=str(tid),
-                        final_url=url,
-                    )
-                )
-            self.update_threads.emit(self.category_name, new_threads)
-        summary = f"{len(new_threads)} new / 0 updated / 0 skipped" if new_threads else "0 new / 0 updated / 0 skipped"
-        self.progress_update.emit(
-            OperationStatus(
-                section=self.section,
-                item=self.category_name,
-                op_type=OpType.POST,
-                stage=OpStage.FINISHED,
-                message=summary,
-                progress=100,
             )
-        )
+            # Count actual threads discovered (not doubled)
+            self.live_thread_count = len(new_threads)
+            logging.info(f"📊 Actual thread count for '{self.category_name}': {self.live_thread_count}")
+            self.update_threads.emit(self.category_name, new_threads)
+        else:
+            self.live_thread_count = 0
+        # FORCE COMPLETION STATUS - MUST SHOW FINISHED!
+        summary = f"COMPLETED: {self.live_thread_count} threads tracked" if self.live_thread_count > 0 else "COMPLETED: No new threads"
+
+        # Send completion status multiple times to ensure UI gets it
+        for _ in range(3):
+            self.progress_update.emit(
+                OperationStatus(
+                    section=self.section,
+                    item=self.category_name,
+                    op_type=OpType.POST,
+                    stage=OpStage.FINISHED,
+                    message=summary,
+                    progress=100,
+                )
+            )
+            import time
+            time.sleep(0.05)  # Small delay to ensure UI processes it
 
     def stop(self):
         """لإيقاف الحلقة في وضع Keep Tracking."""

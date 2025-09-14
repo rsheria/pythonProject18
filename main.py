@@ -10,6 +10,10 @@ from PyQt5.QtWidgets import QApplication
 from common.logging_setup import setup_logging
 from diagnostics import run_diagnostics
 from downloaders.base_downloader import BaseDownloader  # noqa: E402
+
+# 🎯 DISABLED STATUS SYSTEM - CAUSING ERRORS
+# import gui.magical_status_integration  # DISABLED until fixed
+
 from gui.main_window import ForumBotGUI  # noqa: E402
 from config.loader import load_config_with_prompts
 
@@ -22,7 +26,7 @@ log.info(".env loaded.")
 
 print("KEEPLINKS_API_HASH =", os.getenv('KEEPLINKS_API_HASH'))
 
-print("✅ downloaders package loaded, BaseDownloader =", BaseDownloader)
+print("SUCCESS: downloaders package loaded, BaseDownloader =", BaseDownloader)
 
 
 def global_exception_handler(exctype, value, traceback):

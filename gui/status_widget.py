@@ -3,7 +3,7 @@ import logging
 import os
 import threading
 import time
-from PyQt5.QtCore import QTimer, Qt, QSize, QEvent, QObject, pyqtSignal, QItemSelectionModel, pyqtSlot
+from PyQt5.QtCore import QTimer, Qt, QSize, QEvent, QObject, pyqtSignal, QItemSelectionModel, pyqtSlot, QMutex, QMutexLocker
 from PyQt5.QtGui import QColor, QPalette, QBrush, QKeySequence
 
 from PyQt5.QtWidgets import (
@@ -30,6 +30,13 @@ from integrations.jd_client import hard_cancel
 from models.operation_status import OperationStatus, OpStage, OpType
 from utils.utils import _normalize_links
 
+# Import crash protection utilities
+from utils.crash_protection import (
+    safe_execute, resource_protection, SafeProcessManager, SafePathManager,
+    ErrorSeverity, safe_process_manager, monitor_memory_usage, CircuitBreaker,
+    crash_logger
+)
+
 class ProgressBarDelegate(QStyledItemDelegate):
     """ProgressBar يحترم الـPalette الحالية ويرفع التباين تلقائيًا فى الدارك."""
     @staticmethod
@@ -39,17 +46,37 @@ class ProgressBarDelegate(QStyledItemDelegate):
         lum = 0.2126 * c.redF() + 0.7152 * c.greenF() + 0.0722 * c.blueF()
         return lum < 0.5
 
+    @safe_execute(
+        max_retries=1,
+        retry_delay=0.0,
+        expected_exceptions=(Exception,),
+        severity=ErrorSeverity.LOW,
+        default_return=None
+    )
     def paint(self, painter, option, index):
-        # نرسم البار فقط لو فيه قيمة فى UserRole
-        val = index.data(Qt.UserRole)
-        if val is None:
-            return QStyledItemDelegate.paint(self, painter, option, index)
-
+        # BULLETPROOF progress bar painting with crash protection
         try:
-            value = int(val)
-        except Exception:
-            value = 0
-        value = max(0, min(100, value))
+            # Safe data retrieval with validation
+            val = index.data(Qt.UserRole) if index and index.isValid() else None
+            if val is None:
+                return QStyledItemDelegate.paint(self, painter, option, index)
+
+            # Safe integer conversion with enhanced error handling
+            try:
+                if isinstance(val, str):
+                    # Handle percentage strings like "75%"
+                    val = val.rstrip('%')
+                value = int(float(val))  # Use float first to handle decimals
+            except (ValueError, TypeError, AttributeError):
+                crash_logger.logger.debug(f"Invalid progress value: {val}, using 0")
+                value = 0
+
+            # Clamp value to valid range
+            value = max(0, min(100, value))
+
+        except Exception as val_error:
+            crash_logger.logger.warning(f"Paint value processing failed: {val_error}")
+            return QStyledItemDelegate.paint(self, painter, option, index)
 
         # ارسم الخلفية الافتراضية (سيليكشن/رو باكجراوند)
         QStyledItemDelegate.paint(self, painter, option, index)
@@ -296,10 +323,17 @@ class StatusWidget(QWidget):
         self._bar_at = {}
         self._pending_by_key = {}
         self._last_progress = {}
+        self._completion_times = {}  # Track when jobs complete for better UX
         self._flush_timer = QTimer(self)
         self._flush_timer.setSingleShot(True)
-        self._flush_timer.setInterval(150)
+        self._flush_timer.setInterval(100)  # Faster updates for better UX
         self._flush_timer.timeout.connect(self._flush_status, Qt.QueuedConnection)
+
+        # Timer to auto-clear old completed jobs (keep for longer)
+        self._cleanup_timer = QTimer(self)
+        self._cleanup_timer.setInterval(120000)  # Check every 2 minutes for less aggressive cleanup
+        self._cleanup_timer.timeout.connect(self._cleanup_old_completed, Qt.QueuedConnection)
+        self._cleanup_timer.start()
 
         self._apply_readability_palette()
         self._row_brushes = self._status_brushes(self.table.palette())
@@ -399,18 +433,36 @@ class StatusWidget(QWidget):
 
     # ------------------------------------------------------------------
     def clear_finished(self, ignore_running: bool = True) -> None:
-        """Remove all rows with stage FINISHED."""
+        """Remove all rows with stage FINISHED (but keep recent ones for user feedback)."""
         stage_col = self._col_map.get("Stage")
         if stage_col is None:
             return
+
+        # Only remove finished jobs older than 60 seconds to preserve user feedback longer
+        import time
+        current_time = time.time()
         rows = []
+
         for row in range(self.table.rowCount()):
             it = self.table.item(row, stage_col)
             stage = self._stage_from_text(it.text() if it else "")
             if stage == OpStage.RUNNING and ignore_running:
                 continue
             if stage == OpStage.FINISHED:
-                rows.append(row)
+                # Check if this is a recent completion (keep for 60 seconds for better UX)
+                row_key = None
+                for key, r in self._row_by_key.items():
+                    if r == row:
+                        row_key = key
+                        break
+
+                # Get completion time from row data or use current time
+                completion_time = getattr(self, '_completion_times', {}).get(row_key, current_time)
+                if current_time - completion_time > 60:  # 60 seconds for better visibility
+                    rows.append(row)
+
+        if rows:
+            log.info(f"Clearing {len(rows)} old finished jobs (older than 60s)")
         self._remove_rows(rows)
 
     def clear_errors(self, ignore_running: bool = True) -> None:
@@ -648,6 +700,39 @@ class StatusWidget(QWidget):
         self._schedule_status_save()
 
     # ------------------------------------------------------------------
+    def _set_keeplinks_only(self, tid: str, keeplinks: str, meta: dict) -> None:
+        """Set only keeplinks for POST operations without touching upload progress bars."""
+        row = self._row_by_tid.get(tid)
+        if row is None:
+            # Fallback: try to find by section and item
+            if isinstance(tid, str) and ":" in tid:
+                parts = tid.split(":", 1)
+                sec, itm = parts[0], parts[1]
+                for key, r in self._row_by_key.items():
+                    if key[0] == sec and key[1] == itm:
+                        row = r
+                        break
+        if row is None:
+            return
+
+        # Only set keeplinks/final URL without affecting upload progress bars
+        if keeplinks:
+            keeplinks_col = self._col_map.get("Keeplinks")
+            if keeplinks_col is not None:
+                self._ensure_item(row, keeplinks_col).setText(keeplinks)
+                model = self.table.model()
+                idx = model.index(row, keeplinks_col)
+                model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
+
+        # Store metadata if provided
+        if meta and isinstance(meta, dict):
+            # Find the key for this row
+            for key, r in self._row_by_key.items():
+                if r == row:
+                    self._upload_meta.setdefault(key, {}).update(meta)
+                    break
+        self._schedule_status_save()
+
     def populate_links_by_tid(self, tid: str, links: dict, keeplinks: str, meta: dict) -> None:
         """Populate host and Keeplinks columns for a given thread.
 
@@ -925,39 +1010,70 @@ class StatusWidget(QWidget):
         h, s, l, _ = hl.getHsl()
 
         def from_hue(hue: int, alpha: int) -> QBrush:
+            """Create theme-aware color brush from hue with proper dark/light mode support."""
             c = QColor()
-            c.setHsl(hue, s, l)
-            c = c.lighter(130) if dark else c.darker(110)
+            # Use appropriate saturation and lightness for theme
+            sat = max(80, min(255, s)) if dark else max(120, min(255, s))
+            light = max(60, min(180, l)) if dark else max(40, min(160, l))
+            c.setHsl(hue, sat, light)
+
+            # Apply theme-appropriate brightness adjustment
+            if dark:
+                c = c.lighter(140)  # More brightness for dark themes
+            else:
+                c = c.darker(120)   # Less aggressive darkening for light themes
+
             c.setAlpha(alpha)
             return QBrush(c)
 
-        brushes[OpStage.FINISHED] = from_hue(120, 175)  # اخضر
-        brushes[OpStage.ERROR] = from_hue(0, 165)       # احمر
+        # Enhanced color scheme with better theme support
+        brushes[OpStage.FINISHED] = from_hue(120, 200)  # Green for success
+        brushes[OpStage.ERROR] = from_hue(0, 180)       # Red for errors
 
-        # دعم حالة الإلغاء حتى لو الـEnum ما فيهاش CANCELLED
-        cancel_brush = from_hue(50, 160)  # اصفر
+        # Support for cancelled state
+        cancel_brush = from_hue(30, 170)  # Orange for cancelled (better than yellow)
         brushes["cancelled"] = cancel_brush
         cancelled = getattr(OpStage, "CANCELLED", None)
         if cancelled is not None:
             brushes[cancelled] = cancel_brush
 
-        run_col = pal.color(QPalette.AlternateBase)
-        run_col = run_col.lighter(110) if dark else run_col.darker(110)
-        run_col.setAlpha(150)
+        # Running operations - theme-aware blue
+        run_col = pal.color(QPalette.Highlight)
+        if dark:
+            run_col = run_col.lighter(140)
+            run_col.setAlpha(150)
+        else:
+            run_col = run_col.lighter(110)
+            run_col.setAlpha(120)
         brushes[OpStage.RUNNING] = QBrush(run_col)
+
+        # Queued operations - theme-aware gray
+        queue_col = pal.color(QPalette.AlternateBase)
+        if dark:
+            queue_col = queue_col.lighter(120)
+            queue_col.setAlpha(110)
+        else:
+            queue_col = queue_col.darker(110)
+            queue_col.setAlpha(100)
+        brushes[OpStage.QUEUED] = QBrush(queue_col)
 
         return brushes
 
     def _color_row(self, row: int, stage: OpStage, op_type: OpType | None = None) -> None:
+        """Apply color coding to rows based on status with enhanced visibility."""
         pal = self.table.palette()
         base_role = QPalette.Base if row % 2 == 0 else QPalette.AlternateBase
         base = pal.color(base_role)
+
+        # Get overlay color for the stage
         overlay = self._row_brushes.get(stage)
         if overlay is None:
             overlay = self._row_brushes.get(getattr(stage, "name", str(stage)).lower())
+
         if overlay is not None:
             oc = overlay.color()
             a = oc.alpha()
+            # Enhance alpha blending for better visibility
             color = QColor(
                 (base.red() * (255 - a) + oc.red() * a) // 255,
                 (base.green() * (255 - a) + oc.green() * a) // 255,
@@ -965,13 +1081,29 @@ class StatusWidget(QWidget):
             )
         else:
             color = base
+
+        # Create brush with enhanced properties for better visibility
         brush = QBrush(color)
+
+        # Apply color to all cells in the row
         for col in range(self.table.columnCount()):
             item = self.table.item(row, col)
             if item is None:
                 item = QTableWidgetItem("")
                 self.table.setItem(row, col, item)
             item.setBackground(brush)
+
+            # Add special styling for status indicators
+            if stage == OpStage.FINISHED:
+                # Make text slightly bold for completed items
+                font = item.font()
+                font.setBold(False)  # Keep normal weight but ensure visibility
+                item.setFont(font)
+            elif stage == OpStage.ERROR:
+                # Ensure error text is visible
+                font = item.font()
+                font.setBold(False)
+                item.setFont(font)
     # Status handling -----------------------------------------------------
     def _ensure_bar(self, row: int, col: int) -> QProgressBar:
         key = (row, col)
@@ -1084,6 +1216,12 @@ class StatusWidget(QWidget):
                     meta[k] = os.path.basename(meta[k])
 
             snap["upload_meta"] = meta
+
+        # Include completion time for persistence
+        if hasattr(self, '_completion_times') and key_tuple:
+            completion_time = self._completion_times.get(tuple(key_tuple))
+            if completion_time:
+                snap["completion_time"] = completion_time
         return snap
 
     # -------------------------------
@@ -1307,6 +1445,8 @@ class StatusWidget(QWidget):
             self._posted_urls.clear()
             self._thread_steps.clear()
             self._bar_at.clear()
+            if hasattr(self, '_completion_times'):
+                self._completion_times.clear()
 
             rows = data.get("rows", []) or []
             filters = data.get("filters", {}) or {}
@@ -1372,6 +1512,11 @@ class StatusWidget(QWidget):
                     meta = rdata.get("upload_meta") or {}
                     if meta:
                         self._upload_meta[key] = dict(meta)
+
+                    # Restore completion time if available
+                    completion_time = rdata.get("completion_time")
+                    if completion_time and hasattr(self, '_completion_times'):
+                        self._completion_times[key] = float(completion_time)
                 tid = rdata.get("thread_id")
                 if tid:
                     self._row_by_tid[tid] = r
@@ -1520,15 +1665,36 @@ class StatusWidget(QWidget):
         return lum < 0.5
 
     def _apply_readability_palette(self):
-        """تحسين تباين صفوف الجدول (بدون ألوان ثابتة)."""
+        """Enhanced table contrast with better theme support."""
         pal = QPalette(self.table.palette())
         dark = self._is_dark_palette(pal)
         base = pal.color(QPalette.Base)
-        # AlternateBase أوضح شوية من Base
-        alt = base.lighter(112) if dark else base.darker(104)
+
+        # Create better alternating row colors based on theme
+        if dark:
+            # For dark themes, make alternating rows slightly lighter
+            alt = base.lighter(108)
+        else:
+            # For light themes, make alternating rows slightly darker
+            alt = base.darker(102)
+
         pal.setColor(QPalette.AlternateBase, alt)
         self.table.setPalette(pal)
         self.table.setAlternatingRowColors(True)
+
+        # Ensure text is readable in both themes
+        text_col = pal.color(QPalette.WindowText)
+        if dark:
+            # Ensure text is bright enough in dark mode
+            if text_col.lightnessF() < 0.8:
+                text_col = text_col.lighter(150)
+        else:
+            # Ensure text is dark enough in light mode
+            if text_col.lightnessF() > 0.2:
+                text_col = text_col.darker(120)
+
+        pal.setColor(QPalette.WindowText, text_col)
+        self.table.setPalette(pal)
 
 
     def _ensure_item(self, row: int, col: int):
@@ -1573,46 +1739,94 @@ class StatusWidget(QWidget):
         model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
 
     def enqueue_status(self, st: OperationStatus) -> None:
-        key = (st.section, st.item, getattr(st.op_type, "name", st.op_type))
+        """Enhanced status queuing with better progress tracking and immediate updates for critical changes."""
+        # FIXED: Create unique key that matches _update_row_from_status logic
+        sec = st.section or ("Uploads" if st.op_type == OpType.UPLOAD else "Downloads")
+        host_suffix = f"_{st.host}" if st.op_type == OpType.UPLOAD and st.host and st.host != "-" else ""
+
+        # Treat DOWNLOAD and COMPRESS as the same job
+        op_name = getattr(st.op_type, "name", st.op_type)
+        if st.op_type == OpType.COMPRESS:
+            op_name = "DOWNLOAD"
+
+        key = (sec, st.item, op_name + host_suffix)
         prog = getattr(st, "progress", None)
-        if prog is not None:
+        stage = getattr(st, "stage", None)
+
+        # Immediate processing for stage changes (no batching for better UX)
+        old_status = self._pending_by_key.get(key)
+        old_stage = getattr(old_status, "stage", None) if old_status else None
+        stage_changed = stage != old_stage
+
+        # Progress throttling (but allow stage changes through)
+        if prog is not None and not stage_changed:
             now = time.monotonic()
             last = self._last_progress.get(key)
-            if last and last[0] == prog and (now - last[1]) < 0.15:
+            if last and last[0] == prog and (now - last[1]) < 0.1:  # Faster updates
                 return
             self._last_progress[key] = (prog, now)
+
         self._pending_by_key[key] = st
-        if not self._flush_timer.isActive():
+
+        # Immediate flush for important status changes
+        if stage_changed and stage in [OpStage.FINISHED, OpStage.ERROR, OpStage.RUNNING]:
+            self._flush_status()
+        elif not self._flush_timer.isActive():
             self._flush_timer.start()
 
     def _flush_status(self) -> None:
+        """Enhanced status flushing with better performance and UI updates."""
         if not self._pending_by_key:
             return
+
         statuses = list(self._pending_by_key.values())
         self._pending_by_key = {}
         sorting = self.table.isSortingEnabled()
         if sorting:
             self.table.setSortingEnabled(False)
+
         updated_keys = []
+        rows_to_update = set()
+
         for st in statuses:
-            updated_keys.append(self.handle_status(st))
+            key = self.handle_status(st)
+            if key:
+                updated_keys.append(key)
+                row = self._row_by_key.get(key)
+                if row is not None:
+                    rows_to_update.add(row)
+
+        # Batch UI updates for better performance
+        if rows_to_update:
+            model = self.table.model()
+            min_row = min(rows_to_update)
+            max_row = max(rows_to_update)
+            tl = model.index(min_row, 0)
+            br = model.index(max_row, self.table.columnCount() - 1)
+            model.dataChanged.emit(tl, br, [Qt.DisplayRole, Qt.BackgroundRole, Qt.UserRole])
+
         if sorting:
             header = self.table.horizontalHeader()
             col = header.sortIndicatorSection()
             order = header.sortIndicatorOrder()
             self.table.setSortingEnabled(True)
             self.table.sortItems(col, order)
+
+            # Update row mappings after sorting
             sec_col = self._col_map.get("Section")
             item_col = self._col_map.get("Item")
             stage_col = self._col_map.get("Stage")
+
             for key in updated_keys:
-                sec, item, _ = key
-                for r in range(self.table.rowCount()):
-                    s = self.table.item(r, sec_col).text() if sec_col is not None else ""
-                    it = self.table.item(r, item_col).text() if item_col is not None else ""
-                    if s == sec and it == item:
-                        self._row_by_key[key] = r
-                        break
+                if len(key) >= 2:
+                    sec, item = key[0], key[1]
+                    for r in range(self.table.rowCount()):
+                        s = self.table.item(r, sec_col).text() if sec_col is not None else ""
+                        it = self.table.item(r, item_col).text() if item_col is not None else ""
+                        if s == sec and it == item:
+                            self._row_by_key[key] = r
+                            break
+
             self._row_last_stage = {
                 r: self._stage_from_text(
                     self.table.item(r, stage_col).text()
@@ -1621,30 +1835,94 @@ class StatusWidget(QWidget):
                 )
                 for r in range(self.table.rowCount())
             }
+
         if self._filter_active():
             self.apply_filter()
             if self._visible_rows_count() == 0:
                 self._reset_filters_to_all()
 
+        # Force viewport update for immediate visual feedback
+        self.table.viewport().update()
+
+    def _cleanup_old_completed(self) -> None:
+        """Auto-cleanup old completed jobs (older than 10 minutes) but keep recent ones for user feedback."""
+        try:
+            if not hasattr(self, '_completion_times'):
+                return
+
+            import time
+            current_time = time.time()
+            cleanup_threshold = 600  # 10 minutes - longer visibility for better UX
+            stage_col = self._col_map.get("Stage")
+
+            if stage_col is None:
+                return
+
+            rows_to_remove = []
+            for row in range(self.table.rowCount()):
+                it = self.table.item(row, stage_col)
+                stage = self._stage_from_text(it.text() if it else "")
+
+                if stage in [OpStage.FINISHED, OpStage.ERROR, "cancelled"]:
+                    # Find the key for this row
+                    row_key = None
+                    for key, r in self._row_by_key.items():
+                        if r == row:
+                            row_key = key
+                            break
+
+                    if row_key:
+                        completion_time = self._completion_times.get(row_key)
+                        if completion_time and (current_time - completion_time) > cleanup_threshold:
+                            rows_to_remove.append(row)
+
+            if rows_to_remove:
+                log.info(f"Auto-cleaning {len(rows_to_remove)} old completed jobs (older than 10min)")
+                self._remove_rows(rows_to_remove)
+
+        except Exception as e:
+            log.error(f"Error during cleanup: {e}")
 
     def _update_row_from_status(self, st: OperationStatus):
         sec = st.section or ("Uploads" if st.op_type == OpType.UPLOAD else "Downloads")
-        key = (sec, st.item, st.op_type.name)
+
+        # Simple key generation - don't over-complicate it
+        host_suffix = f"_{st.host}" if st.op_type == OpType.UPLOAD and st.host and st.host != "-" else ""
+
+        # Use original operation name for key
+        key = (sec, st.item, st.op_type.name + host_suffix)
+
+        # Use original thread ID - don't modify it
         tid = st.thread_id or f"{sec}:{st.item}"
+
+        # Look for existing row
         row = self._row_by_tid.get(tid)
         if row is None:
             row = self._row_by_key.get(key)
+
+        # Handle link population for existing rows (but don't return - continue with display)
         if row is None and st.links:
-            updated = ["Keeplinks"] if st.keeplinks_url else []
-            log.info("POPULATE-LINKS tid=%s row=? updated=%s", tid, updated)
-            return
+            # Try to find any existing row for this item to populate links
+            for existing_tid, existing_row in self._row_by_tid.items():
+                if st.item in existing_tid and "UPLOAD" in existing_tid:
+                    row = existing_row
+                    break
+            if row is not None:
+                updated = ["Keeplinks"] if st.keeplinks_url else []
+                log.info("POPULATE-LINKS tid=%s row=%s updated=%s", tid, row, updated)
+                # Continue to update the row display
+
+        # Create new row if none exists
         if row is None:
             row = self.table.rowCount()
             self.table.insertRow(row)
             for col in range(self.table.columnCount()):
                 self._ensure_item(row, col)
             self._row_by_key[key] = row
-            self._row_by_tid.setdefault(tid, row)
+            self._row_by_tid[tid] = row  # Use assignment instead of setdefault
+
+            # Log new row creation for debugging
+            log.debug(f"Created new status row {row} for {st.op_type.name}: {st.item}")
 
         self._ensure_section_option(sec)
 
@@ -1750,6 +2028,20 @@ class StatusWidget(QWidget):
                     self._ensure_item(row, link_col).setText(rg[0] if rg else "")
                     idx = model.index(row, link_col)
                     model.dataChanged.emit(idx, idx, [Qt.DisplayRole])
+        # Track completion times for persistence (use same key pattern)
+        host_suffix = f"_{st.host}" if st.op_type == OpType.UPLOAD and st.host and st.host != "-" else ""
+
+        # Use same key logic as row creation
+        op_name = st.op_type.name
+        if st.op_type == OpType.COMPRESS:
+            op_name = "DOWNLOAD"
+
+        key = (sec, st.item, op_name + host_suffix)
+        if stage == OpStage.FINISHED and self._row_last_stage.get(row) != stage:
+            import time
+            self._completion_times[key] = time.time()
+            log.info(f"✅ Marked {st.op_type.name} as completed for {st.item} (row {row})")
+
         changed = False
         if self._row_last_stage.get(row) != stage:
             self._color_row(row, stage, st.op_type)
@@ -1799,10 +2091,12 @@ class StatusWidget(QWidget):
         except Exception as e:
             log.debug("cancel_downloads call failed: %s", e)
 
-        # علّم الصفوف الجارية كـ "Cancelled" فورًا فى الواجهة
+        # Mark running jobs as "Cancelled" immediately in the UI
         stage_col = self._col_map.get("Stage")
+        msg_col = self._col_map.get("Message")
         if stage_col is not None:
             model = self.table.model()
+            cancelled_count = 0
             for row in range(self.table.rowCount()):
                 it = self.table.item(row, stage_col)
                 txt = it.text() if it else ""
@@ -1810,10 +2104,34 @@ class StatusWidget(QWidget):
                     if it is None:
                         it = self._ensure_item(row, stage_col)
                     it.setText("Cancelled")
+
+                    # Update message column too
+                    if msg_col is not None:
+                        msg_it = self._ensure_item(row, msg_col)
+                        msg_it.setText("Cancelled by user")
+
                     self._color_row(row, "cancelled")
+                    self._row_last_stage[row] = "cancelled"
+
+                    # Mark completion time for cancelled jobs
+                    import time
+                    row_key = None
+                    for key, r in self._row_by_key.items():
+                        if r == row:
+                            row_key = key
+                            break
+                    if row_key:
+                        self._completion_times[row_key] = time.time()
+
+                    cancelled_count += 1
+
+            if cancelled_count > 0:
+                logging.info(f"Marked {cancelled_count} running jobs as cancelled")
+
             if self.table.rowCount():
                 tl = model.index(0, 0)
                 br = model.index(self.table.rowCount() - 1, self.table.columnCount() - 1)
+                model.dataChanged.emit(tl, br, [Qt.BackgroundRole, Qt.DisplayRole])
 
         # (2) تنظيف شامل للـ JD فى Thread منفصل
         try:
@@ -1911,11 +2229,18 @@ class StatusWidget(QWidget):
             op: The OperationStatus instance emitted by a worker.
         """
         try:
-            enqueuer = getattr(self, "_enqueue_status", None)
+            # Enhanced status handling with better tracking
+            enqueuer = getattr(self, "enqueue_status", None)  # Use the correct method name
             if callable(enqueuer):
                 enqueuer(op)
             else:
                 self.handle_status(op)
+
+            # Force immediate UI update for important status changes
+            if hasattr(op, 'stage') and op.stage in [OpStage.FINISHED, OpStage.ERROR]:
+                self.table.viewport().update()
+                # Schedule a save to persist the completion status
+                self._schedule_status_save()
             # After handling the status update, if this is a completed upload
             # operation then populate the host and keeplinks columns for the
             # corresponding thread.  This ensures that newly generated links
@@ -1942,7 +2267,12 @@ class StatusWidget(QWidget):
                         if isinstance(maybe, dict):
                             meta = maybe
                             break
-                    self.populate_links_by_tid(tid, links, keeplinks, meta)
+                    # FIXED: Only populate upload links for actual UPLOAD operations
+                    if getattr(op, "op_type", None) == OpType.UPLOAD:
+                        self.populate_links_by_tid(tid, links, keeplinks, meta)
+                    elif keeplinks and getattr(op, "op_type", None) == OpType.POST:
+                        # For POST operations, only set final URL/keeplinks, avoid upload progress bars
+                        self._set_keeplinks_only(tid, keeplinks, meta)
                 if (
                     getattr(op, "stage", None) == OpStage.FINISHED
                     and getattr(op, "op_type", None) == OpType.POST

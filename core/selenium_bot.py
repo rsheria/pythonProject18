@@ -24,6 +24,13 @@ import requests
 from datetime import datetime, date, timedelta
 from urllib.parse import urlparse, quote
 from dotenv import load_dotenv
+
+# Import crash protection utilities
+from utils.crash_protection import (
+    safe_execute as crash_safe_execute, resource_protection, SafeProcessManager, SafePathManager,
+    ErrorSeverity, safe_process_manager, monitor_memory_usage, CircuitBreaker,
+    crash_logger
+)
 from selenium import webdriver
 from selenium.common import WebDriverException, TimeoutException, NoSuchElementException
 from selenium.webdriver.common.by import By
@@ -205,7 +212,17 @@ class ForumBotSelenium:
         if not self.dbc_username or not self.dbc_password:
             raise ValueError("DeathByCaptcha credentials are not set in the environment variables.")
 
-        self.dbc_client = deathbycaptcha.SocketClient(self.dbc_username, self.dbc_password)
+        # Initialize DeathByCaptcha client with bulletproof error handling
+        try:
+            if hasattr(deathbycaptcha, 'SocketClient'):
+                self.dbc_client = deathbycaptcha.SocketClient(self.dbc_username, self.dbc_password)
+            else:
+                # Fallback for different deathbycaptcha versions
+                from deathbycaptcha import SocketClient
+                self.dbc_client = SocketClient(self.dbc_username, self.dbc_password)
+        except (AttributeError, ImportError) as e:
+            logging.warning(f"DeathByCaptcha client initialization failed: {e}")
+            self.dbc_client = None  # Continue without captcha solving
 
         self.rapidgator_username = os.getenv('RAPIDGATOR_LOGIN')
         self.rapidgator_password = os.getenv('RAPIDGATOR_PASSWORD')
@@ -3459,153 +3476,309 @@ class ForumBotSelenium:
             logging.error(f"Exception during Nitroflare upload: {e}", exc_info=True)
             return None
 
+    @crash_safe_execute(max_retries=3, default_return=None, severity=ErrorSeverity.CRITICAL)
     def upload_to_ddownload(self, file_path, progress_callback=None):
         """
         Uploads a file to DDownload and returns the download URL.
+        BULLETPROOF: Protected against HTTP failures and resource leaks.
         """
-        try:
-            # Step 1: Get the upload server URL
-            api_key = os.getenv('DDOWNLOAD_API_KEY')  # Ensure API key is in .env
-            server_response = requests.get(f"https://api-v2.ddownload.com/api/upload/server?key={api_key}")
-            logging.debug(f"DDownload Server Response: {server_response.text}")
+        with resource_protection("DDownload_Upload", timeout_seconds=300.0):
+            # Step 1: Validate API key and file
+            api_key = os.getenv('DDOWNLOAD_API_KEY')
+            if not api_key:
+                crash_logger.error("DDownload API key not configured")
+                return None
 
-            if server_response.status_code == 200:
+            if not os.path.exists(file_path):
+                crash_logger.error("File does not exist for DDownload upload",
+                                 context={'file_path': file_path})
+                return None
+
+            # Step 2: Get the upload server URL with bulletproof request
+            try:
+                server_response = requests.get(
+                    f"https://api-v2.ddownload.com/api/upload/server?key={api_key}",
+                    timeout=30.0,
+                    verify=False
+                )
+                server_response.raise_for_status()
+                logging.debug(f"DDownload Server Response: {server_response.text}")
+            except (requests.RequestException, requests.Timeout, Exception) as e:
+                crash_logger.error(f"Failed to get DDownload server URL: {e}",
+                                 context={'api_key_present': bool(api_key)})
+                return None
+
+            # Step 3: Parse server response with bulletproof JSON handling
+            try:
                 server_data = server_response.json()
-                upload_url = server_data.get('result')
-                sess_id = server_data.get('sess_id')
+            except (ValueError, requests.exceptions.JSONDecodeError) as e:
+                crash_logger.error(f"Invalid JSON response from DDownload server: {e}",
+                                 context={'response_text': server_response.text[:500]})
+                return None
 
-                if upload_url and sess_id:
-                    # Step 2: Create MultipartEncoder for upload with progress tracking
-                    total_size = os.path.getsize(file_path)
-                    last_bytes_read = 0
+            if not isinstance(server_data, dict):
+                crash_logger.error("Invalid DDownload server response structure",
+                                 context={'data_type': type(server_data).__name__})
+                return None
 
-                    with open(file_path, 'rb') as f:
-                        encoder = MultipartEncoder(
-                            fields={
-                                'file': (os.path.basename(file_path), f),
-                                'sess_id': sess_id,
-                                'utype': 'prem'
-                            }
-                        )
+            upload_url = server_data.get('result')
+            sess_id = server_data.get('sess_id')
 
-                        def upload_callback(monitor):
-                            nonlocal last_bytes_read
-                            if progress_callback:
+            if not upload_url or not sess_id:
+                crash_logger.error("Missing upload URL or session ID from DDownload",
+                                 context={'has_upload_url': bool(upload_url), 'has_sess_id': bool(sess_id)})
+                return None
+
+            if not isinstance(upload_url, str) or not upload_url.startswith('http'):
+                crash_logger.error("Invalid DDownload upload URL format",
+                                 context={'upload_url': str(upload_url)[:100]})
+                return None
+
+            # Step 4: Validate file size and create upload with bulletproof handling
+            try:
+                total_size = os.path.getsize(file_path)
+                if total_size == 0:
+                    crash_logger.error("File is empty for DDownload upload",
+                                     context={'file_path': file_path})
+                    return None
+            except OSError as e:
+                crash_logger.error(f"Cannot access file for DDownload upload: {e}",
+                                 context={'file_path': file_path})
+                return None
+
+            last_bytes_read = 0
+
+            # Step 5: Create MultipartEncoder with bulletproof progress tracking
+            try:
+                with open(file_path, 'rb') as f:
+                    encoder = MultipartEncoder(
+                        fields={
+                            'file': (os.path.basename(file_path), f),
+                            'sess_id': sess_id,
+                            'utype': 'prem'
+                        }
+                    )
+
+                    def safe_upload_callback(monitor):
+                        nonlocal last_bytes_read
+                        try:
+                            if progress_callback and hasattr(monitor, 'bytes_read'):
                                 bytes_read = monitor.bytes_read
                                 # Only update if there's actual progress
                                 if bytes_read > last_bytes_read:
                                     progress_callback(bytes_read, total_size)
                                     last_bytes_read = bytes_read
+                        except Exception as e:
+                            crash_logger.warning(f"Progress callback failed for DDownload: {e}")
 
-                        monitor = MultipartEncoderMonitor(encoder, upload_callback)
+                    monitor = MultipartEncoderMonitor(encoder, safe_upload_callback)
 
-                        # Step 3: Upload the file with progress tracking
-                        headers = {'Content-Type': monitor.content_type}
-                        response = requests.post(upload_url, data=monitor, headers=headers, verify=False)
-
-                    logging.debug(f"DDownload Upload Response: {response.text}")
-
-                    if response.status_code == 200:
-                        data = response.json()[0]  # Extract first file info
-                        file_code = data.get('file_code')
-
-                        if file_code:
-                            download_url = f"https://ddownload.com/{file_code}"
-                            logging.info(f"File uploaded successfully to DDownload: {download_url}")
-                            # Final progress update
-                            if progress_callback:
-                                progress_callback(total_size, total_size)
-                            return download_url
-                        else:
-                            logging.error(f"Failed to retrieve file code from DDownload: {data}")
-                            return None
-                    else:
-                        logging.error(f"DDownload upload failed: {response.status_code} - {response.text}")
-                        return None
-                else:
-                    logging.error("Failed to get DDownload upload server URL or session ID.")
-                    return None
-            else:
-                logging.error(f"DDownload server request failed: {server_response.status_code}")
+                    # Step 6: Upload the file with bulletproof HTTP request
+                    headers = {'Content-Type': monitor.content_type}
+                    response = requests.post(
+                        upload_url,
+                        data=monitor,
+                        headers=headers,
+                        verify=False,
+                        timeout=300.0
+                    )
+                    response.raise_for_status()
+            except (requests.RequestException, requests.Timeout, OSError, Exception) as e:
+                crash_logger.error(f"Failed to upload file to DDownload: {e}",
+                                 context={'file_path': file_path, 'upload_url': upload_url})
                 return None
 
-        except Exception as e:
-            logging.error(f"Exception during DDownload upload: {e}", exc_info=True)
-            return None
+            # Step 7: Process upload response with bulletproof JSON handling
+            logging.debug(f"DDownload Upload Response: {response.text}")
 
+            try:
+                data = response.json()
+            except (ValueError, requests.exceptions.JSONDecodeError) as e:
+                crash_logger.error(f"Invalid JSON response from DDownload upload: {e}",
+                                 context={'response_text': response.text[:500]})
+                return None
+
+            if not isinstance(data, list) or len(data) == 0:
+                crash_logger.error("Invalid DDownload upload response structure",
+                                 context={'data_type': type(data).__name__, 'data': str(data)[:200]})
+                return None
+
+            file_info = data[0]  # Extract first file info
+            if not isinstance(file_info, dict):
+                crash_logger.error("Invalid DDownload file info structure",
+                                 context={'file_info_type': type(file_info).__name__})
+                return None
+
+            file_code = file_info.get('file_code')
+            if not file_code or not isinstance(file_code, str):
+                crash_logger.error("Missing or invalid file code from DDownload",
+                                 context={'file_info': str(file_info)[:200]})
+                return None
+
+            # Step 8: Construct final URL and complete progress
+            download_url = f"https://ddownload.com/{file_code}"
+            logging.info(f"File uploaded successfully to DDownload: {download_url}")
+
+            # Final progress update with error protection
+            try:
+                if progress_callback:
+                    progress_callback(total_size, total_size)
+            except Exception as e:
+                crash_logger.warning(f"Final progress callback failed for DDownload: {e}")
+
+            return download_url
+
+    @crash_safe_execute(max_retries=3, default_return=None, severity=ErrorSeverity.CRITICAL)
     def upload_to_katfile(self, file_path, progress_callback=None):
         """
         Uploads a file to KatFile and returns the download URL.
+        BULLETPROOF: Protected against HTTP failures and resource leaks.
         """
-        try:
-            # Step 1: Get the upload server URL
-            api_key = os.getenv('KATFILE_API_KEY')  # Ensure the API key is in .env
-            server_response = requests.get(f"https://katfile.com/api/upload/server?key={api_key}")
-            logging.debug(f"KatFile Server Response: {server_response.text}")
+        with resource_protection("KatFile_Upload", timeout_seconds=300.0):
+            # Step 1: Validate API key and file
+            api_key = os.getenv('KATFILE_API_KEY')
+            if not api_key:
+                crash_logger.error("KatFile API key not configured")
+                return None
 
-            if server_response.status_code == 200:
+            if not os.path.exists(file_path):
+                crash_logger.error("File does not exist for KatFile upload",
+                                 context={'file_path': file_path})
+                return None
+
+            # Step 2: Get the upload server URL with bulletproof request
+            try:
+                server_response = requests.get(
+                    f"https://katfile.com/api/upload/server?key={api_key}",
+                    timeout=30.0,
+                    verify=False
+                )
+                server_response.raise_for_status()
+                logging.debug(f"KatFile Server Response: {server_response.text}")
+            except (requests.RequestException, requests.Timeout, Exception) as e:
+                crash_logger.error(f"Failed to get KatFile server URL: {e}",
+                                 context={'api_key_present': bool(api_key)})
+                return None
+
+            # Step 3: Parse server response with bulletproof JSON handling
+            try:
                 server_data = server_response.json()
-                upload_url = server_data.get('result')
-                sess_id = server_data.get('sess_id')
+            except (ValueError, requests.exceptions.JSONDecodeError) as e:
+                crash_logger.error(f"Invalid JSON response from KatFile server: {e}",
+                                 context={'response_text': server_response.text[:500]})
+                return None
 
-                if upload_url and sess_id:
-                    # Step 2: Create MultipartEncoder for upload with progress tracking
-                    total_size = os.path.getsize(file_path)
-                    last_bytes_read = 0
+            if not isinstance(server_data, dict):
+                crash_logger.error("Invalid KatFile server response structure",
+                                 context={'data_type': type(server_data).__name__})
+                return None
 
-                    with open(file_path, 'rb') as f:
-                        encoder = MultipartEncoder(
-                            fields={
-                                'file': (os.path.basename(file_path), f),
-                                'sess_id': sess_id,
-                                'utype': 'prem'  # Premium user type
-                            }
-                        )
+            upload_url = server_data.get('result')
+            sess_id = server_data.get('sess_id')
 
-                        def upload_callback(monitor):
-                            nonlocal last_bytes_read
-                            if progress_callback:
+            if not upload_url or not sess_id:
+                crash_logger.error("Missing upload URL or session ID from KatFile",
+                                 context={'has_upload_url': bool(upload_url), 'has_sess_id': bool(sess_id)})
+                return None
+
+            if not isinstance(upload_url, str) or not upload_url.startswith('http'):
+                crash_logger.error("Invalid KatFile upload URL format",
+                                 context={'upload_url': str(upload_url)[:100]})
+                return None
+
+            # Step 4: Validate file size and prepare upload
+            try:
+                total_size = os.path.getsize(file_path)
+                if total_size == 0:
+                    crash_logger.error("File is empty for KatFile upload",
+                                     context={'file_path': file_path})
+                    return None
+            except OSError as e:
+                crash_logger.error(f"Cannot access file for KatFile upload: {e}",
+                                 context={'file_path': file_path})
+                return None
+
+            last_bytes_read = 0
+
+            # Step 5: Create MultipartEncoder with bulletproof progress tracking
+            try:
+                with open(file_path, 'rb') as f:
+                    encoder = MultipartEncoder(
+                        fields={
+                            'file': (os.path.basename(file_path), f),
+                            'sess_id': sess_id,
+                            'utype': 'prem'  # Premium user type
+                        }
+                    )
+
+                    def safe_upload_callback(monitor):
+                        nonlocal last_bytes_read
+                        try:
+                            if progress_callback and hasattr(monitor, 'bytes_read'):
                                 bytes_read = monitor.bytes_read
                                 # Only update if there's actual progress
                                 if bytes_read > last_bytes_read:
                                     progress_callback(bytes_read, total_size)
                                     last_bytes_read = bytes_read
+                        except Exception as e:
+                            crash_logger.warning(f"Progress callback failed for KatFile: {e}")
 
-                        monitor = MultipartEncoderMonitor(encoder, upload_callback)
+                    monitor = MultipartEncoderMonitor(encoder, safe_upload_callback)
 
-                        # Step 3: Upload the file with progress tracking
-                        headers = {'Content-Type': monitor.content_type}
-                        response = requests.post(upload_url, data=monitor, headers=headers, verify=False)
-
-                    logging.debug(f"KatFile Upload Response: {response.text}")
-
-                    if response.status_code == 200:
-                        data = response.json()[0]  # Extract first file info
-                        file_code = data.get('file_code')
-
-                        if file_code:
-                            download_url = f"https://katfile.com/{file_code}"
-                            logging.info(f"File uploaded successfully to KatFile: {download_url}")
-                            # Final progress update
-                            if progress_callback:
-                                progress_callback(total_size, total_size)
-                            return download_url
-                        else:
-                            logging.error(f"Failed to retrieve file code from KatFile: {data}")
-                            return None
-                    else:
-                        logging.error(f"KatFile upload failed: {response.status_code} - {response.text}")
-                        return None
-                else:
-                    logging.error("Failed to get KatFile upload server URL or session ID.")
-                    return None
-            else:
-                logging.error(f"KatFile server request failed: {server_response.status_code}")
+                    # Step 6: Upload the file with bulletproof HTTP request
+                    headers = {'Content-Type': monitor.content_type}
+                    response = requests.post(
+                        upload_url,
+                        data=monitor,
+                        headers=headers,
+                        verify=False,
+                        timeout=300.0
+                    )
+                    response.raise_for_status()
+            except (requests.RequestException, requests.Timeout, OSError, Exception) as e:
+                crash_logger.error(f"Failed to upload file to KatFile: {e}",
+                                 context={'file_path': file_path, 'upload_url': upload_url})
                 return None
 
-        except Exception as e:
-            logging.error(f"Exception during KatFile upload: {e}", exc_info=True)
-            return None
+            # Step 7: Process upload response with bulletproof JSON handling
+            logging.debug(f"KatFile Upload Response: {response.text}")
+
+            try:
+                data = response.json()
+            except (ValueError, requests.exceptions.JSONDecodeError) as e:
+                crash_logger.error(f"Invalid JSON response from KatFile upload: {e}",
+                                 context={'response_text': response.text[:500]})
+                return None
+
+            if not isinstance(data, list) or len(data) == 0:
+                crash_logger.error("Invalid KatFile upload response structure",
+                                 context={'data_type': type(data).__name__, 'data': str(data)[:200]})
+                return None
+
+            file_info = data[0]  # Extract first file info
+            if not isinstance(file_info, dict):
+                crash_logger.error("Invalid KatFile file info structure",
+                                 context={'file_info_type': type(file_info).__name__})
+                return None
+
+            file_code = file_info.get('file_code')
+            if not file_code or not isinstance(file_code, str):
+                crash_logger.error("Missing or invalid file code from KatFile",
+                                 context={'file_info': str(file_info)[:200]})
+                return None
+
+            # Step 8: Construct final URL and complete progress
+            download_url = f"https://katfile.com/{file_code}"
+            logging.info(f"File uploaded successfully to KatFile: {download_url}")
+
+            # Final progress update with error protection
+            try:
+                if progress_callback:
+                    progress_callback(total_size, total_size)
+            except Exception as e:
+                crash_logger.warning(f"Final progress callback failed for KatFile: {e}")
+
+            return download_url
 
     def upload_to_rapidgator_backup(self, file_path: str, progress_callback=None) -> str | None:
         """
@@ -4473,7 +4646,7 @@ class ForumBotSelenium:
                 if not cookieuser_checkbox.is_selected():
                     cookieuser_checkbox.click()
                     logging.info("✅ Remember Me checkbox selected.")
-                    print("✅ Remember Me checkbox selected.")
+                    print("[OK] Remember Me checkbox selected.")
                 else:
                     logging.info("✅ Remember Me checkbox already selected.")
             except NoSuchElementException:
@@ -4484,7 +4657,7 @@ class ForumBotSelenium:
                     if not cookieuser_checkbox.is_selected():
                         cookieuser_checkbox.click()
                         logging.info("✅ Remember Me checkbox selected (alternative selector).")
-                        print("✅ Remember Me checkbox selected (alternative selector).")
+                        print("[OK] Remember Me checkbox selected (alternative selector).")
                 except NoSuchElementException:
                     logging.warning("⚠️ Remember Me checkbox not found with any selector - continuing without it")
 
@@ -4634,11 +4807,15 @@ class ForumBotSelenium:
         except Exception as e:
             self.handle_exception("logging out", e)
 
-    def navigate_to_url(self, category_url, date_filters, page_from, page_to):
+    def navigate_to_url(self, category_url, date_filters, page_from, page_to, thread_discovery_callback=None):
         """
         Navigates to a specified category URL and checks whether the bot is still logged in.
         If logged out, it re-logs in at the current category page.
         Additionally, it extracts file hosts and links within each thread.
+
+        Args:
+            thread_discovery_callback: Optional callback function called when each thread is discovered.
+                                     Signature: callback(thread_id, thread_data)
         """
         try:
             print(f"navigate_to_url called with category_url: {category_url}")
@@ -4671,13 +4848,13 @@ class ForumBotSelenium:
                     page_url = category_url
 
                 logging.info(f"📄 Navigating to page {page_number}/{page_to}: {page_url}")
-                print(f"📄 Navigating to page {page_number}/{page_to}: {page_url}")
+                print(f"Navigating to page {page_number}/{page_to}: {page_url}")
 
                 self.driver.get(page_url)
                 time.sleep(3)  # Wait for page to load
 
                 logging.info(f"✅ Successfully loaded page {page_number}: {self.driver.current_url}")
-                print(f"✅ Successfully loaded page {page_number}: {self.driver.current_url}")
+                print(f"[OK] Successfully loaded page {page_number}: {self.driver.current_url}")
 
                 # Check if we've been redirected to the login page
                 if "/login" in self.driver.current_url:
@@ -4694,7 +4871,7 @@ class ForumBotSelenium:
 
                 # Extract and filter threads by the provided date ranges
                 page_threads_before = len(self.extracted_threads)
-                self.extract_threads(date_ranges)
+                self.extract_threads(date_ranges, thread_discovery_callback)
                 page_threads_after = len(self.extracted_threads)
                 new_threads_found = page_threads_after - page_threads_before
                 logging.info(f"📊 Page {page_number} processed: {new_threads_found} new threads found (Total: {page_threads_after})")
@@ -4704,7 +4881,7 @@ class ForumBotSelenium:
             total_threads = len(self.extracted_threads)
             total_pages = page_to - page_from + 1
             logging.info(f"✅ Navigation completed! Processed {total_pages} pages and found {total_threads} total threads")
-            print(f"✅ Navigation completed! Processed {total_pages} pages and found {total_threads} total threads")
+            print(f"[OK] Navigation completed! Processed {total_pages} pages and found {total_threads} total threads")
             return True
         except Exception as e:
             self.handle_exception("navigating to URL", e)
@@ -6160,10 +6337,14 @@ class ForumBotSelenium:
         
         return encoded
 
-    def extract_threads(self, date_ranges):
+    def extract_threads(self, date_ranges, thread_discovery_callback=None):
         """
         Extracts threads from the current page and filters them based on the date ranges.
         TRUE SINGLE-VISIT: Process each matching thread immediately without collecting first.
+
+        Args:
+            thread_discovery_callback: Optional callback called for each discovered thread.
+                                     Signature: callback(thread_id, thread_data)
         """
         try:
             logging.info("🧵 TRUE Single-Visit: Processing threads immediately when found...")
@@ -6251,6 +6432,14 @@ class ForumBotSelenium:
                         # Store in extracted_threads
                         self.extracted_threads[thread_id] = thread_data
                         threads_processed += 1
+
+                        # Call live discovery callback immediately for real-time UI updates
+                        if thread_discovery_callback:
+                            try:
+                                thread_discovery_callback(thread_id, thread_data)
+                                logging.debug(f"🔴 LIVE: Thread discovered callback called for '{thread_title}'")
+                            except Exception as callback_error:
+                                logging.warning(f"Thread discovery callback failed: {callback_error}")
                         
                         if file_hosts or links_dict:
                             threads_with_hosts += 1

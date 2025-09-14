@@ -11,6 +11,12 @@ from pathlib import Path
 from typing import List, Optional, Set
 from config.config import DATA_DIR  # ← استيراد DATA_DIR
 
+# Import crash protection utilities
+from utils.crash_protection import (
+    safe_execute, resource_protection, SafeProcessManager, SafePathManager,
+    ErrorSeverity, safe_process_manager, monitor_memory_usage, CircuitBreaker
+)
+
 
 class FileProcessor:
     def __init__(
@@ -1244,18 +1250,54 @@ class FileProcessor:
             logging.error(f"Extraction error: {str(e)}")
             return False
 
+    @safe_execute(
+        max_retries=3,
+        retry_delay=2.0,
+        expected_exceptions=(subprocess.SubprocessError, OSError, IOError),
+        severity=ErrorSeverity.CRITICAL,
+        default_return=False,
+        log_success=True
+    )
     def _create_rar_archive(self, source_dir: Path, output_base: Path, root_name: str) -> bool:
         """Create a RAR archive using current settings and clean root folder."""
-        try:
-            # The 'root_name' parameter is now used as the folder prefix inside the archive.
-            # However, for the audio files, we want them at the root.
-            # We will handle this by removing the -ap switch.
+        # Monitor memory usage
+        monitor_memory_usage(threshold_mb=400.0)
 
+        # Validate inputs
+        try:
+            source_dir = SafePathManager.validate_path(source_dir)
+            output_base = SafePathManager.validate_path(output_base)
+
+            if not source_dir.exists() or not source_dir.is_dir():
+                logging.error(f"Source directory invalid: {source_dir}")
+                return False
+
+            # Check WinRAR availability
+            if not self.winrar_path or not Path(self.winrar_path).exists():
+                logging.error(f"WinRAR not found at: {self.winrar_path}")
+                return False
+
+        except ValueError as e:
+            logging.error(f"Path validation failed: {e}")
+            return False
+
+        # CRITICAL FIX: Remove any existing extension to prevent .rar.rar or .epub.rar issues
+        output_base_clean = output_base.with_suffix('')  # Remove existing extension
+
+        # Safe command building
+        try:
             cmd = [str(self.winrar_path), 'a']
-            if self.split_bytes > 0:
-                cmd.append(f'-v{self.split_bytes // (1024 * 1024)}m')
+
+            # Safe division to prevent divide by zero
+            if self.split_bytes and self.split_bytes > 0:
+                split_mb = max(1, self.split_bytes // (1024 * 1024))  # Minimum 1MB
+                cmd.append(f'-v{split_mb}m')
+
+            # Validate compression level
+            comp_level = max(0, min(5, self.comp_level or 3))  # Clamp to valid range
+
             cmd.extend([
-                f'-m{self.comp_level}',
+                f'-m{comp_level}',
                 '-ep1',  # This is the key: Exclude base path from files.
                 '-r',
                 '-y',
@@ -1263,35 +1305,79 @@ class FileProcessor:
                 '-ma5',
                 '-x*.ini',
                 # The '-ap' switch was creating the unwanted internal folder. It has been removed.
-                str(output_base) + '.rar',
+                str(output_base_clean) + '.rar',  # Use cleaned base without extension
                 str(source_dir / "*")  # This ensures we compress the CONTENTS of source_dir
             ])
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            )
-            success = (result.returncode in [0, 1])
-            if success:
-                # Verify archive presence (single or multi-volume .part*.rar)
-                archive_exists = (
-                        (output_base.parent / f"{output_base.name}.rar").exists()
-                        or list(output_base.parent.glob(f"{output_base.name}.part*.rar"))
-                )
-                if not archive_exists:
-                    logging.error("RAR archive not found after creation.")
-                    return False
-                return True
-            else:
-                logging.error(f"WinRAR RAR creation failed code={result.returncode}")
-                logging.error(f"WinRAR Output: {result.stdout}")
-                logging.error(f"WinRAR Errors: {result.stderr}")
-                return False
+
         except Exception as e:
-            logging.error(f"RAR creation error: {str(e)}")
+            logging.error(f"Command building failed: {e}")
             return False
 
+        # Execute with bulletproof process management
+        with resource_protection("RAR_Archive_Creation", timeout_seconds=300.0):
+            success, stdout, stderr = safe_process_manager.execute_safe(
+                cmd,
+                timeout=180.0,  # 3 minutes timeout
+                kill_timeout=10.0,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            )
+
+            if not success:
+                logging.error(f"WinRAR RAR creation failed")
+                if stdout:
+                    logging.error(f"WinRAR Output: {stdout[:1000]}")
+                if stderr:
+                    logging.error(f"WinRAR Errors: {stderr[:1000]}")
+                return False
+
+        # Verify archive creation with retries
+        max_verify_attempts = 3
+        for attempt in range(max_verify_attempts):
+            try:
+                time.sleep(0.5)  # Brief pause for file system sync
+
+                # Use cleaned base name for verification
+                clean_name = output_base_clean.name
+                single_rar = output_base_clean.parent / f"{clean_name}.rar"
+                multi_rars = list(output_base_clean.parent.glob(f"{clean_name}.part*.rar"))
+
+                archive_exists = single_rar.exists() or bool(multi_rars)
+
+                if archive_exists:
+                    # Additional verification - check if archive is valid
+                    test_success, _, test_stderr = safe_process_manager.execute_safe(
+                        [str(self.winrar_path), 't', str(single_rar if single_rar.exists() else multi_rars[0])],
+                        timeout=30.0
+                    )
+
+                    if test_success:
+                        logging.info(f"✓ RAR archive created and verified: {clean_name}")
+                        return True
+                    else:
+                        logging.warning(f"Archive created but failed verification (attempt {attempt + 1})")
+                        if attempt < max_verify_attempts - 1:
+                            continue
+                else:
+                    logging.warning(f"Archive not found (attempt {attempt + 1})")
+                    if attempt < max_verify_attempts - 1:
+                        continue
+
+            except Exception as e:
+                logging.error(f"Archive verification error (attempt {attempt + 1}): {e}")
+                if attempt < max_verify_attempts - 1:
+                    continue
+
+        logging.error("RAR archive creation failed after all attempts")
+        return False
+
+    @safe_execute(
+        max_retries=3,
+        retry_delay=2.0,
+        expected_exceptions=(subprocess.SubprocessError, OSError, IOError),
+        severity=ErrorSeverity.CRITICAL,
+        default_return=False,
+        log_success=True
+    )
     def _create_zip_archive(self, source_dir: Path, output_base: Path, root_name: str) -> bool:
         """Create a ZIP archive using current settings and clean root folder."""
         try:
@@ -1306,6 +1392,10 @@ class FileProcessor:
             cmd = [str(self.winrar_path), 'a']
             if self.split_bytes > 0:
                 cmd.append(f'-v{self.split_bytes // (1024 * 1024)}m')
+
+            # CRITICAL FIX: Remove any existing extension to prevent .zip.zip or .epub.zip issues
+            output_base_clean = output_base.with_suffix('')  # Remove existing extension
+
             cmd.extend([
                 f'-m{self.comp_level}',
                 '-ep1', # Exclude base path from files.
@@ -1314,7 +1404,7 @@ class FileProcessor:
                 '-afzip',
                 '-x*.ini',
                 # The '-ap' switch was creating the unwanted internal folder. It has been removed.
-                str(output_base) + '.zip',
+                str(output_base_clean) + '.zip',  # Use cleaned base without extension
                 str(source_dir / "*"), # Compress the CONTENTS of source_dir
             ])
 

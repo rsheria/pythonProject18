@@ -200,9 +200,18 @@ def render_with_links(
                 return False
 
             if _has_multiple_types(host_results):
-                block_text, per_type = lt.build_type_format_host_blocks(
-                    host_results, host_order=host_order, host_labels=host_labels, force_build=True
-                )
+                # ENHANCED: Use smart template rendering that respects user's saved template
+                logging.debug("Detected mixed content - using smart template rendering")
+
+                # Get user's selected template
+                try:
+                    from core.user_manager import get_user_manager
+                    user_mgr = get_user_manager()
+                    user_template = user_mgr.get_user_setting("links_template", lt.LINK_TEMPLATE_PRESETS[0])
+                except Exception:
+                    user_template = lt.LINK_TEMPLATE_PRESETS[0]  # Fallback to first preset
+
+                # Extract keeplinks
                 host_results_copy = dict(host_results or {})
                 keeplinks_val = host_results_copy.pop("keeplinks", None)
                 keeplink_url = ""
@@ -214,32 +223,20 @@ def render_with_links(
                 elif isinstance(keeplinks_val, str):
                     keeplink_url = keeplinks_val
 
-                parts = []
-                if keeplink_url:
-                    keep_line = f"[url={keeplink_url}]Keeplinks[/url]"
-                    parts.append(keep_line)
-                if per_type.get("audio"):
-                    parts.append(per_type["audio"])
-                if per_type.get("book"):
-                    parts.append(per_type["book"])
-                combined_block = "\n\n".join(p for p in parts if p).strip()
+                # Use new smart rendering
+                smart_block = lt.render_smart_mixed_content(
+                    user_template, host_results, keeplink_url, host_order, host_labels
+                )
 
+                # Replace placeholder or append
                 ph = next((ph for ph in generic_placeholders if ph in template_to_process), None)
                 if ph:
-                    template_to_process = template_to_process.replace(ph, combined_block, 1)
+                    template_to_process = template_to_process.replace(ph, smart_block, 1)
                 else:
                     if template_to_process and not template_to_process.endswith("\n"):
                         template_to_process += "\n"
-                    template_to_process = f"{template_to_process}\n{combined_block}".strip()
+                    template_to_process = f"{template_to_process}\n{smart_block}".strip()
 
-                # Remove any legacy host placeholders like {LINK_RG} that
-                # cannot be satisfied in multi-type mode
-                for token in lt.HOST_TOKENS.values():
-                    template_to_process = "\n".join(
-                        lt._strip_host_placeholder(line, token)
-                        for line in template_to_process.splitlines()
-                    )
-                template_to_process = lt._cleanup_separators(template_to_process)
                 return template_to_process
 
             for ph in generic_placeholders:

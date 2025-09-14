@@ -34,7 +34,7 @@ from bs4 import BeautifulSoup, NavigableString
 from PyQt5 import QtCore
 from PyQt5.QtCore import (Q_ARG, QDateTime, QMetaObject, QMutex, QMutexLocker,
                           QObject, QSize, Qt, QThread, QThreadPool, QTimer,
-                          QUrl, pyqtSignal)
+                          QUrl, pyqtSignal, pyqtSlot)
 from PyQt5.QtGui import (QBrush, QColor, QFont, QGuiApplication, QIcon,
                          QKeySequence, QPalette, QPixmap, QScreen,
                          QStandardItem, QStandardItemModel, QTextCursor,
@@ -151,7 +151,8 @@ from .components import (ModernCard, ModernContentContainer, ModernScrollArea,
                          ModernSectionCard, ModernSidebar)
 from .dialogs import LinksDialog, ReplaceLinksDialog
 from .stats_widget import StatsWidget
-from .status_widget import StatusWidget
+# MAGICAL TRANSFORMATION - Replace chaos with PERFECTION!
+from gui.professional_status_widget import ProfessionalStatusWidget as StatusWidget
 from .upload_status_handler import UploadStatusHandler
 
 
@@ -527,11 +528,14 @@ class ForumBotGUI(QMainWindow):
         for handler in logging.getLogger().handlers:
             handler.addFilter(self._ui_noise_filter)
         # Ensure no previously restored session leaks into the new UI
+        # MODIFIED: Clear session but preserve user and process threads
         if self.user_manager.get_current_user():
             logging.info(
-                f"\U0001f501 Session found for user: {self.user_manager.get_current_user()} — clearing for fresh start"
+                f"🔁 Session found for user: {self.user_manager.get_current_user()} — clearing sessions but preserving user data"
             )
-            self.user_manager.clear_current_session()
+            # Only clear site sessions, but keep user logged in and preserve process threads
+            self.user_manager._site_sessions.clear()
+            # Keep the current_user and user_data_dir intact!
         self.active_upload_hosts = list(self.config.get('upload_hosts', []))
         if not self.active_upload_hosts:
             env_hosts = os.getenv('UPLOAD_HOSTS', '')
@@ -582,8 +586,8 @@ class ForumBotGUI(QMainWindow):
 
         # Initialize Rapidgator token from config
         self.bot.rapidgator_token = self.config.get('rapidgator_api_token', '')
-        print(f"🤖 DEBUG: Bot initialized successfully: {self.bot is not None}")
-        logging.info(f"🤖 DEBUG: Bot initialized successfully: {self.bot is not None}")
+        print(f"DEBUG: Bot initialized successfully: {self.bot is not None}")
+        logging.info(f"DEBUG: Bot initialized successfully: {self.bot is not None}")
 
         self.winrar_exe_path = self.config.get(
             'winrar_exe_path', os.environ.get('WINRAR_PATH', 'winrar')
@@ -752,6 +756,7 @@ class ForumBotGUI(QMainWindow):
         self.content_area.addWidget(self.settings_tab)
 
     def init_status_view(self):
+        # Now using the PROFESSIONAL status widget that displays live progress!
         self.status_widget = StatusWidget(self)
         self.content_area.addWidget(self.status_widget)
 
@@ -813,7 +818,10 @@ class ForumBotGUI(QMainWindow):
             handler = getattr(self.status_widget, "on_progress_update", None)
         # Connect orchestrator progress updates to the handler on the GUI thread
         if handler is not None:
+            logging.info(f"✅ Connecting orchestrator to handler: {handler.__name__} from {self.status_widget.__class__.__name__}")
             self.orch.progress_update.connect(handler, Qt.QueuedConnection)
+        else:
+            logging.error(f"❌ NO HANDLER FOUND! status_widget class: {self.status_widget.__class__.__name__}")
 
     def register_worker(self, worker):
         """Register a worker with the orchestrator and status widget.
@@ -847,7 +855,8 @@ class ForumBotGUI(QMainWindow):
 
             worker.file_progress_update.connect(_adapter, Qt.QueuedConnection)
 
-        # Ensure worker receives the cancel event from the status widget
+        # Connect UI-specific signals (like thread_discovered) - NOT progress_update!
+        # progress_update is handled by the orchestrator above
         self.status_widget.connect_worker(worker)
 
         # For upload workers, store mapping so we can control them via context menu
@@ -6306,15 +6315,7 @@ class ForumBotGUI(QMainWindow):
                 return ok
 
             work_dir = self.get_sanitized_path(category, thread_id)
-            for op in (OpType.DOWNLOAD, OpType.UPLOAD, OpType.POST):
-                self.orch.progress_update.emit(
-                    OperationStatus(
-                        section=category,
-                        item=title,
-                        op_type=op,
-                        stage=OpStage.QUEUED,
-                    )
-                )
+            # Don't pre-create empty status rows - let each operation create its own row when it starts
             self.orch.enqueue(
                 topic_id=thread_id,
                 section=category,
@@ -8228,6 +8229,50 @@ class ForumBotGUI(QMainWindow):
         except Exception as e:
             self.handle_exception(f"handle_new_threads for category '{category_name}'", e)
 
+    @pyqtSlot(str, str, dict)
+    def handle_live_thread_discovery(self, category_name, thread_id, thread_data):
+        """
+        Handle live thread discovery - adds threads to UI immediately as they're found during tracking.
+        This provides real-time feedback showing each thread as it's discovered.
+        """
+        try:
+            logging.info(f"🔴 LIVE: Thread discovered '{thread_data.get('thread_title', thread_id)}' in category '{category_name}'")
+
+            # Add to process_threads immediately for instant display
+            if category_name not in self.process_threads:
+                self.process_threads[category_name] = {}
+
+            thread_title = thread_data.get('thread_title', f"Thread_{thread_id}")
+            thread_url = thread_data.get('thread_url', '')
+            file_hosts = thread_data.get('file_hosts', [])
+
+            # Store in process_threads for instant visibility
+            self.process_threads[category_name][thread_title] = {
+                'thread_id': thread_id,
+                'thread_title': thread_title,
+                'thread_url': thread_url,
+                'file_hosts': file_hosts,
+                'links': thread_data.get('links', {}),
+                'has_known_hosts': thread_data.get('has_known_hosts', False),
+                'author': thread_data.get('author', ''),
+                'versions': {thread_title: thread_data}
+            }
+
+            # Update process threads table immediately
+            self.populate_process_threads_table(self.process_threads)
+
+            # Save to disk immediately for persistence
+            try:
+                self.save_process_threads_data(force=True)
+                logging.debug(f"✅ LIVE: Saved thread '{thread_title}' to disk")
+            except Exception as e:
+                logging.error(f"Failed to save live thread: {e}")
+
+            logging.debug(f"🔴 LIVE: Added thread '{thread_title}' with {len(file_hosts)} hosts to process threads")
+
+        except Exception as e:
+            logging.error(f"Error handling live thread discovery for '{category_name}': {e}", exc_info=True)
+
     def handle_new_threads_process_threads(self, category_name, new_threads):
         try:
             logging.info(f"Handling {len(new_threads)} new threads for Process Threads in category '{category_name}'.")
@@ -8316,8 +8361,11 @@ class ForumBotGUI(QMainWindow):
             for thread_title, thread_info in threads.items():
                 # Get data from thread_info (handle both old and new formats)
                 if 'versions' in thread_info and thread_info['versions']:
-                    # New format: get latest version
-                    latest_version = thread_info['versions'][-1]
+                    # New format: get latest version (versions is a dict, not list)
+                    if isinstance(thread_info['versions'], dict):
+                        latest_version = list(thread_info['versions'].values())[-1]
+                    else:
+                        latest_version = thread_info['versions'][-1]
                     thread_url = latest_version.get('thread_url', '')
                     thread_date = latest_version.get('thread_date', '')
                     thread_id = latest_version.get('thread_id', '')
@@ -8974,8 +9022,11 @@ class ForumBotGUI(QMainWindow):
 
             # 2) شبّك الإشارات
             worker.update_threads.connect(self.handle_new_threads, Qt.QueuedConnection)
+            worker.thread_discovered.connect(self.handle_live_thread_discovery, Qt.QueuedConnection)  # Live discovery
             worker.finished.connect(self.monitoring_finished, Qt.QueuedConnection)
-            self.register_worker(worker)
+            # Connect to status system - register_worker handles EVERYTHING
+            self.register_worker(worker)  # Creates the operation in StatusManager AND connects to status widget
+            # DO NOT call status_widget.connect_worker - it's already done in register_worker!
 
             # 3) خزّنه علشان ما يتمش حذفه من الـ Python GC
             self.category_workers[category_name] = worker
@@ -9068,6 +9119,31 @@ class ForumBotGUI(QMainWindow):
         """Handle the completion of a worker thread."""
         self.statusBar().showMessage(f'Monitoring finished for {category_name}.')
         logging.info(f"Monitoring thread finished for category '{category_name}'.")
+
+        # CRITICAL: Clean up the worker from category_workers to prevent duplicates
+        if category_name in self.category_workers:
+            logging.info(f"🧹 Cleaning up worker for category '{category_name}'")
+            try:
+                # Get the worker before removing it
+                worker = self.category_workers[category_name]
+
+                # Remove from category_workers dictionary
+                del self.category_workers[category_name]
+
+                # Ensure the worker thread is properly stopped
+                if hasattr(worker, 'stop'):
+                    worker.stop()
+
+                # Disconnect any remaining signals to prevent memory leaks
+                if hasattr(worker, 'disconnect'):
+                    worker.disconnect()
+
+                logging.info(f"✅ Worker cleanup completed for category '{category_name}'")
+            except Exception as cleanup_error:
+                logging.error(f"❌ Error cleaning up worker for '{category_name}': {cleanup_error}")
+
+        # Don't call complete_operation here - the worker already sent FINISHED status
+        # This avoids duplicate operations or status conflicts
 
     def view_links(self, thread_title, from_section='Posts', category=None):
         if from_section == 'Posts':
@@ -9934,28 +10010,28 @@ class ForumBotGUI(QMainWindow):
         filename = self.get_process_threads_filepath()
         current_user = self.user_manager.get_current_user() if hasattr(self, 'user_manager') else None
 
-        logging.info(f"📂 Loading process threads data for user: {current_user}")
-        logging.info(f"📂 Target file path: {filename}")
+        logging.info(f"[DATA] Loading process threads data for user: {current_user}")
+        logging.info(f"[DATA] Target file path: {filename}")
 
         if not os.path.exists(filename):
-            logging.warning(f"❌ No saved Process Threads data found: {filename}")
+            logging.warning(f"[ERROR] No saved Process Threads data found: {filename}")
             self.process_threads = {}  # Initialize empty dict
             return False
 
         try:
             with open(filename, 'r', encoding='utf-8') as f:
                 loaded_data = json.load(f)
-                logging.info(f"📊 Raw loaded data keys: {list(loaded_data.keys()) if loaded_data else 'EMPTY'}")
-                logging.info(f"📊 Raw loaded data size: {len(loaded_data) if loaded_data else 0} threads")
+                logging.info(f"[DATA] Raw loaded data keys: {list(loaded_data.keys()) if loaded_data else 'EMPTY'}")
+                logging.info(f"[DATA] Raw loaded data size: {len(loaded_data) if loaded_data else 0} threads")
 
                 self.process_threads = loaded_data
-                logging.info(f"📊 self.process_threads after loading: {len(self.process_threads)} threads")
+                logging.info(f"[DATA] self.process_threads after loading: {len(self.process_threads)} threads")
 
             self.populate_process_threads_table(self.process_threads)
-            logging.info(f"✅ Process Threads data loaded from {filename} - {len(self.process_threads)} threads")
+            logging.info(f"[OK] Process Threads data loaded from {filename} - {len(self.process_threads)} threads")
             return True
         except Exception as e:
-            logging.error(f"❌ Error loading Process Threads data: {e}", exc_info=True)
+            logging.error(f"[ERROR] Error loading Process Threads data: {e}", exc_info=True)
             self.process_threads = {}  # Initialize empty dict on error
             return False
 

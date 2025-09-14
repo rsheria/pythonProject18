@@ -518,4 +518,125 @@ def render_links_german(links: dict, keeplinks: str | None = None) -> str:
     return "\n".join(lines).strip()
 
 
-__all__ = ["apply_links_template", "LINK_TEMPLATE_PRESETS", "render_links_german"]
+def render_smart_template_with_content_types(
+    user_template: str,
+    host_results: dict,
+    keeplinks_url: str = "",
+    host_order: list[str] = None,
+    host_labels: dict[str, str] = None
+) -> str:
+    """
+    Render mixed audiobook + ebook content using the user's saved template design.
+
+    Creates separate blocks for each content type while respecting the exact
+    template structure saved by the user in settings.
+
+    Args:
+        user_template: The user's selected link template from LINK_TEMPLATE_PRESETS
+        host_results: Dictionary with host data including by_type structure
+        keeplinks_url: Keeplinks URL (shown in separate block above everything)
+        host_order: Order of hosts to display
+        host_labels: Display labels for hosts
+
+    Returns:
+        Final BBCode with keeplinks block + content-specific template blocks
+    """
+    order = host_order or HOST_ORDER
+    labels = host_labels or HOST_LABELS
+
+    # German content type names for forum
+    content_types = {
+        "audio": "Hörbuch",
+        "book": "Ebook"
+    }
+
+    # Extract keeplinks block if present
+    parts = []
+    if keeplinks_url:
+        parts.append(f"[size=3][url={keeplinks_url}]Keeplinks[/url][/size]")
+
+    # Process each content type with user template
+    inv = _invert_host_results_by_type_format(host_results)
+
+    for content_type in ("audio", "book"):
+        type_data = inv.get(content_type, {})
+        if not type_data:
+            continue
+
+        # Collect all formats for this content type
+        all_format_urls = {}
+        format_info = []
+
+        for fmt, host_map in type_data.items():
+            format_info.append(fmt.upper())
+            for host in order:
+                if host in host_map and host_map[host]:
+                    all_format_urls.setdefault(host, []).extend(host_map[host])
+
+        if not all_format_urls:
+            continue
+
+        # Create content type header with formats
+        german_type = content_types.get(content_type, content_type.title())
+        format_list = " + ".join(format_info)
+        content_header = f"[b]{german_type} ({format_list})[/b]"
+
+        # Apply user template with collected URLs
+        template_with_header = f"{content_header}\n{user_template}"
+        content_block = apply_links_template(template_with_header, all_format_urls)
+
+        parts.append(content_block)
+
+    return "\n\n".join(parts).strip()
+
+
+def render_smart_mixed_content(
+    user_template: str,
+    host_results: dict,
+    keeplinks_url: str = "",
+    host_order: list[str] = None,
+    host_labels: dict[str, str] = None
+) -> str:
+    """
+    Enhanced version that handles single files and mixed content intelligently.
+
+    If it's a single file type, uses the template normally.
+    If it's mixed content, creates separate blocks per type with German labels.
+    """
+    order = host_order or HOST_ORDER
+    labels = host_labels or HOST_LABELS
+
+    # Check if we have mixed content
+    inv = _invert_host_results_by_type_format(host_results)
+    has_audio = bool(inv.get("audio"))
+    has_books = bool(inv.get("book"))
+
+    # Single content type - use template normally
+    if (has_audio and not has_books) or (has_books and not has_audio):
+        # Flatten the data for normal template processing
+        flat_links = {}
+        for type_data in inv.values():
+            for format_data in type_data.values():
+                for host, urls in format_data.items():
+                    flat_links.setdefault(host, []).extend(urls)
+
+        if keeplinks_url:
+            flat_links["keeplinks"] = [keeplinks_url]
+
+        return apply_links_template(user_template, flat_links)
+
+    # Mixed content - use smart template separation
+    if has_audio and has_books:
+        return render_smart_template_with_content_types(
+            user_template, host_results, keeplinks_url, order, labels
+        )
+
+    # Fallback for no organized content
+    normalized = _normalize_links_dict(host_results)
+    if keeplinks_url:
+        normalized["keeplinks"] = [keeplinks_url]
+    return apply_links_template(user_template, normalized)
+
+
+__all__ = ["apply_links_template", "LINK_TEMPLATE_PRESETS", "render_links_german",
+           "render_smart_template_with_content_types", "render_smart_mixed_content"]
