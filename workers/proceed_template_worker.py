@@ -56,7 +56,23 @@ class ProceedTemplateWorker(QThread):
                 self.author,
                 thread_title=self.title,
             )
+            # Check if host_results contains actual link data
+            has_actual_links = False
             if self.host_results:
+                for host_data in self.host_results.values():
+                    if isinstance(host_data, dict):
+                        by_type = host_data.get("by_type", {})
+                        if any(format_data for type_data in by_type.values()
+                               for format_data in type_data.values()
+                               if isinstance(format_data, list) and format_data):
+                            has_actual_links = True
+                            break
+                        # Also check for keeplinks
+                        if host_data.get("urls") or host_data.get("url"):
+                            has_actual_links = True
+                            break
+
+            if has_actual_links:
                 bbcode_filled = self._merge_links_into_bbcode(
                     self.category, bbcode_filled, self.host_results
                 )

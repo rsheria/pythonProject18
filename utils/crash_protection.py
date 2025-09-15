@@ -392,10 +392,19 @@ class SafePathManager:
 
             # Check for dangerous patterns
             path_str = str(path_obj).lower()
-            dangerous_patterns = ['..\\', '../', 'con', 'prn', 'aux', 'nul']
-            for pattern in dangerous_patterns:
+
+            # Check for directory traversal patterns
+            traversal_patterns = ['..\\', '../']
+            for pattern in traversal_patterns:
                 if pattern in path_str:
                     raise ValueError(f"Dangerous path pattern detected: {pattern}")
+
+            # Check for Windows reserved names (only as complete path components)
+            reserved_names = {'con', 'prn', 'aux', 'nul', 'com1', 'com2', 'com3', 'com4', 'com5', 'com6', 'com7', 'com8', 'com9', 'lpt1', 'lpt2', 'lpt3', 'lpt4', 'lpt5', 'lpt6', 'lpt7', 'lpt8', 'lpt9'}
+            path_parts = [part.split('.')[0].lower() for part in path_obj.parts]
+            for part in path_parts:
+                if part in reserved_names:
+                    raise ValueError(f"Dangerous path pattern detected: {part}")
 
             return path_obj
 

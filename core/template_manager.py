@@ -90,7 +90,7 @@ class TemplateManager:
 # ضعه في core/template_manager.py بدلاً من الدالة render_with_links الحالية
 
 def render_with_links(
-        self,
+        template_manager_instance,
         category: str,
         host_results: dict,
         template_text: Optional[str] = None,
@@ -103,7 +103,7 @@ def render_with_links(
     that templates with generic {LINKS} placeholders are correctly processed using
     the legacy templating engine.
     """
-    base = template_text if template_text is not None else (self.get_template(category) or "")
+    base = template_text if template_text is not None else (template_manager_instance.get_template(category) or "")
     try:
         from utils import link_template as lt
         import logging

@@ -10883,6 +10883,30 @@ class ForumBotGUI(QMainWindow):
         # الآن سنمرر بيانات الروابط الخام (host_results) مباشرة إلى الـ Worker
         host_results = thread.get("host_results", {})
 
+        # Build links_block from the "links" data as fallback
+        links_block = ""
+        links_data = thread.get("links", {})
+        if links_data:
+            link_parts = []
+            if "keeplinks" in links_data:
+                keeplinks_url = links_data["keeplinks"]
+                if isinstance(keeplinks_url, list):
+                    keeplinks_url = keeplinks_url[0] if keeplinks_url else ""
+                if keeplinks_url:
+                    link_parts.append(f"[url={keeplinks_url}]Keeplinks[/url]")
+
+            # Add other hosts
+            for host, urls in links_data.items():
+                if host == "keeplinks":
+                    continue
+                if isinstance(urls, list) and urls:
+                    host_name = host.replace(".com", "").replace(".net", "").replace(".io", "").capitalize()
+                    for i, url in enumerate(urls):
+                        link_parts.append(f"[url={url}]{host_name}[/url]")
+
+            if link_parts:
+                links_block = "[center][size=3][b]DOWNLOAD LINKS[/b][/size]\n\n" + " ‖ ".join(link_parts) + "\n[/center]"
+
         # رسالة حالة أولية في StatusWidget
         init_status = OperationStatus(
             section="Template",
@@ -10901,7 +10925,7 @@ class ForumBotGUI(QMainWindow):
             title=title,
             raw_bbcode=raw_bbcode,
             author=thread.get("author", ""),
-            links_block="",  # لم نعد نستخدم هذا، نمرر نصًا فارغًا كإجراء احترازي
+            links_block=links_block,  # Now using actual links data
             host_results=host_results,  # هذا هو الجزء المهم الذي يحتوي على كل الروابط
         )
 
