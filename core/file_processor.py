@@ -421,8 +421,8 @@ class FileProcessor:
             if force_books_mode:
                 logging.info("🔥 BOOKS MODE ACTIVATED - Enhanced Processing")
 
-                # إنشاء مجلد عمل مؤقت خارج thread_dir لتجنب التعارضات
-                work_temp_dir = thread_dir.parent / f"_temp_books_work_{uuid.uuid4().hex[:8]}"
+                # إنشاء مجلد عمل مؤقت خارج thread_dir لتجنب التعارضات - shorter name
+                work_temp_dir = thread_dir.parent / f"_tmp_{uuid.uuid4().hex[:6]}"
                 work_temp_dir.mkdir(parents=True, exist_ok=True)
 
                 try:
@@ -450,19 +450,36 @@ class FileProcessor:
 
                         # معالجة الأرشيف
                         if self._is_archive_file(f):
-                            # استخراج مؤقت
-                            extract_temp = work_temp_dir / f"extract_{uuid.uuid4().hex[:8]}"
+                            # استخراج مؤقت - shorter name to avoid path length issues
+                            extract_temp = work_temp_dir / f"ext_{uuid.uuid4().hex[:6]}"
                             extract_temp.mkdir(parents=True, exist_ok=True)
 
                             if self._extract_archive(f, extract_temp, password):
+                                # Log files immediately after extraction
+                                extracted_files = list(extract_temp.rglob('*'))
+                                file_count = sum(1 for ef in extracted_files if ef.is_file())
+                                logging.info(f"📂 After extraction: {file_count} files found in {extract_temp.name}")
+
                                 # تسطيح المجلدات
                                 self._flatten_extracted_directory(extract_temp)
+
+                                # Log files after flattening
+                                flattened_files = list(extract_temp.glob('*'))
+                                flat_file_count = sum(1 for ef in flattened_files if ef.is_file())
+                                logging.info(f"📂 After flattening: {flat_file_count} files in root of {extract_temp.name}")
+
                                 # تعديل الهاش وإزالة الملفات المحظورة
                                 self._modify_files_for_hash_safely(extract_temp)
                                 self._remove_banned_files_safely(extract_temp)
 
+                                # Log files after cleanup
+                                clean_files = list(extract_temp.glob('*'))
+                                clean_file_count = sum(1 for ef in clean_files if ef.is_file())
+                                logging.info(f"📂 After cleanup: {clean_file_count} files remaining in {extract_temp.name}")
+
                                 # فصل الكتب عن الملفات الأخرى
                                 extracted_books, extracted_others = self.split_tree_by_media_kind(extract_temp)
+                                logging.info(f"📚 Split result: {len(extracted_books)} books, {len(extracted_others)} others")
 
                                 # نقل الكتب للمجموعة النهائية
                                 for book in extracted_books:
@@ -1209,14 +1226,17 @@ class FileProcessor:
     ) -> bool:
         """Extract archive using WinRAR with enhanced error handling."""
         try:
-            # استخدام أوامر صحيحة وصامتة
+            # Try to use console RAR if available, otherwise WinRAR
+            winrar_dir = self.winrar_path.parent
+            rar_exe_path = winrar_dir / "Rar.exe"
+            executable = rar_exe_path if rar_exe_path.exists() else self.winrar_path
+
+            # Use simpler, more reliable WinRAR/RAR command
             cmd = [
-                str(self.winrar_path),
-                'x',  # Extract with full paths
+                str(executable),
+                'e',  # Extract without paths (flatten structure)
                 '-y',  # Yes to all prompts
                 '-o+',  # Overwrite existing files
-                '-ibck',  # Run in background (no GUI)
-                '-inul',  # Disable all messages
             ]
             if password:
                 cmd.append(f'-p{password}')
@@ -1225,18 +1245,36 @@ class FileProcessor:
 
             cmd.extend([
                 str(archive_path),
-                str(extract_dir) + '\\',  # Ensure destination path format
+                str(extract_dir) + os.sep,  # Use OS-appropriate separator
             ])
+
+            logging.info(f"🔧 Using executable: {executable}")
+            logging.info(f"🔧 Extract directory: {extract_dir}")
+            logging.info(f"🔧 Archive path: {archive_path}")
+
+            logging.info(f"🔧 Running WinRAR extraction: {' '.join(cmd[:6])}... {archive_path.name}")
 
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW | subprocess.SW_HIDE
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=300  # 5 minute timeout
             )
+
+            # Log WinRAR output for debugging
+            logging.info(f"📄 WinRAR exit code: {result.returncode}")
+            if result.stdout:
+                logging.debug(f"📄 WinRAR stdout: {result.stdout[:500]}")
+            if result.stderr:
+                logging.warning(f"📄 WinRAR stderr: {result.stderr[:500]}")
 
             # WinRAR exit codes: 0=success, 1=warning (can be ignored), others=error
             if result.returncode in [0, 1]:
+                # Check if files were actually extracted
+                extracted_files = list(extract_dir.rglob('*'))
+                file_count = sum(1 for f in extracted_files if f.is_file())
+                logging.info(f"✅ WinRAR reported success, found {file_count} extracted files")
                 return True
             else:
                 logging.error(f"WinRAR extraction failed with code {result.returncode}")

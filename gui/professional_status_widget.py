@@ -22,10 +22,10 @@ from datetime import datetime, timedelta
 from PyQt5.QtWidgets import (
     QWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QHeaderView,
     QProgressBar, QLabel, QHBoxLayout, QPushButton, QStyleOptionProgressBar,
-    QApplication, QStyle
+    QApplication, QStyle, QSizePolicy, QStyledItemDelegate, QMenu, QMessageBox
 )
 from PyQt5.QtCore import (
-    Qt, pyqtSlot, QTimer, QMutex, QMutexLocker, pyqtSignal
+    Qt, pyqtSlot, QTimer, QMutex, QMutexLocker, pyqtSignal, QEventLoop, QPoint
 )
 from PyQt5.QtGui import QPainter, QColor, QPalette, QFont
 
@@ -45,45 +45,116 @@ def T():
 logger = logging.getLogger(__name__)
 
 
+class ProgressBarDelegate(QStyledItemDelegate):
+    """
+    Custom delegate for painting progress bars directly in table cells.
+    This approach ensures progress bars are ALWAYS visible.
+    """
+
+    def paint(self, painter, option, index):
+        """Paint the progress bar in the cell"""
+        # Get the progress value from UserRole
+        progress = index.data(Qt.UserRole)
+
+        if progress is None:
+            # No progress data, just show default
+            super().paint(painter, option, index)
+            return
+
+        # Convert progress to integer percentage
+        try:
+            progress_value = int(progress)
+        except (TypeError, ValueError):
+            progress_value = 0
+
+        # Save painter state
+        painter.save()
+
+        # Get theme colors
+        t = T()
+        progress_bg = getattr(t, "PROGRESS_BACKGROUND", "#404040")
+        progress_fill = getattr(t, "PROGRESS_FILL", "#4CAF50")
+
+        # Draw background
+        painter.fillRect(option.rect, QColor(progress_bg))
+
+        # Calculate filled width
+        filled_width = int(option.rect.width() * progress_value / 100)
+
+        if filled_width > 0:
+            # Draw filled portion
+            fill_rect = option.rect.adjusted(0, 0, -(option.rect.width() - filled_width), 0)
+            painter.fillRect(fill_rect, QColor(progress_fill))
+
+        # Draw text
+        painter.setPen(QColor(t.TEXT_PRIMARY))
+        text = f"{progress_value}%"
+        painter.drawText(option.rect, Qt.AlignCenter, text)
+
+        # Restore painter state
+        painter.restore()
+
+
 class ProfessionalProgressBar(QProgressBar):
     """
     A beautiful, thread-safe progress bar with smart display features and theme support
     """
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, parent=None):
+        super().__init__(parent)
         self.setMinimum(0)
         self.setMaximum(100)
         self.setValue(0)
         self.setTextVisible(True)
+
+        # CRITICAL FIX: Set size constraints for visibility
+        self.setFixedHeight(22)  # Slightly smaller to fit better in 30px row
+        self.setMinimumWidth(100)  # Minimum width for visibility
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)  # Allow horizontal expansion
+
+        # Enable interaction
+        self.setEnabled(True)
+        self.setFocusPolicy(Qt.NoFocus)  # Don't steal focus but remain visible
+
+        # Ensure the progress bar is initially visible
+        self.setVisible(True)
+
+        # Apply theme-aware styling
         self._apply_theme_aware_style()
 
     def _apply_theme_aware_style(self):
         """Apply theme-aware styling using the application's theme system"""
         t = T()
 
-        # Get progress colors with fallbacks (same pattern as StyleManager)
-        progress_bg = getattr(t, "PROGRESS_BACKGROUND", t.SURFACE_VARIANT)
-        progress_fill = getattr(t, "PROGRESS_FILL", t.PRIMARY)
-        progress_success = getattr(t, "PROGRESS_SUCCESS", t.SUCCESS)
-        progress_warning = getattr(t, "PROGRESS_WARNING", t.WARNING)
-        progress_error = getattr(t, "PROGRESS_ERROR", t.ERROR)
+        # Get progress colors with fallbacks - ensure we ALWAYS have valid colors
+        progress_bg = getattr(t, "PROGRESS_BACKGROUND", "#404040")
+        progress_fill = getattr(t, "PROGRESS_FILL", getattr(t, "PRIMARY", "#4CAF50"))  # Green fallback
+        progress_success = getattr(t, "PROGRESS_SUCCESS", "#4CAF50")
+        progress_warning = getattr(t, "PROGRESS_WARNING", "#FF9800")
+        progress_error = getattr(t, "PROGRESS_ERROR", "#F44336")
+
+        # Ensure we have valid colors
+        if not progress_fill or progress_fill == "None":
+            progress_fill = "#4CAF50"  # Bright green default
+
+        logger.debug(f"Progress bar colors - bg: {progress_bg}, fill: {progress_fill}")
 
         self.setStyleSheet(f"""
             QProgressBar {{
-                border: 1px solid {t.BORDER};
+                border: 2px solid {t.BORDER};
                 border-radius: {t.RADIUS_SMALL};
                 text-align: center;
                 font-weight: bold;
                 color: {t.TEXT_PRIMARY};
                 background-color: {progress_bg};
-                height: 20px;
+                min-height: 20px;
                 font-family: {t.FONT_FAMILY};
                 font-size: {t.FONT_SIZE_SMALL};
             }}
             QProgressBar::chunk {{
                 background-color: {progress_fill};
                 border-radius: 3px;
+                min-width: 10px;
             }}
             QProgressBar[status="failed"]::chunk {{
                 background-color: {progress_error};
@@ -107,14 +178,20 @@ class ProfessionalProgressBar(QProgressBar):
         self._apply_theme_aware_style()
         self.update()
 
-    @crash_safe_execute(max_retries=1, default_return=None, severity=ErrorSeverity.LOW)
     def update_progress(self, percentage: int, status: str = "running", details: str = "", operation_type: str = ""):
         """Thread-safe progress update with status indication"""
         try:
             # Clamp percentage to valid range
             percentage = max(0, min(100, percentage))
 
+            # CRITICAL: Actually set the value!
             self.setValue(percentage)
+
+            # Force the progress bar to update its display
+            self.setFormat(f"{percentage}%")
+
+            # Log for debugging
+            logger.debug(f"ProfessionalProgressBar.setValue({percentage}), current value: {self.value()}")
             # Convert status to string if it's an enum
             status_str = status.value if hasattr(status, 'value') else str(status)
             self.setProperty("status", status_str.lower())
@@ -167,13 +244,22 @@ class ProfessionalProgressBar(QProgressBar):
             else:
                 self.setFormat(f"{percentage}%")
 
-            # Refresh style
+            # CRITICAL FIX: Force Qt to actually render the progress chunk
+            # The issue is that Qt doesn't always update the visual chunk when value changes
+
+            # Force style refresh to show the green bar
             self.style().unpolish(self)
             self.style().polish(self)
-            self.update()
+
+            # Force immediate visual update
+            self.repaint()
+
+            # DO NOT call processEvents during initialization - it causes infinite loops!
+            # Only process events if we're not in the middle of loading
+            pass  # Removed processEvents as it was causing app freeze
 
         except Exception as e:
-            logger.warning(f"Progress bar update failed: {e}")
+            logger.error(f"Progress bar update failed: {e}", exc_info=True)
 
 
 class StatusRow:
@@ -191,17 +277,24 @@ class StatusRow:
         self.item_item: Optional[QTableWidgetItem] = None
         self.operation_item: Optional[QTableWidgetItem] = None
         self.status_item: Optional[QTableWidgetItem] = None
-        self.progress_bar: Optional[ProfessionalProgressBar] = None
+        self.progress_item: Optional[QTableWidgetItem] = None  # Changed from progress_bar
+        self.progress_value: int = 0  # Store progress value
         self.speed_item: Optional[QTableWidgetItem] = None
         self.eta_item: Optional[QTableWidgetItem] = None
         self.details_item: Optional[QTableWidgetItem] = None
         self.duration_item: Optional[QTableWidgetItem] = None
 
+        # Host-specific status tracking for uploads
+        self.host_statuses: Dict[str, str] = {}  # host -> status (success/failed/pending)
+        self.host_urls: Dict[str, list] = {}  # host -> [urls]
+        self.retry_count: int = 0  # Track retry attempts
+        self.keeplinks_url: str = ""  # Store KeepLinks URL
+
     def is_complete(self) -> bool:
         """Check if row has all required UI items"""
         return all([
             self.section_item, self.item_item, self.operation_item,
-            self.status_item, self.progress_bar,
+            self.status_item, self.progress_item,  # Changed from progress_bar
             self.speed_item, self.eta_item,
             self.details_item, self.duration_item
         ])
@@ -252,8 +345,25 @@ class ProfessionalStatusWidget(QWidget):
         self._operation_rows: Dict[str, StatusRow] = {}  # operation_id -> StatusRow
         self._row_operations: Dict[int, str] = {}  # row_index -> operation_id
 
+        # Legacy compatibility storage
+        self._jd_links: Dict[tuple, str] = {}
+        self._upload_meta: Dict[tuple, dict] = {}
+
         # Thread safety
         self._ui_mutex = QMutex()
+
+        # Upload progress tracking for averaging
+        self._upload_progress: Dict[str, float] = {}  # operation_id -> actual progress (0-100)
+        self._upload_display_progress: Dict[str, float] = {}  # operation_id -> smoothed display progress
+        self._upload_target_progress: Dict[str, float] = {}  # operation_id -> target progress for interpolation
+        self._upload_operations: Set[str] = set()  # Track all upload operation IDs
+        self._global_upload_average = 0.0  # Global average of all uploads
+        self._global_upload_target = 0.0  # Target for smooth interpolation
+
+        # Smooth progress update timer
+        self._average_progress_timer = QTimer(self)
+        self._average_progress_timer.timeout.connect(self._update_average_progress)
+        self._average_progress_timer.start(50)  # Update every 50ms for very smooth transitions
 
         # Global cancel event for workers
         self.cancel_event = threading.Event()
@@ -315,18 +425,36 @@ class ProfessionalStatusWidget(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)           # Item
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)  # Operation
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)  # Status
-        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Fixed)             # Progress
+        # Use Interactive mode for Progress column
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Interactive)       # Progress
+
+        # CRITICAL FIX: Set the delegate for the progress column
+        # This ensures progress bars are painted correctly
+        self.progress_delegate = ProgressBarDelegate()
+        self.table.setItemDelegateForColumn(4, self.progress_delegate)
         self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)  # Speed
         self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)  # ETA
         self.table.horizontalHeader().setSectionResizeMode(7, QHeaderView.Stretch)           # Details
         self.table.horizontalHeader().setSectionResizeMode(8, QHeaderView.ResizeToContents)  # Duration
 
-        self.table.setColumnWidth(4, 150)  # Progress bar width
+        # Set a good default width for progress column
+        self.table.setColumnWidth(4, 120)  # Progress bar width
+
+        # CRITICAL: Set default row height for all rows to ensure widgets fit
+        self.table.verticalHeader().setDefaultSectionSize(30)  # Default height for new rows
+        self.table.verticalHeader().setMinimumSectionSize(30)  # Minimum height
 
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)  # Allow multiple selection for batch operations
         self.table.verticalHeader().setVisible(False)
+
+        # Enable context menu
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
+
+        # Set default row height to accommodate progress bars
+        self.table.verticalHeader().setDefaultSectionSize(30)
 
         layout.addWidget(self.table)
 
@@ -334,10 +462,35 @@ class ProfessionalStatusWidget(QWidget):
         self.stats_label = QLabel("Ready - Waiting for operations...")
         layout.addWidget(self.stats_label)
 
-        # Cancel button
+        # Control buttons
+        button_layout = QHBoxLayout()
+
+        # Cancel All button
+        self.btn_cancel_all = QPushButton("⏹ Cancel All Running")
+        self.btn_cancel_all.setToolTip("Cancel all running operations")
+        self.btn_cancel_all.clicked.connect(self._cancel_all_operations)
+        button_layout.addWidget(self.btn_cancel_all)
+
+        # Clear Completed button
+        self.btn_clear_completed = QPushButton("🧹 Clear Completed")
+        self.btn_clear_completed.setToolTip("Remove completed, failed, and cancelled operations")
+        self.btn_clear_completed.clicked.connect(self._clear_completed_operations)
+        button_layout.addWidget(self.btn_clear_completed)
+
+        # Clear All button
+        self.btn_clear_all = QPushButton("🗑 Clear All")
+        self.btn_clear_all.setToolTip("Remove all operations from the table")
+        self.btn_clear_all.clicked.connect(self._clear_all_operations)
+        button_layout.addWidget(self.btn_clear_all)
+
+        # Legacy cancel button (hidden but kept for compatibility)
         self.btn_cancel = QPushButton("Cancel")
         self.btn_cancel.clicked.connect(self.on_cancel_clicked)
-        layout.addWidget(self.btn_cancel)
+        self.btn_cancel.setVisible(False)  # Hide but keep for compatibility
+        button_layout.addWidget(self.btn_cancel)
+
+        button_layout.addStretch()
+        layout.addLayout(button_layout)
 
         # Apply theme styles after all UI elements are created
         self._apply_theme_styles()
@@ -488,10 +641,24 @@ class ProfessionalStatusWidget(QWidget):
             # Create new row with COMPLETE data immediately
             row_index = self.table.rowCount()
             self.table.insertRow(row_index)
+
+            # CRITICAL FIX: Set row height to ensure progress bar is visible!
+            self.table.setRowHeight(row_index, 30)  # Must be tall enough for progress bar
+
             logger.info(f"✅ Created new row at index {row_index} for operation {operation_id}")
 
             # Create status row object
             status_row = StatusRow(operation_id, row_index)
+
+            # Track upload operations for averaging
+            op_type = operation_data.get('operation_type', '')
+            if self._is_upload_operation(op_type):
+                self._upload_operations.add(operation_id)
+                initial_progress = operation_data.get('progress', 0) * 100 if operation_data.get('progress', 0) <= 1 else operation_data.get('progress', 0)
+                self._upload_progress[operation_id] = initial_progress
+                self._upload_display_progress[operation_id] = 0  # Start from 0 for smooth animation
+                self._upload_target_progress[operation_id] = initial_progress
+                logger.info(f"Tracking upload operation: {operation_id} with initial progress: {initial_progress}%")
 
             # Create ALL cells with complete information
             try:
@@ -505,13 +672,8 @@ class ProfessionalStatusWidget(QWidget):
             self._operation_rows[operation_id] = status_row
             self._row_operations[row_index] = operation_id
 
-            # Force immediate UI update to show the new row - safely
-            try:
-                self.table.viewport().update()
-                # Use update() instead of repaint() for safer updates
-                self.table.update()
-            except Exception as e:
-                logger.error(f"ERROR updating UI: {e}", exc_info=True)
+            # Schedule deferred UI update to avoid blocking
+            QTimer.singleShot(0, self._force_table_update)
 
             logger.info(f"Operation row created: {operation_id} at row {row_index}, table now has {self.table.rowCount()} rows visible")
             self._update_statistics()
@@ -537,6 +699,19 @@ class ProfessionalStatusWidget(QWidget):
                 logger.info(f"📊 Updating status cell to: {changes['status']}")
                 self._update_status_cell(status_row, changes['status'])
 
+            # Handle host-specific status updates
+            if 'host' in changes:
+                host = changes['host']
+                host_status = changes.get('host_status', 'pending')
+                host_urls = changes.get('host_urls', [])
+                self._update_host_status(status_row, host, host_status, host_urls)
+                logger.info(f"🔄 Updated host status: {host} -> {host_status}")
+
+            # Update KeepLinks URL if provided
+            if 'keeplinks_url' in changes:
+                status_row.keeplinks_url = changes['keeplinks_url']
+                logger.info(f"📎 Updated KeepLinks URL: {status_row.keeplinks_url}")
+
             # Always update progress bar if we have progress OR status changes
             if 'progress' in changes or 'progress_percentage' in changes or 'status' in changes:
                 # Get current operation to ensure we have all data
@@ -546,11 +721,17 @@ class ProfessionalStatusWidget(QWidget):
                 if 'progress_percentage' in changes:
                     progress = changes['progress_percentage']
                 elif 'progress' in changes:
+                    # StatusManager stores progress as 0-1, convert to percentage
                     progress = int(changes['progress'] * 100)
                 elif operation:
-                    progress = operation.progress_percentage
+                    # Get progress from operation if not in changes
+                    progress = operation.progress_percentage if hasattr(operation, 'progress_percentage') else 0
                 else:
                     progress = 0
+
+                # Track progress for upload operations
+                if operation_id in self._upload_operations:
+                    self._upload_progress[operation_id] = progress
 
                 # CRITICAL FIX: Always get the LATEST status from the operation, not from the initial row creation!
                 # The operation object has the current status, not what was initially set
@@ -573,11 +754,6 @@ class ProfessionalStatusWidget(QWidget):
 
                 logger.debug(f"Updating progress bar: {progress}% - {status} - {operation_type}")
                 self._update_progress_bar(status_row, progress, status, operation_type)
-
-                # Force UI update to ensure progress bar is visible - safely
-                if status_row.progress_bar:
-                    status_row.progress_bar.setVisible(True)
-                    status_row.progress_bar.update()
 
             if 'details' in changes:
                 self._update_details_cell(status_row, changes['details'])
@@ -630,6 +806,14 @@ class ProfessionalStatusWidget(QWidget):
 
             if 'details' in final_data:
                 self._update_details_cell(status_row, final_data['details'])
+
+            # Remove from upload tracking if it's an upload operation
+            if operation_id in self._upload_operations:
+                self._upload_operations.discard(operation_id)
+                self._upload_progress.pop(operation_id, None)
+                self._upload_display_progress.pop(operation_id, None)
+                self._upload_target_progress.pop(operation_id, None)
+                logger.info(f"Removed completed upload from tracking: {operation_id}")
 
             # Highlight completed row briefly
             self._highlight_completed_row(status_row)
@@ -689,9 +873,17 @@ class ProfessionalStatusWidget(QWidget):
             status_row.item_item = QTableWidgetItem(operation_data.get('item', 'Unknown'))
             self.table.setItem(row, 1, status_row.item_item)
 
-            # Operation type cell
+            # Operation type cell - Use section name for Template operations
             op_type = operation_data.get('operation_type', 'UNKNOWN')
-            status_row.operation_item = QTableWidgetItem(self._format_operation_type(op_type))
+            section = operation_data.get('section', '')
+
+            # If section is Template, use Template as operation name
+            if section.lower() == 'template':
+                operation_display = 'Template'
+            else:
+                operation_display = self._format_operation_type(op_type, section)
+
+            status_row.operation_item = QTableWidgetItem(operation_display)
             status_row.operation_item.setFont(QFont("Arial", 9, QFont.Bold))
             status_row.operation_item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(row, 2, status_row.operation_item)
@@ -703,33 +895,14 @@ class ProfessionalStatusWidget(QWidget):
             self._apply_status_styling(status_row.status_item, status)
             self.table.setItem(row, 3, status_row.status_item)
 
-            # Progress bar - wrapped in try/catch for safety
-            try:
-                status_row.progress_bar = ProfessionalProgressBar()
-                progress = operation_data.get('progress_percentage', 0)
-                status_row.progress_bar.update_progress(progress, status, operation_type=op_type)
-                status_row.progress_bar.setVisible(True)  # Ensure it's visible
-                # Insert placeholder item to guarantee column rendering
-                self.table.setItem(row, 4, QTableWidgetItem())
-                self.table.setCellWidget(row, 4, status_row.progress_bar)
-                # Force immediate display
-                status_row.progress_bar.show()
-                # Update without processEvents to prevent freeze
-                status_row.progress_bar.update()
-            except Exception as e:
-                logger.error(f"Error creating progress bar: {e}")
-                # Create empty item as fallback
-                status_row.progress_bar = None
-                self.table.setItem(row, 4, QTableWidgetItem(f"{progress}%"))
-
-            # Speed cell
+            # Speed cell (column 5)
             speed = operation_data.get('transfer_speed', 0)
             speed_text = self._format_speed(speed)
             status_row.speed_item = QTableWidgetItem(speed_text)
             status_row.speed_item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(row, 5, status_row.speed_item)
 
-            # ETA cell
+            # ETA cell (column 6)
             eta_seconds = None
             if operation_data.get('estimated_completion'):
                 try:
@@ -748,16 +921,40 @@ class ProfessionalStatusWidget(QWidget):
             status_row.eta_item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(row, 6, status_row.eta_item)
 
-            # Details cell
+            # Details cell (column 7)
             details = operation_data.get('details', 'Initializing...')
             status_row.details_item = QTableWidgetItem(details)
             status_row.details_item.setToolTip(details)  # Show full text on hover
             self.table.setItem(row, 7, status_row.details_item)
 
-            # Duration cell
+            # Duration cell (column 8)
             status_row.duration_item = QTableWidgetItem("0s")
             status_row.duration_item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(row, 8, status_row.duration_item)
+
+            # Progress cell (column 4) - Using delegate pattern
+            # Get progress - already in 0-100 range from workers
+            progress_raw = operation_data.get('progress_percentage', 0)
+            if progress_raw == 0:
+                progress_raw = operation_data.get('progress', 0)
+            # Progress is ALREADY in 0-100 range, DO NOT multiply!
+            progress = int(progress_raw)
+
+            # Create a QTableWidgetItem for the progress cell
+            status_row.progress_item = QTableWidgetItem("")
+            # Store the progress value in UserRole for the delegate to paint
+            status_row.progress_item.setData(Qt.UserRole, progress)
+            # Set the item in the table
+            self.table.setItem(row, 4, status_row.progress_item)
+
+            logger.info(f"Set progress cell with delegate: progress={progress}%")
+
+            # Store progress value for future updates
+            status_row.progress_value = progress
+
+            # Ensure the row is visible if needed
+            if row == self.table.rowCount() - 1:  # Last row
+                self.table.scrollToItem(self.table.item(row, 0), QTableWidget.EnsureVisible)
 
         except Exception as e:
             logger.error(f"Error in _create_complete_row: {e}", exc_info=True)
@@ -778,18 +975,74 @@ class ProfessionalStatusWidget(QWidget):
             status_row.status_item.setText(status_text)
             self._apply_status_styling(status_row.status_item, status_text)
 
-    @crash_safe_execute(max_retries=1, default_return=None, severity=ErrorSeverity.MEDIUM)
     def _update_progress_bar(self, status_row: StatusRow, percentage: int, status: str, operation_type: str = ""):
-        """Update progress bar with status indication"""
-        if status_row.progress_bar:
-            status_row.progress_bar.update_progress(percentage, status, operation_type=operation_type)
+        """Update progress value using delegate pattern"""
+        try:
+            if status_row.progress_item:
+                # Update the progress value in UserRole
+                status_row.progress_item.setData(Qt.UserRole, percentage)
+                status_row.progress_value = percentage
+
+                # Emit dataChanged signal to trigger delegate repaint
+                model_index = self.table.model().index(status_row.row_index, 4)
+                self.table.model().dataChanged.emit(model_index, model_index, [Qt.UserRole])
+
+                # Force viewport update
+                self.table.viewport().update()
+
+                logger.debug(f"Updated progress for row {status_row.row_index}: {percentage}%")
+        except Exception as e:
+            logger.error(f"Failed to update progress: {e}", exc_info=True)
 
     @crash_safe_execute(max_retries=1, default_return=None, severity=ErrorSeverity.MEDIUM)
     def _update_details_cell(self, status_row: StatusRow, details: str):
         """Update details cell with tooltip"""
         if status_row.details_item:
+            # Include host status if available
+            if status_row.host_statuses:
+                host_summary = self._format_host_status_summary(status_row)
+                if host_summary:
+                    details = f"{details} | {host_summary}"
             status_row.details_item.setText(details)
             status_row.details_item.setToolTip(details)
+
+    def _format_host_status_summary(self, status_row: StatusRow) -> str:
+        """Format host status summary for display"""
+        if not status_row.host_statuses:
+            return ""
+
+        success_count = sum(1 for s in status_row.host_statuses.values() if s == "success")
+        failed_count = sum(1 for s in status_row.host_statuses.values() if s == "failed")
+        pending_count = sum(1 for s in status_row.host_statuses.values() if s == "pending")
+
+        parts = []
+        if success_count > 0:
+            parts.append(f"✅{success_count}")
+        if failed_count > 0:
+            parts.append(f"❌{failed_count}")
+        if pending_count > 0:
+            parts.append(f"⏳{pending_count}")
+
+        return " ".join(parts)
+
+    def _update_host_status(self, status_row: StatusRow, host: str, status: str, urls: list = None):
+        """Update status for a specific host"""
+        status_row.host_statuses[host] = status
+        if urls:
+            status_row.host_urls[host] = urls
+
+        # Update details display
+        if status_row.details_item:
+            current_text = status_row.details_item.text()
+            # Remove old host summary if present
+            if " | " in current_text:
+                current_text = current_text.split(" | ")[0]
+
+            host_summary = self._format_host_status_summary(status_row)
+            if host_summary:
+                new_text = f"{current_text} | {host_summary}"
+                status_row.details_item.setText(new_text)
+                status_row.details_item.setToolTip(new_text)
 
     @crash_safe_execute(max_retries=1, default_return=None, severity=ErrorSeverity.MEDIUM)
     def _update_speed_cell(self, status_row: StatusRow, speed: float):
@@ -846,8 +1099,118 @@ class ProfessionalStatusWidget(QWidget):
         item.setForeground(color)
         item.setFont(QFont("Arial", 9, QFont.Bold))
 
-    def _format_operation_type(self, op_type: str) -> str:
-        """Format operation type for display"""
+    def _is_upload_operation(self, op_type: str) -> bool:
+        """Check if operation type is an upload operation"""
+        upload_types = [
+            'UPLOAD', 'REUPLOAD', 'UPLOAD_RAPIDGATOR', 'UPLOAD_KATFILE',
+            'UPLOAD_NITROFLARE', 'UPLOAD_DDOWNLOAD', 'UPLOAD_UPLOADY',
+            'UPLOAD_MULTI', 'UPLOAD_TEMPLATE'
+        ]
+        return any(op_type.upper().startswith(t) for t in upload_types)
+
+    @pyqtSlot()
+    def _update_average_progress(self):
+        """Professional smooth progress averaging with interpolation"""
+        if not self._upload_operations:
+            return
+
+        with QMutexLocker(self._ui_mutex):
+            # Step 1: Clean up completed operations and calculate raw average
+            active_uploads = []
+            for op_id in list(self._upload_operations):
+                if op_id in self._upload_progress:
+                    operation = self.status_manager.get_operation(op_id)
+                    if operation and operation.is_active:
+                        active_uploads.append(self._upload_progress[op_id])
+                    elif operation and operation.status in ['COMPLETED', 'FAILED', 'CANCELLED']:
+                        # Clean up completed operations
+                        self._upload_operations.discard(op_id)
+                        self._upload_progress.pop(op_id, None)
+                        self._upload_display_progress.pop(op_id, None)
+                        self._upload_target_progress.pop(op_id, None)
+
+            if not active_uploads:
+                return
+
+            # Step 2: Calculate new target average
+            new_average = sum(active_uploads) / len(active_uploads)
+
+            # Step 3: Update global target with dampening to prevent jumps
+            if abs(new_average - self._global_upload_target) > 5:  # Only update if significant change
+                self._global_upload_target = new_average
+
+            # Step 4: Smoothly interpolate global average towards target
+            diff = self._global_upload_target - self._global_upload_average
+            if abs(diff) > 0.1:
+                # Smooth interpolation speed based on difference size
+                interpolation_speed = 0.15 if abs(diff) > 10 else 0.08
+                self._global_upload_average += diff * interpolation_speed
+            else:
+                self._global_upload_average = self._global_upload_target
+
+            # Step 5: Update each upload operation with professional smoothing
+            for op_id in self._upload_operations:
+                if op_id not in self._operation_rows:
+                    continue
+
+                status_row = self._operation_rows[op_id]
+                operation = self.status_manager.get_operation(op_id)
+
+                if not operation or not operation.is_active:
+                    continue
+
+                # Initialize display progress if needed
+                if op_id not in self._upload_display_progress:
+                    self._upload_display_progress[op_id] = 0.0
+                    self._upload_target_progress[op_id] = 0.0
+
+                # Calculate target progress (blend individual and average)
+                individual_progress = self._upload_progress.get(op_id, 0)
+
+                # Professional blending: mostly average with hint of individual
+                # This prevents jumping while still showing some individual variation
+                target_progress = (self._global_upload_average * 0.85 + individual_progress * 0.15)
+
+                # Update target with dampening
+                current_target = self._upload_target_progress[op_id]
+                if abs(target_progress - current_target) > 3:  # Dampen small changes
+                    self._upload_target_progress[op_id] = target_progress
+
+                # Smooth interpolation towards target
+                current_display = self._upload_display_progress[op_id]
+                target = self._upload_target_progress[op_id]
+                diff = target - current_display
+
+                if abs(diff) > 0.1:
+                    # Variable speed based on distance
+                    speed = 0.2 if abs(diff) > 15 else 0.1
+                    self._upload_display_progress[op_id] += diff * speed
+                else:
+                    self._upload_display_progress[op_id] = target
+
+                # Update progress bar with smoothed value
+                smoothed_value = max(0, min(100, int(self._upload_display_progress[op_id])))
+                self._update_progress_bar(
+                    status_row,
+                    smoothed_value,
+                    operation.status,
+                    operation.operation_type
+                )
+
+    def _format_operation_type(self, op_type: str, section: str = "") -> str:
+        """Format operation type for display based on section context"""
+        # Use section name for specific sections
+        section_lower = section.lower()
+        if section_lower in ['template', 'templates']:
+            return 'Template'
+        elif section_lower in ['backup', 'backups']:
+            return 'Backup'
+        elif section_lower in ['post', 'posting']:
+            return 'Posting'
+        elif section_lower in ['track', 'tracking']:
+            return 'Tracking'
+
+        # Default type mapping for other operations
         type_map = {
             'TRACKING': 'Tracking',
             'POSTING': 'Posting',
@@ -922,6 +1285,16 @@ class ProfessionalStatusWidget(QWidget):
             minutes = int((seconds % 3600) / 60)
             return f"{hours}h {minutes}m"
 
+    def _force_table_update(self):
+        """Force table and all cell widgets to update - called via QTimer for thread safety"""
+        try:
+            if self.table and self.table.viewport():
+                self.table.viewport().update()
+                # Only update the table itself, not individual widgets to avoid loops
+                self.table.update()
+        except Exception as e:
+            logger.debug(f"Table update error (non-critical): {e}")
+
     @crash_safe_execute(max_retries=1, default_return=None, severity=ErrorSeverity.LOW)
     def _update_statistics(self):
         """Update statistics display"""
@@ -979,6 +1352,23 @@ class ProfessionalStatusWidget(QWidget):
     def get_active_operation_count(self) -> int:
         """Get number of active operations"""
         return len([op for op in self.status_manager.get_all_operations() if op.is_active])
+
+    def get_jd_link(self, key):
+        return self._jd_links.get(tuple(key))
+
+    def set_jd_link(self, key, link: str) -> None:
+        self._jd_links[tuple(key)] = link or ""
+        self._schedule_status_save()
+
+    def update_upload_meta(self, key, meta: dict) -> None:
+        key = tuple(key)
+        cur = self._upload_meta.setdefault(key, {})
+        if meta:
+            cur.update(meta)
+        self._schedule_status_save()
+
+    def get_upload_meta(self, key) -> dict:
+        return dict(self._upload_meta.get(tuple(key), {}))
 
     # === PERSISTENCE SYSTEM (like old status widget) ===
     def _schedule_status_save(self):
@@ -1115,10 +1505,9 @@ class ProfessionalStatusWidget(QWidget):
                 # Get progress percentage
                 if hasattr(op, 'progress'):
                     progress = op.progress
-                    # Accept either 0-1 or 0-100 inputs from orchestrator
-                    if isinstance(progress, (int, float)) and progress > 1:
-                        progress = progress / 100.0
-                    updates['progress'] = progress
+                    # Progress is already in 0-100 range from workers
+                    # Keep it as percentage for StatusManager
+                    updates['progress'] = progress / 100.0 if progress <= 100 else 1.0
 
                 # Get message/details
                 if hasattr(op, 'message'):
@@ -1342,3 +1731,324 @@ class ProfessionalStatusWidget(QWidget):
             logger.info("User requested cancellation of running operations")
         except Exception as e:
             logger.debug(f"cancel_downloads call failed: {e}")
+
+    @pyqtSlot()
+    def _cancel_all_operations(self):
+        """Cancel all running operations professionally"""
+        try:
+            logger.info("Cancelling all running operations...")
+
+            # Set the global cancel event
+            self.cancel_event.set()
+
+            # Track operations to cancel
+            cancelled_count = 0
+
+            with QMutexLocker(self._ui_mutex):
+                # Iterate through all operations
+                for operation_id, status_row in list(self._operation_rows.items()):
+                    operation = self.status_manager.get_operation(operation_id)
+                    if operation and operation.is_active:
+                        # Update status to CANCELLED
+                        self.status_manager.update_operation(
+                            operation_id,
+                            status=OperationStatus.CANCELLED,
+                            details="Cancelled by user"
+                        )
+                        cancelled_count += 1
+
+                        # Update UI immediately
+                        self._update_status_cell(status_row, "CANCELLED")
+                        self._update_progress_bar(status_row, 0, "CANCELLED", operation.operation_type)
+                        self._update_details_cell(status_row, "Cancelled by user")
+
+            # Emit cancel signals for compatibility
+            parent = self.parent()
+            if parent and hasattr(parent, "cancel_downloads"):
+                parent.cancel_downloads()
+
+            # Show feedback
+            if cancelled_count > 0:
+                logger.info(f"Cancelled {cancelled_count} running operations")
+                self.stats_label.setText(f"Cancelled {cancelled_count} operations")
+            else:
+                self.stats_label.setText("No running operations to cancel")
+
+        except Exception as e:
+            logger.error(f"Failed to cancel operations: {e}", exc_info=True)
+
+    @pyqtSlot()
+    def _clear_completed_operations(self):
+        """Remove completed, failed, and cancelled operations from the table"""
+        try:
+            removed_count = 0
+
+            with QMutexLocker(self._ui_mutex):
+                # Get operations to remove
+                operations_to_remove = []
+
+                for operation_id, status_row in list(self._operation_rows.items()):
+                    operation = self.status_manager.get_operation(operation_id)
+                    if operation and operation.status in [OperationStatus.COMPLETED,
+                                                         OperationStatus.FAILED,
+                                                         OperationStatus.CANCELLED]:
+                        operations_to_remove.append(operation_id)
+
+                # Remove operations
+                for operation_id in operations_to_remove:
+                    self._remove_operation_row(operation_id)
+                    removed_count += 1
+
+                    # Also remove from upload tracking if present
+                    self._upload_operations.discard(operation_id)
+                    self._upload_progress.pop(operation_id, None)
+                    self._upload_display_progress.pop(operation_id, None)
+                    self._upload_target_progress.pop(operation_id, None)
+
+            # Update stats
+            if removed_count > 0:
+                logger.info(f"Cleared {removed_count} completed/failed/cancelled operations")
+                self.stats_label.setText(f"Cleared {removed_count} operations")
+            else:
+                self.stats_label.setText("No completed operations to clear")
+
+        except Exception as e:
+            logger.error(f"Failed to clear completed operations: {e}", exc_info=True)
+
+    @pyqtSlot()
+    def _clear_all_operations(self):
+        """Clear all operations from the table after confirmation"""
+        try:
+            # Show confirmation dialog
+            reply = QMessageBox.question(
+                self,
+                "Clear All Operations",
+                "Are you sure you want to clear ALL operations?\n\n"
+                "This will remove all operations from the table,\n"
+                "including running operations (they will continue in background).",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+
+            if reply != QMessageBox.Yes:
+                return
+
+            with QMutexLocker(self._ui_mutex):
+                # Count operations
+                total_count = len(self._operation_rows)
+
+                # Clear the table
+                self.table.setRowCount(0)
+
+                # Clear all mappings
+                self._operation_rows.clear()
+                self._row_operations.clear()
+                self._upload_operations.clear()
+                self._upload_progress.clear()
+                self._upload_display_progress.clear()
+                self._upload_target_progress.clear()
+                self._global_upload_average = 0.0
+                self._global_upload_target = 0.0
+
+                # Clear legacy storage
+                self._jd_links.clear()
+                self._upload_meta.clear()
+
+            logger.info(f"Cleared all {total_count} operations from table")
+            self.stats_label.setText(f"Cleared {total_count} operations")
+
+        except Exception as e:
+            logger.error(f"Failed to clear all operations: {e}", exc_info=True)
+
+    def _remove_operation_row(self, operation_id: str):
+        """Remove a single operation row from the table"""
+        try:
+            status_row = self._operation_rows.get(operation_id)
+            if not status_row:
+                return
+
+            # Remove the table row
+            self.table.removeRow(status_row.row_index)
+
+            # Update row indices for all rows after the removed one
+            for op_id, row in self._operation_rows.items():
+                if row.row_index > status_row.row_index:
+                    row.row_index -= 1
+
+            # Update row_operations mapping
+            self._row_operations = {}
+            for op_id, row in self._operation_rows.items():
+                self._row_operations[row.row_index] = op_id
+
+            # Remove from operation_rows
+            del self._operation_rows[operation_id]
+
+            # Remove from status manager if completed
+            operation = self.status_manager.get_operation(operation_id)
+            if operation and not operation.is_active:
+                self.status_manager.remove_operation(operation_id)
+
+        except Exception as e:
+            logger.error(f"Failed to remove operation row {operation_id}: {e}")
+
+    @pyqtSlot(QPoint)
+    def _show_context_menu(self, position):
+        """Show context menu for table operations"""
+        try:
+            menu = QMenu(self)
+
+            # Get selected rows
+            selected_rows = set()
+            for item in self.table.selectedItems():
+                selected_rows.add(item.row())
+
+            if selected_rows:
+                # Actions for selected operations
+                selected_op_ids = [self._row_operations.get(row) for row in selected_rows]
+                selected_op_ids = [op_id for op_id in selected_op_ids if op_id]  # Filter None
+
+                if selected_op_ids:
+                    # Check for upload operations with failed hosts
+                    has_failed_hosts = False
+                    has_running = False
+
+                    for op_id in selected_op_ids:
+                        operation = self.status_manager.get_operation(op_id)
+                        if operation and operation.is_active:
+                            has_running = True
+
+                        # Check for failed hosts in upload operations
+                        if op_id in self._operation_rows:
+                            status_row = self._operation_rows[op_id]
+                            if status_row.host_statuses:
+                                for host, status in status_row.host_statuses.items():
+                                    if status == "failed":
+                                        has_failed_hosts = True
+                                        break
+
+                    # Add retry options for failed hosts
+                    if has_failed_hosts and len(selected_op_ids) == 1:  # Single selection for host-specific retry
+                        op_id = selected_op_ids[0]
+                        status_row = self._operation_rows[op_id]
+                        retry_menu = menu.addMenu("🔄 Retry Failed Hosts")
+
+                        for host, status in status_row.host_statuses.items():
+                            if status == "failed":
+                                host_action = retry_menu.addAction(f"Retry {host}")
+                                host_action.triggered.connect(
+                                    lambda checked, h=host, oid=op_id: self._retry_specific_host(oid, h)
+                                )
+
+                        retry_all_failed = menu.addAction("🔄 Retry All Failed")
+                        retry_all_failed.triggered.connect(
+                            lambda: self.retryRequested.emit(
+                                status_row.section_item.text() if status_row.section_item else "",
+                                status_row.item_item.text() if status_row.item_item else "",
+                                "UPLOAD"
+                            )
+                        )
+
+                    if has_running:
+                        cancel_selected = menu.addAction("⏹ Cancel Selected")
+                        cancel_selected.triggered.connect(lambda: self._cancel_selected_operations(selected_op_ids))
+
+                    remove_selected = menu.addAction("🗑 Remove Selected")
+                    remove_selected.triggered.connect(lambda: self._remove_selected_operations(selected_op_ids))
+
+                    menu.addSeparator()
+
+            # Global actions
+            cancel_all = menu.addAction("⏹ Cancel All Running")
+            cancel_all.triggered.connect(self._cancel_all_operations)
+
+            clear_completed = menu.addAction("🧹 Clear Completed/Failed/Cancelled")
+            clear_completed.triggered.connect(self._clear_completed_operations)
+
+            clear_all = menu.addAction("🗑 Clear All")
+            clear_all.triggered.connect(self._clear_all_operations)
+
+            menu.exec_(self.table.mapToGlobal(position))
+
+        except Exception as e:
+            logger.error(f"Failed to show context menu: {e}")
+
+    def _cancel_selected_operations(self, operation_ids: list):
+        """Cancel specific operations"""
+        try:
+            cancelled_count = 0
+
+            with QMutexLocker(self._ui_mutex):
+                for operation_id in operation_ids:
+                    operation = self.status_manager.get_operation(operation_id)
+                    if operation and operation.is_active:
+                        # Update status to CANCELLED
+                        self.status_manager.update_operation(
+                            operation_id,
+                            status=OperationStatus.CANCELLED,
+                            details="Cancelled by user"
+                        )
+                        cancelled_count += 1
+
+            if cancelled_count > 0:
+                logger.info(f"Cancelled {cancelled_count} selected operations")
+                self.stats_label.setText(f"Cancelled {cancelled_count} selected operations")
+
+        except Exception as e:
+            logger.error(f"Failed to cancel selected operations: {e}")
+
+    def _remove_selected_operations(self, operation_ids: list):
+        """Remove specific operations from the table"""
+        try:
+            removed_count = 0
+
+            with QMutexLocker(self._ui_mutex):
+                for operation_id in operation_ids:
+                    self._remove_operation_row(operation_id)
+                    self._upload_operations.discard(operation_id)
+                    self._upload_progress.pop(operation_id, None)
+                    self._upload_display_progress.pop(operation_id, None)
+                    self._upload_target_progress.pop(operation_id, None)
+                    removed_count += 1
+
+            if removed_count > 0:
+                logger.info(f"Removed {removed_count} selected operations")
+                self.stats_label.setText(f"Removed {removed_count} selected operations")
+
+        except Exception as e:
+            logger.error(f"Failed to remove selected operations: {e}")
+
+    def _retry_specific_host(self, operation_id: str, host: str):
+        """Retry upload for a specific failed host"""
+        try:
+            logger.info(f"Retrying upload for host: {host} in operation: {operation_id}")
+
+            # Get the status row
+            status_row = self._operation_rows.get(operation_id)
+            if not status_row:
+                logger.warning(f"Operation {operation_id} not found")
+                return
+
+            # Update host status to pending
+            self._update_host_status(status_row, host, "pending")
+
+            # Emit signal to trigger retry for this specific host
+            # This would need to be handled by the upload worker
+            section = status_row.section_item.text() if status_row.section_item else ""
+            item = status_row.item_item.text() if status_row.item_item else ""
+
+            # Create custom signal data including the specific host
+            retry_data = {
+                'operation_id': operation_id,
+                'host': host,
+                'section': section,
+                'item': item
+            }
+
+            # For now, emit the general retry signal
+            # In a full implementation, you'd add a new signal for host-specific retry
+            self.retryRequested.emit(section, item, f"UPLOAD:{host}")
+
+            self.stats_label.setText(f"Retrying {host} upload...")
+
+        except Exception as e:
+            logger.error(f"Failed to retry specific host: {e}")

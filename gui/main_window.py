@@ -5923,10 +5923,13 @@ class ForumBotGUI(QMainWindow):
 
             # 3) تحديث خلايا الجدول (الأولوية: أول RG فقط فى العمود)
             model = self.process_threads_table.model()
-            # Set text for RG, RG_BAK, and Keeplinks columns
+            # Set text for Thread ID, RG, RG_BAK, and Keeplinks columns
+            thread_id_text = tid if tid else ""
             rg_text    = rg_links[0] if rg_links else ""
             rg_bak_txt = "\n".join(rg_backup)
             keep_txt   = keeplink if isinstance(keeplink, str) else ""
+            if self.process_threads_table.item(current_row, 2):
+                self.process_threads_table.item(current_row, 2).setText(thread_id_text)
             if self.process_threads_table.item(current_row, 3):
                 self.process_threads_table.item(current_row, 3).setText(rg_text)
             if self.process_threads_table.item(current_row, 4):
@@ -5934,7 +5937,7 @@ class ForumBotGUI(QMainWindow):
             if self.process_threads_table.item(current_row, 5):
                 self.process_threads_table.item(current_row, 5).setText(keep_txt)
             # Emit a single dataChanged signal for the range of modified cells to reduce UI overhead
-            model.dataChanged.emit(model.index(current_row, 3), model.index(current_row, 5))
+            model.dataChanged.emit(model.index(current_row, 2), model.index(current_row, 5))
 
             # 4) تحديث الداتا الداخلية (مهم: الجذر + آخر نسخة)
             #    علشان View Links و Proceed Template يقروا الروابط الجديدة فعلاً
@@ -6217,6 +6220,9 @@ class ForumBotGUI(QMainWindow):
 
                 # Write canonical mapping into thread_info and versions
                 thread_info['links'] = canonical.copy()
+                # Preserve thread_id in main thread_info
+                if thread_id:
+                    thread_info['thread_id'] = thread_id
                 versions_list = thread_info.setdefault('versions', [])
                 if versions_list:
                     versions_list[-1]['links'] = canonical.copy()
@@ -6233,6 +6239,9 @@ class ForumBotGUI(QMainWindow):
                 # find row index using helper to respect sorting/filtering
                 row_index = self._row_for_tid(thread_id)
                 if row_index >= 0:
+                    # Preserve thread_id in table and update links
+                    if self.process_threads_table.item(row_index, 2):
+                        self.process_threads_table.item(row_index, 2).setText(thread_id)
                     # Choose display links: prefer rapidgator, then katfile, then nitroflare/ddownload
                     display_links = _to_list(canonical.get('rapidgator.net', {}).get('urls'))
                     if not display_links:
