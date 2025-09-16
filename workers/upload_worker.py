@@ -4,7 +4,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from enum import Enum
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread, current_thread
 from typing import Any, List, Optional
 
 from PyQt5.QtCore import QThread, pyqtSignal, pyqtSlot
@@ -59,9 +59,11 @@ class UploadWorker(QThread):
         self.is_cancelled = False
         self.is_paused = False
         self.lock = Lock()
+        self._executor_lock = Lock()
         self.cancel_event = cancel_event
         # ThreadPool لرفع متوازٍ
-        self.thread_pool = ThreadPoolExecutor(max_workers=5)
+        self.thread_pool: Optional[ThreadPoolExecutor] = ThreadPoolExecutor(max_workers=5)
+        self._retry_thread: Optional[Thread] = None
         self.retry_row = None  # Track row for retry operations
 
         # استرجِع قائمة الهوستات
@@ -175,7 +177,38 @@ class UploadWorker(QThread):
                 break
             time.sleep(0.1)
 
+    def _ensure_thread_pool(self) -> ThreadPoolExecutor:
+        with self._executor_lock:
+            if self.thread_pool is None:
+                self.thread_pool = ThreadPoolExecutor(max_workers=5)
+            return self.thread_pool
+
+    def _shutdown_thread_pool(self, wait: bool = True):
+        pool: Optional[ThreadPoolExecutor] = None
+        with self._executor_lock:
+            if self.thread_pool is not None:
+                pool = self.thread_pool
+                self.thread_pool = None
+        if pool is not None:
+            try:
+                pool.shutdown(wait=wait)
+            except Exception:
+                logging.exception("Failed to shutdown upload worker thread pool")
+
+    def close(self):
+        self._shutdown_thread_pool(wait=False)
+        thread = self._retry_thread
+        if thread and thread.is_alive() and thread is not current_thread():
+            thread.join(timeout=1.0)
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
     def run(self):
+        pool = self._ensure_thread_pool()
         try:
             if not self.files:
                 msg = "لا توجد ملفات للرفع."
@@ -192,7 +225,7 @@ class UploadWorker(QThread):
             futures = {}
             for idx, _ in enumerate(self.hosts):
                 self._check_control()
-                futures[self.thread_pool.submit(self._upload_host_all, idx)] = idx
+                futures[pool.submit(self._upload_host_all, idx)] = idx
 
             # جمع النتائج
             completed = 0
@@ -253,6 +286,8 @@ class UploadWorker(QThread):
                     self.host_progress.emit(self.row, idx, 0, f"Error: {msg}", 0, 0)
                 self.upload_error.emit(self.row, msg)
                 self.upload_complete.emit(self.row, {"error": msg})
+        finally:
+            self._shutdown_thread_pool(wait=True)
 
     def _upload_host_all(self, host_idx: int) -> str:
         urls = []
@@ -434,13 +469,27 @@ class UploadWorker(QThread):
         Signal to retry failed uploads - starts background retry process.
         """
         self.retry_row = row
+        if self.isRunning():
+            logging.warning("Retry requested while upload worker is still running; ignoring request")
+            return
+        # Prevent concurrent retry attempts
+        if self._retry_thread and self._retry_thread.is_alive():
+            logging.warning("Retry already in progress; ignoring new retry request")
+            return
+
         # Start retry in background thread to avoid UI blocking
-        self.thread_pool.submit(self._retry_in_background)
+        self._retry_thread = Thread(
+            target=self._retry_in_background,
+            name=f"UploadRetry-{self.thread_id}",
+            daemon=True,
+        )
+        self._retry_thread.start()
 
     def _retry_in_background(self):
         """
         Retry only the hosts that previously failed - runs in background thread.
         """
+        pool = self._ensure_thread_pool()
         try:
             self._reset_control_for_retry()
             to_retry = [
@@ -470,7 +519,7 @@ class UploadWorker(QThread):
             futures = {}
             for i in to_retry:
                 self._check_control()
-                futures[self.thread_pool.submit(self._upload_host_all, i)] = i
+                futures[pool.submit(self._upload_host_all, i)] = i
 
             for fut in as_completed(futures):
                 self._check_control()
@@ -513,3 +562,6 @@ class UploadWorker(QThread):
         except Exception as e:
             logging.error("retry_failed_uploads crashed: %s", e, exc_info=True)
             self.upload_complete.emit(self.retry_row, {"error": str(e)})
+        finally:
+            self._shutdown_thread_pool(wait=True)
+            self._retry_thread = None

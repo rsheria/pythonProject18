@@ -777,8 +777,15 @@ class ProfessionalStatusWidget(QWidget):
                 else:
                     operation_type = changes.get('operation_type', '')
 
-                logger.debug(f"Updating progress bar: {progress}% - {status} - {operation_type}")
-                self._update_progress_bar(status_row, progress, status, operation_type)
+                if operation_id in self._upload_operations:
+                    display_progress = self._upload_progress.get(operation_id, progress)
+                else:
+                    display_progress = progress
+
+                logger.debug(
+                    f"Updating progress bar: raw={progress}% display={display_progress}% - {status} - {operation_type}"
+                )
+                self._update_progress_bar(status_row, display_progress, status, operation_type)
 
             if 'details' in changes:
                 self._update_details_cell(status_row, changes['details'])
@@ -791,26 +798,23 @@ class ProfessionalStatusWidget(QWidget):
                 speed = operation.transfer_speed
 
             if speed is not None:
-                # For upload operations, use host-specific averaging
+                display_speed = speed
+
                 if operation_id in self._upload_operations:
-                    # Get host information
                     host = changes.get('host', 'unknown')
                     if operation and hasattr(operation, 'host'):
                         host = operation.host or host
 
-                    # Update speed for this specific host
-                    if operation_id in self._upload_host_speed:
-                        self._upload_host_speed[operation_id][host] = speed
+                    if operation_id not in self._upload_host_speed:
+                        self._upload_host_speed[operation_id] = {}
 
-                        # Calculate average speed across all hosts for this operation
-                        host_speeds = list(self._upload_host_speed[operation_id].values())
-                        if host_speeds:
-                            avg_speed = sum(host_speeds) / len(host_speeds)
-                            self._update_speed_cell(status_row, avg_speed)
-                    else:
-                        self._update_speed_cell(status_row, speed)
-                else:
-                    self._update_speed_cell(status_row, speed)
+                    self._upload_host_speed[operation_id][host] = speed
+
+                    host_speeds = list(self._upload_host_speed[operation_id].values())
+                    if host_speeds:
+                        display_speed = sum(host_speeds) / len(host_speeds)
+
+                self._update_speed_cell(status_row, display_speed)
 
             # Update ETA with host-specific averaging for uploads
             eta_seconds = None
@@ -827,26 +831,23 @@ class ProfessionalStatusWidget(QWidget):
                 eta_seconds = max(0, (operation.estimated_completion - datetime.now()).total_seconds())
 
             if eta_seconds is not None:
-                # For upload operations, use host-specific averaging
+                display_eta = eta_seconds
+
                 if operation_id in self._upload_operations:
-                    # Get host information
                     host = changes.get('host', 'unknown')
                     if operation and hasattr(operation, 'host'):
                         host = operation.host or host
 
-                    # Update ETA for this specific host
-                    if operation_id in self._upload_host_eta:
-                        self._upload_host_eta[operation_id][host] = eta_seconds
+                    if operation_id not in self._upload_host_eta:
+                        self._upload_host_eta[operation_id] = {}
 
-                        # Calculate average ETA across all hosts for this operation
-                        host_etas = list(self._upload_host_eta[operation_id].values())
-                        if host_etas:
-                            avg_eta = sum(host_etas) / len(host_etas)
-                            self._update_eta_cell(status_row, avg_eta)
-                    else:
-                        self._update_eta_cell(status_row, eta_seconds)
-                else:
-                    self._update_eta_cell(status_row, eta_seconds)
+                    self._upload_host_eta[operation_id][host] = eta_seconds
+
+                    host_etas = list(self._upload_host_eta[operation_id].values())
+                    if host_etas:
+                        display_eta = sum(host_etas) / len(host_etas)
+
+                self._update_eta_cell(status_row, display_eta)
 
             # Update statistics
             self._update_statistics()

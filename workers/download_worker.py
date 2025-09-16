@@ -967,9 +967,10 @@ class DownloadWorker(QThread):
                 # تسجيل الـ worker
                 self.gui.register_worker(upload_worker)
 
-                # بدء الـ worker
-                upload_worker.start()
-                logging.info(f"UploadWorker started successfully for '{info['thread_title']}'")
+                # Give Qt event loop time to process signal connections
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(50, upload_worker.start)
+                logging.info(f"UploadWorker scheduled to start for '{info['thread_title']}'")
 
             except Exception as upload_e:
                 logging.error(f"UploadWorker creation failed for '{info['thread_title']}': {upload_e}", exc_info=True)

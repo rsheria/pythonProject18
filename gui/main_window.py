@@ -923,7 +923,9 @@ class ForumBotGUI(QMainWindow):
         self.reply_worker.post_done.connect(self.on_reply_done, Qt.QueuedConnection)
         self.reply_worker.finished.connect(self.on_reply_finished, Qt.QueuedConnection)
 
-        self.reply_worker.start()
+        # Give Qt event loop time to process signal connections
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(50, self.reply_worker.start)
 
     def on_reply_done(self, thread_id: str, final_url: str, ok: bool, error: str):
         """Handle completion of a single HTTP reply (GUI thread)."""
@@ -2598,7 +2600,9 @@ class ForumBotGUI(QMainWindow):
             Qt.QueuedConnection,
         )
 
-        self.current_upload_worker.start()
+        # Give Qt event loop time to process signal connections
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(50, self.current_upload_worker.start)
 
     def on_reupload_upload_complete(self, thread_title, thread_info, row, urls_dict):
         try:
