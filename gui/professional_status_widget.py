@@ -354,6 +354,9 @@ class ProfessionalStatusWidget(QWidget):
 
         # Upload progress tracking for averaging
         self._upload_progress: Dict[str, float] = {}  # operation_id -> actual progress (0-100)
+        self._upload_host_progress: Dict[str, Dict[str, float]] = {}  # operation_id -> {host -> progress}
+        self._upload_host_speed: Dict[str, Dict[str, float]] = {}  # operation_id -> {host -> speed}
+        self._upload_host_eta: Dict[str, Dict[str, float]] = {}  # operation_id -> {host -> eta_seconds}
         self._upload_display_progress: Dict[str, float] = {}  # operation_id -> smoothed display progress
         self._upload_target_progress: Dict[str, float] = {}  # operation_id -> target progress for interpolation
         self._upload_operations: Set[str] = set()  # Track all upload operation IDs
@@ -656,6 +659,9 @@ class ProfessionalStatusWidget(QWidget):
                 self._upload_operations.add(operation_id)
                 initial_progress = operation_data.get('progress', 0) * 100 if operation_data.get('progress', 0) <= 1 else operation_data.get('progress', 0)
                 self._upload_progress[operation_id] = initial_progress
+                self._upload_host_progress[operation_id] = {}  # Initialize host progress tracking
+                self._upload_host_speed[operation_id] = {}  # Initialize host speed tracking
+                self._upload_host_eta[operation_id] = {}  # Initialize host ETA tracking
                 self._upload_display_progress[operation_id] = 0  # Start from 0 for smooth animation
                 self._upload_target_progress[operation_id] = initial_progress
                 logger.info(f"Tracking upload operation: {operation_id} with initial progress: {initial_progress}%")
@@ -729,9 +735,28 @@ class ProfessionalStatusWidget(QWidget):
                 else:
                     progress = 0
 
-                # Track progress for upload operations
+                # Track progress for upload operations with host-specific averaging
                 if operation_id in self._upload_operations:
-                    self._upload_progress[operation_id] = progress
+                    # Get host information
+                    host = changes.get('host', 'unknown')
+                    if operation and hasattr(operation, 'host'):
+                        host = operation.host or host
+
+                    # Initialize host progress tracking for this operation
+                    if operation_id not in self._upload_host_progress:
+                        self._upload_host_progress[operation_id] = {}
+
+                    # Update progress for this specific host
+                    self._upload_host_progress[operation_id][host] = progress
+
+                    # Calculate average progress across all hosts for this operation
+                    host_progresses = list(self._upload_host_progress[operation_id].values())
+                    if host_progresses:
+                        avg_progress = sum(host_progresses) / len(host_progresses)
+                        self._upload_progress[operation_id] = avg_progress
+
+                        logger.debug(f"📊 Host progress for {operation_id}: {self._upload_host_progress[operation_id]}, "
+                                   f"Average: {avg_progress:.1f}%")
 
                 # CRITICAL FIX: Always get the LATEST status from the operation, not from the initial row creation!
                 # The operation object has the current status, not what was initially set
@@ -758,16 +783,36 @@ class ProfessionalStatusWidget(QWidget):
             if 'details' in changes:
                 self._update_details_cell(status_row, changes['details'])
 
-            # Update speed
+            # Update speed with host-specific averaging for uploads
             speed = None
             if 'transfer_speed' in changes:
                 speed = changes['transfer_speed']
             elif operation:
                 speed = operation.transfer_speed
-            if speed is not None:
-                self._update_speed_cell(status_row, speed)
 
-            # Update ETA
+            if speed is not None:
+                # For upload operations, use host-specific averaging
+                if operation_id in self._upload_operations:
+                    # Get host information
+                    host = changes.get('host', 'unknown')
+                    if operation and hasattr(operation, 'host'):
+                        host = operation.host or host
+
+                    # Update speed for this specific host
+                    if operation_id in self._upload_host_speed:
+                        self._upload_host_speed[operation_id][host] = speed
+
+                        # Calculate average speed across all hosts for this operation
+                        host_speeds = list(self._upload_host_speed[operation_id].values())
+                        if host_speeds:
+                            avg_speed = sum(host_speeds) / len(host_speeds)
+                            self._update_speed_cell(status_row, avg_speed)
+                    else:
+                        self._update_speed_cell(status_row, speed)
+                else:
+                    self._update_speed_cell(status_row, speed)
+
+            # Update ETA with host-specific averaging for uploads
             eta_seconds = None
             if 'estimated_completion' in changes:
                 eta_dt = changes['estimated_completion']
@@ -780,8 +825,28 @@ class ProfessionalStatusWidget(QWidget):
                     eta_seconds = max(0, (eta_dt - datetime.now()).total_seconds())
             elif operation and operation.estimated_completion:
                 eta_seconds = max(0, (operation.estimated_completion - datetime.now()).total_seconds())
+
             if eta_seconds is not None:
-                self._update_eta_cell(status_row, eta_seconds)
+                # For upload operations, use host-specific averaging
+                if operation_id in self._upload_operations:
+                    # Get host information
+                    host = changes.get('host', 'unknown')
+                    if operation and hasattr(operation, 'host'):
+                        host = operation.host or host
+
+                    # Update ETA for this specific host
+                    if operation_id in self._upload_host_eta:
+                        self._upload_host_eta[operation_id][host] = eta_seconds
+
+                        # Calculate average ETA across all hosts for this operation
+                        host_etas = list(self._upload_host_eta[operation_id].values())
+                        if host_etas:
+                            avg_eta = sum(host_etas) / len(host_etas)
+                            self._update_eta_cell(status_row, avg_eta)
+                    else:
+                        self._update_eta_cell(status_row, eta_seconds)
+                else:
+                    self._update_eta_cell(status_row, eta_seconds)
 
             # Update statistics
             self._update_statistics()
@@ -1126,6 +1191,9 @@ class ProfessionalStatusWidget(QWidget):
                         # Clean up completed operations
                         self._upload_operations.discard(op_id)
                         self._upload_progress.pop(op_id, None)
+                        self._upload_host_progress.pop(op_id, None)  # Clean up host progress tracking
+                        self._upload_host_speed.pop(op_id, None)  # Clean up host speed tracking
+                        self._upload_host_eta.pop(op_id, None)  # Clean up host ETA tracking
                         self._upload_display_progress.pop(op_id, None)
                         self._upload_target_progress.pop(op_id, None)
 
@@ -1659,28 +1727,46 @@ class ProfessionalStatusWidget(QWidget):
     def connect_worker(self, worker):
         """Connect worker signals for live tracking updates and cancellation"""
         try:
-            # Propagate cancel event to worker
-            if hasattr(worker, 'set_cancel_event'):
-                worker.set_cancel_event(self.cancel_event)
-            elif hasattr(worker, 'cancel_event'):
-                worker.cancel_event = self.cancel_event
+            # Validate worker object first
+            if not worker:
+                logger.error("Cannot connect None worker")
+                return
+
+            worker_type = type(worker).__name__
+            logger.debug(f"Connecting worker signals for {worker_type}")
+
+            # Propagate cancel event to worker with safety checks
+            try:
+                if hasattr(worker, 'set_cancel_event') and callable(getattr(worker, 'set_cancel_event')):
+                    worker.set_cancel_event(self.cancel_event)
+                elif hasattr(worker, 'cancel_event'):
+                    worker.cancel_event = self.cancel_event
+                logger.debug(f"Set cancel event for {worker_type}")
+            except Exception as e:
+                logger.warning(f"Failed to set cancel event for {worker_type}: {e}")
 
             # Track live thread discoveries for real-time progress updates
-            if hasattr(worker, 'thread_discovered'):
-                worker.thread_discovered.connect(self._on_live_thread_discovered, Qt.QueuedConnection)
-                logger.info(f"✅ CONNECTED: Live thread discovery signal from worker to status widget")
-            else:
-                logger.warning(f"❌ Worker does not have thread_discovered signal")
+            try:
+                if hasattr(worker, 'thread_discovered') and hasattr(worker.thread_discovered, 'connect'):
+                    worker.thread_discovered.connect(self._on_live_thread_discovered, Qt.QueuedConnection)
+                    logger.info(f"✅ CONNECTED: Live thread discovery signal from {worker_type}")
+                else:
+                    logger.warning(f"❌ Worker {worker_type} does not have thread_discovered signal")
+            except Exception as e:
+                logger.warning(f"Failed to connect thread_discovered signal for {worker_type}: {e}")
 
             # CRITICAL FIX: REMOVE the redundant progress_update connection.
             # The orchestrator is responsible for forwarding progress to on_progress_update.
             # This secondary connection caused a race condition.
             if hasattr(worker, 'progress_update'):
                 # DO NOT CONNECT HERE - orchestrator handles this!
-                logger.debug(f"Progress updates from worker are handled by the main orchestrator.")
+                logger.debug(f"Progress updates from worker {worker_type} are handled by the main orchestrator.")
+
+            logger.debug(f"Successfully connected worker signals for {worker_type}")
 
         except Exception as e:
-            logger.error(f"Failed to connect worker signals: {e}")
+            logger.error(f"Failed to connect worker signals: {e}", exc_info=True)
+            # Don't re-raise - allow execution to continue
 
     @pyqtSlot(str, str, dict)
     def _on_live_thread_discovered(self, category_name, thread_id, thread_data):

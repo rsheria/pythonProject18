@@ -831,39 +831,61 @@ class ForumBotGUI(QMainWindow):
         main thread.  Upload workers are also stored for context
         menu actions.
         """
-        # Forward worker progress updates through the orchestrator
-        if hasattr(worker, "progress_update"):
-            # Standard workers emit a single OperationStatus
-            worker.progress_update.connect(
-                self.orch.progress_update.emit, Qt.QueuedConnection
-            )
-        elif hasattr(worker, "file_progress_update"):
-            # Download workers may emit file-level progress metrics; adapt
-            def _adapter(link_id, pct, stage, cur, tot, name, speed, eta):
-                status = OperationStatus(
-                    section="Downloads",
-                    item=name,
-                    op_type=OpType.DOWNLOAD,
-                    stage=OpStage.RUNNING if pct < 100 else OpStage.FINISHED,
-                    message=stage,
-                    progress=pct,
-                    speed=speed,
-                    eta=eta,
-                    host="",
+        # Forward worker progress updates through the orchestrator with error protection
+        try:
+            if hasattr(worker, "progress_update"):
+                # Standard workers emit a single OperationStatus
+                worker.progress_update.connect(
+                    self.orch.progress_update.emit, Qt.QueuedConnection
                 )
-                self.orch.progress_update.emit(status)
+                logging.debug(f"Connected progress_update signal for worker {type(worker).__name__}")
+            elif hasattr(worker, "file_progress_update"):
+                # Download workers may emit file-level progress metrics; adapt
+                def _adapter(link_id, pct, stage, cur, tot, name, speed, eta):
+                    try:
+                        status = OperationStatus(
+                            section="Downloads",
+                            item=name or "Unknown",
+                            op_type=OpType.DOWNLOAD,
+                            stage=OpStage.RUNNING if pct < 100 else OpStage.FINISHED,
+                            message=stage or "Processing",
+                            progress=max(0, min(100, pct or 0)),
+                            speed=speed or 0.0,
+                            eta=eta or 0.0,
+                            host="",
+                        )
+                        self.orch.progress_update.emit(status)
+                    except Exception as e:
+                        logging.error(f"Error in download progress adapter: {e}")
 
-            worker.file_progress_update.connect(_adapter, Qt.QueuedConnection)
+                worker.file_progress_update.connect(_adapter, Qt.QueuedConnection)
+                logging.debug(f"Connected file_progress_update signal for worker {type(worker).__name__}")
 
-        # Connect UI-specific signals (like thread_discovered) - NOT progress_update!
-        # progress_update is handled by the orchestrator above
-        self.status_widget.connect_worker(worker)
+            # Connect UI-specific signals (like thread_discovered) - NOT progress_update!
+            # progress_update is handled by the orchestrator above
+            self.status_widget.connect_worker(worker)
+
+        except Exception as e:
+            logging.error(f"Failed to connect worker signals: {e}")
+            # Continue without signal connections - worker may still function
 
         # For upload workers, store mapping so we can control them via context menu
         if isinstance(worker, UploadWorker):
-            for f in getattr(worker, "files", []):
-                key = (worker.section, f.name, OpType.UPLOAD.name)
-                self._worker_key_map[key] = worker
+            try:
+                files = getattr(worker, "files", [])
+                if files:
+                    for f in files:
+                        try:
+                            # Safely get the name, handle any corrupted Path objects
+                            file_name = getattr(f, 'name', str(f)) if f else 'unknown'
+                            key = (getattr(worker, 'section', 'Uploads'), file_name, OpType.UPLOAD.name)
+                            self._worker_key_map[key] = worker
+                        except Exception as e:
+                            logging.warning(f"Failed to map file {f}: {e}")
+                            continue
+            except Exception as e:
+                logging.error(f"Failed to process worker files mapping: {e}")
+                # Continue without mapping - this is not critical
 
         # Switch view to STATUS when registering new worker
         if hasattr(self, "sidebar"):

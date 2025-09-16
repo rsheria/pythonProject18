@@ -83,12 +83,35 @@ class UploadWorker(QThread):
             self.handlers["uploady"] = UploadyUploadHandler()
         # ملاحظة: Rapidgator handler سيُنشأ لكل ملف على حدة داخل ‎_upload_single
 
-        # جمع الملفات
-        self.explicit_files = [Path(f) for f in files] if files else None
-        self.files = self.explicit_files or self._get_files()
-        self.total_files = len(self.files)
-        if not self.files:
-            logging.warning("UploadWorker: لا توجد ملفات في المجلد %s", folder_path)
+        # جمع الملفات مع حماية من التلف
+        try:
+            self.explicit_files = []
+            if files:
+                for f in files:
+                    try:
+                        # Validate each file path to prevent corruption
+                        if f and (isinstance(f, (str, Path))):
+                            path_obj = Path(f)
+                            if path_obj.exists():
+                                self.explicit_files.append(path_obj)
+                            else:
+                                logging.warning(f"File does not exist: {f}")
+                        else:
+                            logging.warning(f"Invalid file object: {f}")
+                    except Exception as e:
+                        logging.error(f"Error processing file {f}: {e}")
+                        continue
+
+            self.files = self.explicit_files if self.explicit_files else self._get_files()
+            self.total_files = len(self.files) if self.files else 0
+
+            if not self.files:
+                logging.warning("UploadWorker: لا توجد ملفات في المجلد %s", folder_path)
+        except Exception as e:
+            logging.error(f"Critical error in UploadWorker file initialization: {e}")
+            self.files = []
+            self.explicit_files = []
+            self.total_files = 0
 
         # تهيئة نتائج الرفع
         self.upload_results = {
