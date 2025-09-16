@@ -1,13 +1,13 @@
 import logging
 import os
+import queue
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from enum import Enum
 from pathlib import Path
-from threading import Lock, Thread, current_thread
-from typing import Any, List, Optional
+from threading import Lock
+from typing import Any, List, Optional, Tuple
 
-from PyQt5.QtCore import QThread, pyqtSignal, pyqtSlot
+from PyQt5.QtCore import QThread, QThreadPool, QRunnable, pyqtSignal, pyqtSlot
 from integrations.jd_client import hard_cancel
 from models.operation_status import OperationStatus, OpStage, OpType
 from uploaders.ddownload_upload_handler import DDownloadUploadHandler
@@ -21,6 +21,39 @@ class UploadStatus(Enum):
     COMPLETED = "completed"
     ERROR = "error"
     QUEUED = "queued"
+
+class HostUploadRunnable(QRunnable):
+    """Execute the upload of a single host inside the Qt thread pool."""
+
+    def __init__(self, worker: "UploadWorker", host_idx: int, result_queue: "queue.Queue[tuple]"):
+        super().__init__()
+        self._worker = worker
+        self._host_idx = host_idx
+        self._result_queue = result_queue
+
+    def run(self):  # noqa: D401 - matches QRunnable interface
+        """Invoke the worker logic for a specific host and report the outcome."""
+        try:
+            result = self._worker._upload_host_all(self._host_idx)
+            outcome = "success" if result == "success" else "failed"
+            self._result_queue.put((outcome, self._host_idx, None))
+        except Exception as exc:  # pragma: no cover - defensive logging path
+            message = str(exc)
+            self._worker._register_task_exception(self._host_idx, message)
+            self._result_queue.put(("error", self._host_idx, message))
+
+
+class RetryRunnable(QRunnable):
+    """Run the retry logic inside the Qt thread pool to avoid UI blocking."""
+
+    def __init__(self, worker: "UploadWorker"):
+        super().__init__()
+        self._worker = worker
+
+    def run(self):  # noqa: D401 - matches QRunnable interface
+        """Delegate to the worker retry routine."""
+        self._worker._retry_in_background()
+
 
 class UploadWorker(QThread):
     # Signals
@@ -59,11 +92,7 @@ class UploadWorker(QThread):
         self.is_cancelled = False
         self.is_paused = False
         self.lock = Lock()
-        self._executor_lock = Lock()
         self.cancel_event = cancel_event
-        # ThreadPool لرفع متوازٍ
-        self.thread_pool: Optional[ThreadPoolExecutor] = ThreadPoolExecutor(max_workers=5)
-        self._retry_thread: Optional[Thread] = None
         self.retry_row = None  # Track row for retry operations
 
         # استرجِع قائمة الهوستات
@@ -71,6 +100,20 @@ class UploadWorker(QThread):
             upload_hosts = bot.config.get("upload_hosts", [])
 
         self.hosts = list(upload_hosts)
+
+        # Thread-pool orchestration managed by Qt to avoid mixing runtimes
+        self._pool_lock = Lock()
+        self._state_lock = Lock()
+        self._qt_pool = QThreadPool()
+        self._control_pool = QThreadPool()
+        self._control_pool.setMaxThreadCount(1)
+        self._task_errors: List[Tuple[int, str]] = []
+        self._cancelled_during_run = False
+        self._active_tasks: List[HostUploadRunnable] = []
+
+        # Ensure pool size tracks available hosts
+        max_threads = max(1, min(5, len(self.hosts) or 1))
+        self._qt_pool.setMaxThreadCount(max_threads)
 
 
         # Handlers (لمستضيفين لا يحتاجون مسار ملف عند الإنشاء)
@@ -177,38 +220,79 @@ class UploadWorker(QThread):
                 break
             time.sleep(0.1)
 
-    def _ensure_thread_pool(self) -> ThreadPoolExecutor:
-        with self._executor_lock:
-            if self.thread_pool is None:
-                self.thread_pool = ThreadPoolExecutor(max_workers=5)
-            return self.thread_pool
+    # ------------------------------------------------------------------
+    # Thread-pool coordination helpers
+    # ------------------------------------------------------------------
+    def _reset_batch_state(self) -> None:
+        with self._state_lock:
+            self._cancelled_during_run = False
+            self._task_errors = []
 
-    def _shutdown_thread_pool(self, wait: bool = True):
-        pool: Optional[ThreadPoolExecutor] = None
-        with self._executor_lock:
-            if self.thread_pool is not None:
-                pool = self.thread_pool
-                self.thread_pool = None
-        if pool is not None:
-            try:
-                pool.shutdown(wait=wait)
-            except Exception:
-                logging.exception("Failed to shutdown upload worker thread pool")
+    def _register_task_exception(self, host_idx: int, message: str) -> None:
+        with self._state_lock:
+            self._task_errors.append((host_idx, message))
+            if "cancelled" in message.lower():
+                self._cancelled_during_run = True
 
-    def close(self):
-        self._shutdown_thread_pool(wait=False)
-        thread = self._retry_thread
-        if thread and thread.is_alive() and thread is not current_thread():
-            thread.join(timeout=1.0)
+    def _consume_batch_state(self) -> Tuple[bool, List[Tuple[int, str]]]:
+        with self._state_lock:
+            cancelled = self._cancelled_during_run
+            errors = list(self._task_errors)
+        return cancelled, errors
 
-    def __del__(self):
-        try:
-            self.close()
-        except Exception:
-            pass
+    def _configure_pool_for_hosts(self, host_count: int) -> None:
+        threads = max(1, min(5, host_count or 1))
+        self._qt_pool.setMaxThreadCount(threads)
+
+    def _run_host_batch(self, host_indices: List[int]) -> Tuple[bool, List[Tuple[int, str]]]:
+        if not host_indices:
+            return False, []
+
+        self._reset_batch_state()
+        self._configure_pool_for_hosts(len(host_indices))
+
+        result_queue: "queue.Queue[Tuple[str, int, Optional[str]]]" = queue.Queue()
+
+        with self._pool_lock:
+            self._active_tasks = []
+            for host_idx in host_indices:
+                runnable = HostUploadRunnable(self, host_idx, result_queue)
+                self._active_tasks.append(runnable)
+                self._qt_pool.start(runnable)
+
+        pending = len(host_indices)
+        while pending:
+            outcome, host_idx, payload = result_queue.get()
+            if outcome == "success":
+                self.upload_results[host_idx]["status"] = "success"
+            elif outcome == "failed":
+                self.upload_results[host_idx]["status"] = "failed"
+            elif outcome == "error":
+                self.upload_results[host_idx]["status"] = "failed"
+                # Message already registered by the runnable, preserve for logging
+                if payload:
+                    logging.debug(
+                        "UploadWorker: host %s reported error: %s",
+                        self.hosts[host_idx] if host_idx < len(self.hosts) else host_idx,
+                        payload,
+                    )
+            pending -= 1
+
+        self._qt_pool.waitForDone()
+        with self._pool_lock:
+            self._active_tasks = []
+
+        return self._consume_batch_state()
+
+    def _raise_if_batch_failed(self, cancelled: bool, errors: List[Tuple[int, str]]):
+        if cancelled:
+            raise Exception("Upload cancelled by user")
+        if errors:
+            # Surface the first error; detailed logging already captured
+            msg = errors[0][1] if errors[0][1] else "Upload batch failed"
+            raise Exception(msg)
 
     def run(self):
-        pool = self._ensure_thread_pool()
         try:
             if not self.files:
                 msg = "لا توجد ملفات للرفع."
@@ -220,24 +304,9 @@ class UploadWorker(QThread):
 
             # إطلاق رفع كل مستضيف بالتوازي بدون إنشاء صف "Batch" في جدول الحالة.
             # سيتم تحديث جدول الحالة فقط لكل مستضيف على حدة أثناء رفع الملفات.
-
-            # إطلاق رفع كل مستضيف بالتوازي
-            futures = {}
-            for idx, _ in enumerate(self.hosts):
-                self._check_control()
-                futures[pool.submit(self._upload_host_all, idx)] = idx
-
-            # جمع النتائج
-            completed = 0
-            total = len(futures)
-            for fut in as_completed(futures):
-                self._check_control()
-                idx = futures[fut]
-                if fut.result() == "success":
-                    self.upload_results[idx]["status"] = "success"
-                else:
-                    self.upload_results[idx]["status"] = "failed"
-                completed += 1
+            host_indices = list(range(len(self.hosts)))
+            cancelled, errors = self._run_host_batch(host_indices)
+            self._raise_if_batch_failed(cancelled, errors)
 
 
             # تحضير القاموس النهائي مع Keeplinks
@@ -286,8 +355,6 @@ class UploadWorker(QThread):
                     self.host_progress.emit(self.row, idx, 0, f"Error: {msg}", 0, 0)
                 self.upload_error.emit(self.row, msg)
                 self.upload_complete.emit(self.row, {"error": msg})
-        finally:
-            self._shutdown_thread_pool(wait=True)
 
     def _upload_host_all(self, host_idx: int) -> str:
         urls = []
@@ -469,27 +536,13 @@ class UploadWorker(QThread):
         Signal to retry failed uploads - starts background retry process.
         """
         self.retry_row = row
-        if self.isRunning():
-            logging.warning("Retry requested while upload worker is still running; ignoring request")
-            return
-        # Prevent concurrent retry attempts
-        if self._retry_thread and self._retry_thread.is_alive():
-            logging.warning("Retry already in progress; ignoring new retry request")
-            return
-
-        # Start retry in background thread to avoid UI blocking
-        self._retry_thread = Thread(
-            target=self._retry_in_background,
-            name=f"UploadRetry-{self.thread_id}",
-            daemon=True,
-        )
-        self._retry_thread.start()
+        # Start retry in background Qt thread pool to avoid UI blocking
+        self._control_pool.start(RetryRunnable(self))
 
     def _retry_in_background(self):
         """
         Retry only the hosts that previously failed - runs in background thread.
         """
-        pool = self._ensure_thread_pool()
         try:
             self._reset_control_for_retry()
             to_retry = [
@@ -516,18 +569,9 @@ class UploadWorker(QThread):
                 self.progress_update.emit(status)
                 self.host_progress.emit(self.retry_row, i, 0, f"Retrying {self.hosts[i]}", 0, 0)
 
-            futures = {}
-            for i in to_retry:
-                self._check_control()
-                futures[pool.submit(self._upload_host_all, i)] = i
-
-            for fut in as_completed(futures):
-                self._check_control()
-                i = futures[fut]
-                if fut.result() == "success":
-                    self.upload_results[i]["status"] = "success"
-                else:
-                    self.upload_results[i]["status"] = "failed"
+            self._check_control()
+            cancelled, errors = self._run_host_batch(to_retry)
+            self._raise_if_batch_failed(cancelled, errors)
 
             final = self._prepare_final_urls()
 
@@ -562,6 +606,3 @@ class UploadWorker(QThread):
         except Exception as e:
             logging.error("retry_failed_uploads crashed: %s", e, exc_info=True)
             self.upload_complete.emit(self.retry_row, {"error": str(e)})
-        finally:
-            self._shutdown_thread_pool(wait=True)
-            self._retry_thread = None

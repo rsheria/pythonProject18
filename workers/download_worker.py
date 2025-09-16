@@ -1,3 +1,4 @@
+import copy
 import inspect
 import logging
 import os
@@ -17,7 +18,7 @@ except ImportError:
     import jd_client
 
 import requests
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtCore import QThread, Qt, pyqtSignal
 
 from core.user_manager import get_user_manager
 from downloaders.jdownloader import JDownloaderDownloader
@@ -124,12 +125,14 @@ class DownloadWorker(QThread):
     download_success = pyqtSignal(int)
     download_error = pyqtSignal(int, str)
     progress_update = pyqtSignal(object)  # OperationStatus
+    worker_registration_requested = pyqtSignal(object)
 
     def __init__(self, bot, file_processor, selected_rows, gui, cancel_event=None):
         super().__init__()
         self.bot = bot
         self.file_processor = file_processor
-        self.selected_rows = selected_rows
+        # Snapshot selected rows so we have a deterministic order and plain ints
+        self.selected_rows = sorted(set(selected_rows or []))
         self.gui = gui
 
         self.is_cancelled = False
@@ -152,6 +155,27 @@ class DownloadWorker(QThread):
 
         # Get user manager for reading priority settings
         self.user_manager = get_user_manager()
+
+        # Ensure worker registration happens on the GUI thread
+        if self.gui is not None and hasattr(self.gui, "register_worker"):
+            try:
+                self.worker_registration_requested.connect(
+                    self.gui.register_worker, Qt.QueuedConnection
+                )
+            except Exception as connect_error:
+                logging.warning(
+                    "Failed to connect worker_registration_requested signal: %s",
+                    connect_error,
+                )
+
+        # Capture the selected thread metadata while we are on the GUI thread
+        self._selected_thread_jobs = []
+        try:
+            self._selected_thread_jobs = self._snapshot_selected_thread_jobs()
+        except Exception as snapshot_error:
+            logging.warning(
+                "Failed to snapshot selected thread metadata: %s", snapshot_error
+            )
 
         # 🆔 Session tracking to prevent cross-talk between download sessions
         import time
@@ -449,33 +473,35 @@ class DownloadWorker(QThread):
 
     def initialize_download_queue(self):
         logging.debug("Selected rows: %s", self.selected_rows)
-        logging.debug("Available categories: %s", list(self.gui.process_threads.keys()))
+        process_threads = getattr(self.gui, "process_threads", {}) or {}
+        logging.debug("Available categories: %s", list(process_threads.keys()))
 
-        for row in self.selected_rows:
-            title_item = self.gui.process_threads_table.item(row, 0)
-            cat_item = self.gui.process_threads_table.item(row, 1)
-            id_item = self.gui.process_threads_table.item(row, 2)
-            if not title_item or not cat_item or not id_item:
-                logging.warning("Row %s missing table items, skipping", row)
+        if not self._selected_thread_jobs:
+            logging.warning("No selected thread metadata captured; download queue remains empty")
+            return
+
+        for job_meta in self._selected_thread_jobs:
+            row = job_meta.get("row")
+            thread_title = job_meta.get("thread_title")
+            category_name = job_meta.get("category_name")
+            thread_id = job_meta.get("thread_id")
+
+            if not thread_id:
+                logging.warning("Empty thread_id at row %s, skipping", row)
                 continue
 
-            thread_title = title_item.text()
-            category_name = cat_item.text()
-            thread_id = id_item.text()
             logging.debug(
-                "Row %d => title=%r, category=%r, id=%r",
+                "Row %s => title=%r, category=%r, id=%r",
                 row,
                 thread_title,
                 category_name,
                 thread_id,
             )
 
-            if not thread_id:
-                logging.warning("Empty thread_id at row %d, skipping", row)
-                continue
-
-            data = self.gui.process_threads.get(category_name, {})
-            links_dict = data.get(thread_title, {}).get("links", {})
+            links_dict = job_meta.get("links") or {}
+            if not links_dict:
+                data = process_threads.get(category_name, {})
+                links_dict = copy.deepcopy((data.get(thread_title, {}) or {}).get("links", {}))
             logging.debug("links for '%s': %s", thread_title, links_dict)
 
             # Smart priority system from user settings
@@ -483,13 +509,11 @@ class DownloadWorker(QThread):
 
             # Organize links by priority
             organized_links = {}
-            for host, lst in links_dict.items():
+            for host, lst in (links_dict or {}).items():
                 h_lower = host.lower()
                 for priority_host in priority_hosts:
                     if priority_host in h_lower:
-                        if priority_host not in organized_links:
-                            organized_links[priority_host] = []
-                        organized_links[priority_host].extend(lst)
+                        organized_links.setdefault(priority_host, []).extend(lst)
                         break
 
             # Select primary links based on priority
@@ -542,6 +566,50 @@ class DownloadWorker(QThread):
                 }
                 logging.debug("Queueing link: %s", link)
                 self.download_queue.put(item)
+
+    def _snapshot_selected_thread_jobs(self):
+        """Capture selected thread metadata while on the GUI thread."""
+        jobs = []
+        if not self.gui:
+            return jobs
+
+        table = getattr(self.gui, "process_threads_table", None)
+        if table is None:
+            return jobs
+
+        process_threads = getattr(self.gui, "process_threads", {}) or {}
+
+        for row in self.selected_rows:
+            try:
+                title_item = table.item(row, 0)
+                cat_item = table.item(row, 1)
+                id_item = table.item(row, 2)
+                if not title_item or not cat_item or not id_item:
+                    continue
+
+                thread_title = title_item.text()
+                category_name = cat_item.text()
+                thread_id = id_item.text()
+                thread_data = process_threads.get(category_name, {}) or {}
+                links = copy.deepcopy((thread_data.get(thread_title, {}) or {}).get("links", {}))
+
+                jobs.append(
+                    {
+                        "row": row,
+                        "thread_title": thread_title,
+                        "category_name": category_name,
+                        "thread_id": thread_id,
+                        "links": links,
+                    }
+                )
+            except Exception as snapshot_error:
+                logging.debug(
+                    "Failed to snapshot row %s for download worker: %s",
+                    row,
+                    snapshot_error,
+                )
+
+        return jobs
 
     def start_link_download(self, info):
         link_id = info["link_id"]
@@ -964,8 +1032,8 @@ class DownloadWorker(QThread):
                     package_label=package_label,
                 )
 
-                # تسجيل الـ worker
-                self.gui.register_worker(upload_worker)
+                # تسجيل الـ worker بصورة آمنة على الثريد الرئيسي
+                self.worker_registration_requested.emit(upload_worker)
 
                 # Give Qt event loop time to process signal connections
                 from PyQt5.QtCore import QTimer

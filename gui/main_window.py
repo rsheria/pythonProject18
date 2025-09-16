@@ -509,6 +509,7 @@ class ForumBotGUI(QMainWindow):
     # Define Qt signals for thread-safe UI updates
     thread_status_updated = pyqtSignal()
     user_logged_in = pyqtSignal(str)
+    worker_registration_requested = pyqtSignal(object)
 
     # Define supported file extensions
     ARCHIVE_EXTENSIONS = ('.rar', '.zip')
@@ -521,6 +522,9 @@ class ForumBotGUI(QMainWindow):
 
     def __init__(self, config):
         super().__init__()
+        self.worker_registration_requested.connect(
+            self._register_worker_on_gui_thread, Qt.QueuedConnection
+        )
         self.config = config
         self.user_manager = get_user_manager()
         self.log = logging.getLogger(__name__)
@@ -823,7 +827,16 @@ class ForumBotGUI(QMainWindow):
         else:
             logging.error(f"❌ NO HANDLER FOUND! status_widget class: {self.status_widget.__class__.__name__}")
 
+    @pyqtSlot(object)
     def register_worker(self, worker):
+        """Thread-safe entry point for registering a worker with the GUI."""
+        if QThread.currentThread() != self.thread():
+            self.worker_registration_requested.emit(worker)
+            return
+
+        self._register_worker_on_gui_thread(worker)
+
+    def _register_worker_on_gui_thread(self, worker):
         """Register a worker with the orchestrator and status widget.
 
         All progress signals from workers are forwarded to the queue

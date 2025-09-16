@@ -1,16 +1,12 @@
-from types import SimpleNamespace, ModuleType
+from types import ModuleType, SimpleNamespace
 import importlib.util
 import pathlib
 import sys
 
-# Stub minimal PyQt5.QtCore
-qtcore = SimpleNamespace(
-    QThread=object,
-    pyqtSignal=lambda *a, **kw: (lambda *a, **kw: None),
-    pyqtSlot=lambda *a, **kw: (lambda f: f),
-)
-sys.modules.setdefault("PyQt5", ModuleType("PyQt5"))
-sys.modules["PyQt5.QtCore"] = qtcore
+from tests.qt_stubs import install_qt_stubs
+
+# Install Qt stubs required by the upload worker
+install_qt_stubs()
 
 # Stub external dependencies used by UploadWorker
 stubs = {
@@ -18,6 +14,7 @@ stubs = {
     "uploaders.katfile_upload_handler": "KatfileUploadHandler",
     "uploaders.nitroflare_upload_handler": "NitroflareUploadHandler",
     "uploaders.rapidgator_upload_handler": "RapidgatorUploadHandler",
+    "uploaders.uploady_upload_handler": "UploadyUploadHandler",
 }
 for mod_name, cls_name in stubs.items():
     mod = ModuleType(mod_name)
@@ -39,7 +36,7 @@ UploadWorker = upload_worker.UploadWorker
 def test_upload_worker_separates_backup_host(tmp_path, monkeypatch):
     dummy = tmp_path / "sample.mp3"
     dummy.write_bytes(b"data")
-    bot = SimpleNamespace(config={})
+    bot = SimpleNamespace(config={}, send_to_keeplinks=lambda urls: "keeplink")
     worker = UploadWorker(bot, row=0, folder_path=str(tmp_path), thread_id="t1", upload_hosts=["rapidgator", "rapidgator-backup"], files=[str(dummy)])
 
     def fake_upload_single(self, host_idx, file_path):
@@ -50,6 +47,9 @@ def test_upload_worker_separates_backup_host(tmp_path, monkeypatch):
     worker._upload_host_all(0)
     worker._upload_host_all(1)
 
-    assert "rapidgator.net" in worker._host_results
-    assert "rapidgator-backup" in worker._host_results
-    assert worker._host_results["rapidgator-backup"].get("is_backup") is True
+    assert worker.upload_results[0]["urls"] == ["https://rapidgator.net/main.rar"]
+    assert worker.upload_results[1]["urls"] == ["https://rapidgator.net/backup.rar"]
+
+    final = worker._prepare_final_urls()
+    assert final["rapidgator"] == ["https://rapidgator.net/main.rar"]
+    assert final["rapidgator-backup"] == ["https://rapidgator.net/backup.rar"]

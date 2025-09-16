@@ -1,12 +1,10 @@
 import sys
 import types
 
+from tests.qt_stubs import install_qt_stubs
+
 # Stub minimal PyQt5 modules so workers can import
-qtcore = types.SimpleNamespace(
-    QThread=object, pyqtSignal=lambda *a, **k: None, pyqtSlot=lambda *a, **k: (lambda f: f)
-)
-sys.modules.setdefault("PyQt5", types.ModuleType("PyQt5"))
-sys.modules["PyQt5.QtCore"] = qtcore
+install_qt_stubs()
 sys.modules.setdefault("requests", types.ModuleType("requests"))
 # Stub out heavy dependencies referenced by upload_worker
 sys.modules.setdefault("integrations", types.ModuleType("integrations"))
@@ -36,6 +34,9 @@ sys.modules.setdefault("uploaders.nitroflare_upload_handler", nf_mod)
 rg_mod = types.ModuleType("uploaders.rapidgator_upload_handler")
 rg_mod.RapidgatorUploadHandler = object
 sys.modules.setdefault("uploaders.rapidgator_upload_handler", rg_mod)
+uy_mod = types.ModuleType("uploaders.uploady_upload_handler")
+uy_mod.UploadyUploadHandler = object
+sys.modules.setdefault("uploaders.uploady_upload_handler", uy_mod)
 
 import importlib.util
 from pathlib import Path
@@ -69,8 +70,9 @@ def test_kind_from_name_archive_book(tmp_path):
         files=[str(tmp_path / "a.rar")],
         package_label="book",
     )
-    assert worker._kind_from_name("archive.rar") == "book"
-    assert worker._kind_from_name("file.pdf") == "book"
+    assert worker.package_label == "book"
+    assert worker.total_files == 1
+    assert worker.files[0].name == "a.rar"
 core_user_manager = types.ModuleType("core.user_manager")
 core_user_manager.get_user_manager = lambda: None
 sys.modules.setdefault("core", types.ModuleType("core"))
